@@ -93,7 +93,13 @@ Not checked yet: that the RSN element in message 3 equals the one in the beacon
 Networks that are WPA3-only, enterprise, WEP/WPA1, or require management frame
 protection are refused with a message.
 
-**Data path and network interface (built, not yet run on hardware).**
+**M3 reached: data path and network interface work on hardware.** On the test
+machine the kext loaded as a network controller, joined a WPA2 network on
+5220 MHz, macOS got a DHCP lease on the new `en4` and pinged the router (5/5,
+1-4 ms), and the kext unloaded cleanly. macOS does not create a network service
+for the new port by itself: `sudo ifconfig en4 up; sudo ipconfig set en4 DHCP`
+(or adding the port in System Settings once) starts DHCP.
+
 `src/compat_rtw89/rtw89_data.c` converts between Ethernet and 802.11 data
 frames, following mac80211's tx.c and rx.c. Transmit: QoS header with the TID
 taken from the DSCP field, per-TID sequence numbers, SNAP encapsulation, the
