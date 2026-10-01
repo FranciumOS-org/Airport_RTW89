@@ -29,6 +29,7 @@ static inline void led_set_brightness(struct led_classdev *led, enum led_brightn
     if (led->brightness_set) led->brightness_set(led, b);
 }
 
+#ifndef RTW89_MACOS /* rtw89: the upstream net/mac80211.h provides these */
 /* TPT (throughput) LED trigger — stub for non-LED builds */
 struct ieee80211_tpt_blink {
     int throughput;
@@ -45,6 +46,7 @@ ieee80211_create_tpt_led_trigger(struct ieee80211_hw *hw, unsigned int flags,
 {
     return NULL;
 }
+#endif /* !RTW89_MACOS */
 
 #define LED_TRIGGER_NOOP_NAME "none"
 static inline void led_trigger_event(void *t, enum led_brightness b) {}

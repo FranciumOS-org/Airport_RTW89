@@ -1,0 +1,54 @@
+# Kernel imports
+
+Symbols `AirPort_RTW89.o` leaves for the kernel to resolve (`make link`): **50**, unresolved: **0**.
+
+- `IODelay`
+- `IOFree`
+- `IOLockAlloc`
+- `IOLockFree`
+- `IOLockLock`
+- `IOLockSleep`
+- `IOLockUnlock`
+- `IOLockWakeup`
+- `IOLog`
+- `IOMalloc`
+- `IOMallocZero`
+- `IORecursiveLockAlloc`
+- `IORecursiveLockFree`
+- `IORecursiveLockLock`
+- `IORecursiveLockUnlock`
+- `IOSimpleLockAlloc`
+- `IOSimpleLockFree`
+- `IOSimpleLockLock`
+- `IOSimpleLockUnlock`
+- `IOSleep`
+- `PE_parse_boot_argn`
+- `__memcpy_chk`
+- `__memmove_chk`
+- `__strlcpy_chk`
+- `absolutetime_to_nanoseconds`
+- `bcopy`
+- `bzero`
+- `clock_interval_to_deadline`
+- `current_thread`
+- `inflate`
+- `inflateEnd`
+- `inflateInit_`
+- `kernel_thread_start`
+- `mach_absolute_time`
+- `memcmp`
+- `memcpy`
+- `memset`
+- `read_random`
+- `scnprintf`
+- `snprintf`
+- `strcmp`
+- `strlen`
+- `thread_call_allocate`
+- `thread_call_cancel`
+- `thread_call_enter`
+- `thread_call_enter_delayed`
+- `thread_call_free`
+- `thread_deallocate`
+- `thread_terminate`
+- `vsnprintf`

@@ -25,135 +25,39 @@ u32 rtw89_compat_random_u32(void)
     return v;
 }
 
+void rtw89_compat_random_bytes(void *buf, size_t len)
+{
+    read_random(buf, (u_int)len);
+}
+
 /* ------------------------------------------------------------------ */
-/*  wiphy_work                                                          */
+/*  sk_buff                                                             */
 /* ------------------------------------------------------------------ */
 
-static void rtw89_compat_wiphy_runner(struct work_struct *w)
+int pskb_expand_head(struct sk_buff *skb, int nhead, int ntail, gfp_t gfp)
 {
-    struct wiphy *wiphy = container_of(w, struct wiphy, wiphy_work_runner);
-    struct wiphy_work *work;
-    unsigned long flags;
+    size_t used = (size_t)(skb->tail - skb->head);
+    size_t size = (size_t)(skb->end - skb->head) + nhead + ntail;
+    size_t data_off = (size_t)(skb->data - skb->head);
+    u8 *head;
 
-    wiphy_lock(wiphy);
+    if (nhead < 0 || ntail < 0)
+        return -EINVAL;
 
-    spin_lock_irqsave(&wiphy->wiphy_work_lock, flags);
-    if (list_empty(&wiphy->wiphy_work_list)) {
-        spin_unlock_irqrestore(&wiphy->wiphy_work_lock, flags);
-        wiphy_unlock(wiphy);
-        return;
-    }
-    work = list_first_entry(&wiphy->wiphy_work_list, struct wiphy_work, entry);
-    list_del_init(&work->entry);
-    /* One work per pass, like cfg80211, so other lock waiters get a turn. */
-    if (!list_empty(&wiphy->wiphy_work_list))
-        schedule_work(&wiphy->wiphy_work_runner);
-    spin_unlock_irqrestore(&wiphy->wiphy_work_lock, flags);
+    head = kmalloc(size, gfp);
+    if (!head)
+        return -ENOMEM;
 
-    work->func(wiphy, work);
+    memcpy(head + nhead, skb->head, used);
+    kfree(skb->head);
 
-    wiphy_unlock(wiphy);
-}
-
-void rtw89_compat_wiphy_init(struct wiphy *wiphy)
-{
-    mutex_init(&wiphy->mtx);
-    spin_lock_init(&wiphy->wiphy_work_lock);
-    INIT_LIST_HEAD(&wiphy->wiphy_work_list);
-    INIT_WORK(&wiphy->wiphy_work_runner, rtw89_compat_wiphy_runner);
-}
-
-void rtw89_compat_wiphy_exit(struct wiphy *wiphy)
-{
-    unsigned long flags;
-
-    cancel_work_sync(&wiphy->wiphy_work_runner);
-    spin_lock_irqsave(&wiphy->wiphy_work_lock, flags);
-    while (!list_empty(&wiphy->wiphy_work_list))
-        list_del_init(wiphy->wiphy_work_list.next);
-    spin_unlock_irqrestore(&wiphy->wiphy_work_lock, flags);
-    mutex_destroy(&wiphy->mtx);
-}
-
-void wiphy_work_queue(struct wiphy *wiphy, struct wiphy_work *work)
-{
-    unsigned long flags;
-
-    spin_lock_irqsave(&wiphy->wiphy_work_lock, flags);
-    if (list_empty(&work->entry))
-        list_add_tail(&work->entry, &wiphy->wiphy_work_list);
-    spin_unlock_irqrestore(&wiphy->wiphy_work_lock, flags);
-
-    schedule_work(&wiphy->wiphy_work_runner);
-}
-
-/* Caller holds the wiphy mutex, so @work is not running; just unlink it. */
-void wiphy_work_cancel(struct wiphy *wiphy, struct wiphy_work *work)
-{
-    unsigned long flags;
-
-    spin_lock_irqsave(&wiphy->wiphy_work_lock, flags);
-    if (!list_empty(&work->entry))
-        list_del_init(&work->entry);
-    spin_unlock_irqrestore(&wiphy->wiphy_work_lock, flags);
-}
-
-/* Caller holds the wiphy mutex: run @work now if it is pending. */
-void wiphy_work_flush(struct wiphy *wiphy, struct wiphy_work *work)
-{
-    unsigned long flags;
-    bool run = false;
-
-    spin_lock_irqsave(&wiphy->wiphy_work_lock, flags);
-    if (!list_empty(&work->entry)) {
-        list_del_init(&work->entry);
-        run = true;
-    }
-    spin_unlock_irqrestore(&wiphy->wiphy_work_lock, flags);
-
-    if (run)
-        work->func(wiphy, work);
-}
-
-/* Timer stage of a delayed wiphy work: hand it to the runner. Never takes the mutex. */
-void rtw89_compat_wiphy_delayed_work_timer(struct work_struct *w)
-{
-    struct delayed_work *dw = container_of(w, struct delayed_work, work);
-    struct wiphy_delayed_work *dwork = container_of(dw, struct wiphy_delayed_work, dwork);
-
-    wiphy_work_queue(dwork->wiphy, &dwork->work);
-}
-
-void wiphy_delayed_work_queue(struct wiphy *wiphy, struct wiphy_delayed_work *dwork,
-                              unsigned long delay)
-{
-    if (!delay) {
-        cancel_delayed_work(&dwork->dwork);
-        wiphy_work_queue(wiphy, &dwork->work);
-        return;
-    }
-    dwork->wiphy = wiphy;
-    /* Re-arm semantics (Linux mod_delayed_work on system_unbound_wq). Must be the
-     * system queue: queue_delayed_work(NULL, ...) is a silent no-op in the shim. */
-    cancel_delayed_work(&dwork->dwork);
-    schedule_delayed_work(&dwork->dwork, delay);
-}
-
-/*
- * The timer stage only queues (no mutex), so waiting for it here while holding
- * the wiphy mutex is safe.
- */
-void wiphy_delayed_work_cancel(struct wiphy *wiphy, struct wiphy_delayed_work *dwork)
-{
-    cancel_delayed_work_sync(&dwork->dwork);
-    wiphy_work_cancel(wiphy, &dwork->work);
-}
-
-void wiphy_delayed_work_flush(struct wiphy *wiphy, struct wiphy_delayed_work *dwork)
-{
-    bool was_armed = cancel_delayed_work_sync(&dwork->dwork);
-
-    if (was_armed)
-        wiphy_work_queue(wiphy, &dwork->work);
-    wiphy_work_flush(wiphy, &dwork->work);
+    skb->head = head;
+    skb->data = head + nhead + data_off;
+    skb->tail = skb->data + skb->len;
+    skb->end = head + size;
+    /* header offsets are relative to head */
+    skb->network_header += nhead;
+    skb->transport_header += nhead;
+    skb->mac_header += nhead;
+    return 0;
 }

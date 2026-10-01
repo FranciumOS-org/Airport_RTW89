@@ -69,6 +69,8 @@ static inline int ether_addr_equal_masked(const u8 *a, const u8 *b,
     return 1;
 }
 
+#ifndef RTW89_MACOS /* rtw89: static inline in the upstream net/cfg80211.h */
 void get_random_mask_addr(u8 *, const u8 *, const u8 *);
+#endif
 
 #endif /* _RTW88_COMPAT_ETHERDEVICE_H */

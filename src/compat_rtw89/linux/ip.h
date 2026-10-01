@@ -26,10 +26,6 @@ struct iphdr {
     __be32 daddr;
 } __attribute__((packed));
 
-static inline unsigned char *skb_network_header(const struct sk_buff *skb)
-{
-    return skb->head + skb->network_header;
-}
 static inline struct iphdr *ip_hdr(const struct sk_buff *skb)
 {
     return (struct iphdr *)skb_network_header(skb);

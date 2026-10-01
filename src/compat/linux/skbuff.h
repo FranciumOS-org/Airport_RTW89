@@ -171,9 +171,9 @@ static inline void consume_skb(struct sk_buff *skb)
 }
 
 /* Data manipulation */
-static inline u8 *skb_put(struct sk_buff *skb, u32 len)
+static inline void *skb_put(struct sk_buff *skb, u32 len)
 {
-    u8 *tmp = skb->tail;
+    void *tmp = skb->tail;
     skb->tail += len;
     skb->len  += len;
     return tmp;
@@ -192,14 +192,14 @@ static inline void skb_put_data(struct sk_buff *skb, const void *data, u32 len)
     memcpy(tmp, data, len);
 }
 
-static inline u8 *skb_push(struct sk_buff *skb, u32 len)
+static inline void *skb_push(struct sk_buff *skb, u32 len)
 {
     skb->data -= len;
     skb->len  += len;
     return skb->data;
 }
 
-static inline u8 *skb_pull(struct sk_buff *skb, u32 len)
+static inline void *skb_pull(struct sk_buff *skb, u32 len)
 {
     skb->data += len;
     skb->len  -= len;
