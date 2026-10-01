@@ -7,8 +7,10 @@
  * its failure, every error unwind, compat teardown) where a bad pointer is a
  * crash report instead of a kernel panic.
  *
- *   hosttest            registers read back what was written (start at 0)
- *   hosttest ff         every register read returns all-ones (device gone)
+ *   hosttest 00         registers read back what was written (start at 0)
+ *   hosttest ff         registers start as all-ones (device gone)
+ *   hosttest 00 ok      probe must succeed: for the hosttest_fakechip binary,
+ *                       where the hardware steps are replaced (fakechip_core.c)
  */
 #include <stdio.h>
 #include <stdlib.h>
@@ -79,6 +81,8 @@ int main(int argc, char **argv)
     struct rtw89_glue_info info;
     void *mmio;
     int ret, round, rounds = 2;
+    int expect_ok = argc > 2 && !strcmp(argv[2], "ok");
+    int failed = 0;
 
     rtw88_kfree_min_addr = 0;
 
@@ -111,9 +115,15 @@ int main(int argc, char **argv)
                round, ret, dma_live, dma_total);
 
         if (!ret && rtw89_glue_get_info(&info))
-            printf("== MAC %02x:%02x:%02x:%02x:%02x:%02x fw %s\n",
+            printf("== MAC %02x:%02x:%02x:%02x:%02x:%02x fw %s, cut %c, %uT%uR\n",
                    info.mac[0], info.mac[1], info.mac[2], info.mac[3],
-                   info.mac[4], info.mac[5], info.fw_version);
+                   info.mac[4], info.mac[5], info.fw_version, 'A' + info.chip_cut,
+                   info.tx_streams, info.rx_streams);
+        if (expect_ok && ret)
+            failed = 1;
+
+        /* Give queued works (regulatory hint, firmware load) time to run. */
+        usleep(300 * 1000);
 
         rtw89_glue_interrupt();
         rtw89_glue_remove();
@@ -123,5 +133,7 @@ int main(int argc, char **argv)
     /* Let detached workqueue threads finish exiting before the process does. */
     usleep(200 * 1000);
     printf("== done\n");
+    if (failed)
+        return 4;
     return dma_live ? 2 : 0;
 }

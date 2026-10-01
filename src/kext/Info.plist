@@ -1,0 +1,57 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+	<key>CFBundleDevelopmentRegion</key>
+	<string>en</string>
+	<key>CFBundleExecutable</key>
+	<string>AirPort_RTW89</string>
+	<key>CFBundleIdentifier</key>
+	<string>com.rtw89.driver</string>
+	<key>CFBundleInfoDictionaryVersion</key>
+	<string>6.0</string>
+	<key>CFBundleName</key>
+	<string>AirPort_RTW89</string>
+	<key>CFBundlePackageType</key>
+	<string>KEXT</string>
+	<key>CFBundleShortVersionString</key>
+	<string>0.1.0</string>
+	<key>CFBundleSupportedPlatforms</key>
+	<array>
+		<string>MacOSX</string>
+	</array>
+	<key>CFBundleVersion</key>
+	<string>0.1.0</string>
+	<key>IOKitPersonalities</key>
+	<dict>
+		<key>RTL8852BE</key>
+		<dict>
+			<key>CFBundleIdentifier</key>
+			<string>com.rtw89.driver</string>
+			<key>IOClass</key>
+			<string>AirPort_RTW89</string>
+			<key>IOMatchCategory</key>
+			<string>AirPort_RTW89</string>
+			<key>IOPCIMatch</key>
+			<string>0xb85210ec 0xb85b10ec</string>
+			<key>IOProviderClass</key>
+			<string>IOPCIDevice</string>
+		</dict>
+	</dict>
+	<key>LSMinimumSystemVersion</key>
+	<string>13.0</string>
+	<key>OSBundleLibraries</key>
+	<dict>
+		<key>com.apple.iokit.IOPCIFamily</key>
+		<string>2.9</string>
+		<key>com.apple.kpi.bsd</key>
+		<string>16.7</string>
+		<key>com.apple.kpi.iokit</key>
+		<string>16.7</string>
+		<key>com.apple.kpi.libkern</key>
+		<string>16.7</string>
+		<key>com.apple.kpi.mach</key>
+		<string>16.7</string>
+	</dict>
+</dict>
+</plist>

@@ -31,6 +31,11 @@ IOSkywalkFamily block, AMFIPass) is only needed from M2.
 
 - Build: `make -k compile && make errors` → read docs/compile-status.md, fix shims in
   batches grouped by category, repeat. Then `make link`: it must report 0 unresolved.
+- `make kext` builds `build/out/AirPort_RTW89.kext` and runs `make hosttest` first:
+  the same objects in userspace against a dead PCI device, a fake-chip variant that
+  completes probe, and a self-test of the compat/mac80211 code. It has caught bugs
+  that would have been panics; add to `tools/hosttest/` when adding compat code, and
+  never load a kext whose hosttest fails.
 - Never edit `third_party/rtw89/` or `third_party/linux-include/` (vendored upstream,
   see their UPSTREAM.md). Fix things in `src/compat_rtw89/` (new) or `src/compat/`
   (inherited; log every change in docs/COMPAT-CHANGES.md).
@@ -51,8 +56,10 @@ IOSkywalkFamily block, AMFIPass) is only needed from M2.
 - **Always ask the user before loading or unloading a kext.** A bad load panics the
   machine and ends this session.
 - The user types the sudo password; never ask for it or try to store it.
-- Load manually from a running system (`sudo kmutil load -p build/out/...kext`) and
-  never install into the EFI or /Library/Extensions until M2 is stable.
+- Load manually from a running system and never install into the EFI or
+  /Library/Extensions until M2 is stable. The user runs `sudo tools/load.sh` (stages a
+  root-owned copy, loads it, prints the log) and `sudo tools/unload.sh`; Claude never
+  runs these.
 - Before any load, commit or stash the work so a panic loses nothing.
 - After a reboot: check `/Library/Logs/DiagnosticReports/*.panic` and
   `log show --last boot --predicate 'sender == "AirPort_RTW89"'`.

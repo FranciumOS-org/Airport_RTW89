@@ -6,8 +6,10 @@
 #   make errors                  # group errors into docs/compile-status.md
 #   make link                    # partial-link all objects, check what is left
 #                                # for the kernel (docs/kernel-imports.md)
+#   make hosttest                # run probe()/remove() and the self-test in userspace
+#   make kext                    # build/out/AirPort_RTW89.kext (runs hosttest first)
 #
-# The kext bundle target arrives with M1 (see docs/PORTING.md).
+# Loading the kext is never done from here; see CLAUDE.md.
 
 HOST_CPUS    := $(shell sysctl -n hw.logicalcpu 2>/dev/null || echo 4)
 MAKEFLAGS    += -j$(HOST_CPUS)
@@ -28,7 +30,13 @@ MINOS        := -mmacosx-version-min=13.0
 CC           := xcrun clang
 CXX          := xcrun clang++
 
+# Optimise like the Linux build this code is written for: -O0 frames are far
+# larger and the kernel stack is 16 KB. The -f flags are the dialect Linux
+# compiles drivers in (type punning, wrapping arithmetic, no "this pointer was
+# dereferenced, so it cannot be NULL" deductions).
 KEXT_FLAGS   := -fno-exceptions -fno-stack-protector -mkernel \
+                -O2 -fno-strict-aliasing -fwrapv -fno-delete-null-pointer-checks \
+                -fno-omit-frame-pointer -Wframe-larger-than=1024 \
                 -MMD -MP \
                 $(ARCH) $(MINOS) \
                 -isysroot $(SDK) \
@@ -102,7 +110,7 @@ ALL_OBJS      := $(DRIVER_OBJS) $(COMPAT_OBJS) $(COMPAT89_OBJS) $(FW_OBJS)
 # Targets                                                              #
 # ------------------------------------------------------------------ #
 
-.PHONY: all compile errors link hosttest fetch-firmware clean
+.PHONY: all compile errors link hosttest kext fetch-firmware clean
 
 all: compile
 
@@ -156,17 +164,65 @@ link: compile
 # stand-ins for its kernel imports and a PCI device that does not answer. Run it
 # before every kext load; a crash here would have been a panic there.
 HOSTTEST := $(BUILD_DIR)/out/hosttest
+HOST_OBJS := $(BUILD_DIR)/out/host_main.o $(BUILD_DIR)/out/host_kernel.o $(BUILD_DIR)/out/selftest.o
+# Runs one smoke-test binary: $(call hostrun,<binary>,<args>,<log name>)
+define hostrun
+	@echo "  RUN  $(1) $(2)"
+	@perl -e 'alarm 300; exec @ARGV' $(1) $(2) > $(BUILD_DIR)/log/$(3).log 2>&1; \
+	    rc=$$?; grep -E '^==|WARN|BUG|ERR|HOST:' $(BUILD_DIR)/log/$(3).log; \
+	    [ $$rc -eq 0 ] || { echo "  hosttest FAILED (exit $$rc), see $(BUILD_DIR)/log/$(3).log"; exit 1; }
+endef
+
 hosttest: link
 	@cc -c -O1 -g -Wall -o $(BUILD_DIR)/out/host_kernel.o tools/hosttest/host_kernel.c
 	@cc -c -O1 -g -Wall -I$(COMPAT89_DIR) -o $(BUILD_DIR)/out/host_main.o tools/hosttest/host_main.c
 	@$(CC) $(DRIVER_CFLAGS) -MF /dev/null -c tools/hosttest/selftest.c -o $(BUILD_DIR)/out/selftest.o 2> $(BUILD_DIR)/log/hosttest_selftest.log \
 	    || { grep -E 'error' $(BUILD_DIR)/log/hosttest_selftest.log >&2; exit 1; }
-	@cc $(ARCH) -o $(HOSTTEST) $(BUILD_DIR)/out/host_main.o $(BUILD_DIR)/out/host_kernel.o \
-	    $(BUILD_DIR)/out/selftest.o $(LINKED_OBJ) -lz
-	@echo "  RUN  $(HOSTTEST)"
-	@perl -e 'alarm 300; exec @ARGV' $(HOSTTEST) > $(BUILD_DIR)/log/hosttest.log 2>&1; \
-	    rc=$$?; grep -E '^==|WARN|BUG|HOST:' $(BUILD_DIR)/log/hosttest.log; \
-	    [ $$rc -eq 0 ] || { echo "  hosttest FAILED (exit $$rc), see $(BUILD_DIR)/log/hosttest.log"; exit 1; }
+	@$(CC) $(DRIVER_CFLAGS) -MF /dev/null -c tools/hosttest/fakechip_core.c -o $(BUILD_DIR)/out/fakechip_core.o 2> $(BUILD_DIR)/log/hosttest_fakechip_core.log \
+	    || { grep -E 'error' $(BUILD_DIR)/log/hosttest_fakechip_core.log >&2; exit 1; }
+	@cc $(ARCH) -o $(HOSTTEST) $(HOST_OBJS) $(LINKED_OBJ) -lz
+	@cc $(ARCH) -o $(HOSTTEST)_fakechip $(HOST_OBJS) $(BUILD_DIR)/out/fakechip_core.o \
+	    $(filter-out $(BUILD_DIR)/rtw89/core.o,$(ALL_OBJS)) -lz
+	$(call hostrun,$(HOSTTEST),00,hosttest_00)
+	$(call hostrun,$(HOSTTEST),ff,hosttest_ff)
+	$(call hostrun,$(HOSTTEST)_fakechip,00 ok,hosttest_fakechip)
+
+# ------------------------------------------------------------------ #
+# Kext bundle                                                          #
+# ------------------------------------------------------------------ #
+
+# IOKit side: C++ against MacKernelSDK only. It talks to the Linux side through
+# src/compat_rtw89/rtw89_glue.h and never sees the compat headers.
+KEXT_SRC      := $(PROJ_ROOT)/src/kext
+KEXT_CXXFLAGS := $(ARCH) $(MINOS) -isysroot $(SDK) -nostdinc \
+                 -std=gnu++17 -mkernel -fapple-kext -fno-rtti -fno-exceptions \
+                 -fno-builtin -fno-common -fno-stack-protector \
+                 -DKERNEL -DKERNEL_PRIVATE -DDRIVER_PRIVATE -DAPPLE -DNeXT \
+                 -I$(MKSDK)/Headers -I$(COMPAT89_DIR) -Wall -MMD -MP
+KEXT_OBJS     := $(BUILD_DIR)/kext/AirPortRTW89.o $(BUILD_DIR)/kext/kmod_info.o
+KEXT_BUNDLE   := $(BUILD_DIR)/out/AirPort_RTW89.kext
+KEXT_BIN      := $(KEXT_BUNDLE)/Contents/MacOS/AirPort_RTW89
+
+$(BUILD_DIR)/kext/%.o: $(KEXT_SRC)/%.cpp
+	@mkdir -p $(dir $@)
+	@echo "  CXX  kext/$*.cpp"
+	@$(CXX) $(KEXT_CXXFLAGS) -c $< -o $@
+
+$(BUILD_DIR)/kext/%.o: $(KEXT_SRC)/%.c
+	@mkdir -p $(dir $@)
+	@echo "  CC   kext/$*.c"
+	@$(CC) $(FW_CFLAGS) -c $< -o $@
+
+# The smoke test gates the bundle: nothing gets packaged that crashed there.
+kext: hosttest $(KEXT_OBJS) $(KEXT_SRC)/Info.plist
+	@rm -rf $(BUILD_DIR)/out/AirPort_RTW89.kext
+	@mkdir -p $(dir $(KEXT_BIN))
+	@cp $(KEXT_SRC)/Info.plist $(KEXT_BUNDLE)/Contents/Info.plist
+	@$(CXX) $(ARCH) $(MINOS) -isysroot $(SDK) -nostdlib -Xlinker -kext \
+	    -L$(MKSDK)/Library/x86_64 $(ALL_OBJS) $(KEXT_OBJS) -lkmod -lcc_kext -o $(KEXT_BIN)
+	@codesign --force --sign - $(KEXT_BUNDLE) 2>/dev/null || true
+	@echo "  KEXT $(KEXT_BUNDLE)"
+	@python3 tools/check_kpi.py $(KEXT_BUNDLE)
 
 FW_NAME := rtw8852b_fw-2.bin
 FW_URL  := https://git.kernel.org/pub/scm/linux/kernel/git/firmware/linux-firmware.git/plain/rtw89/$(FW_NAME)
@@ -179,4 +235,4 @@ fetch-firmware:
 clean:
 	rm -rf $(BUILD_DIR)
 
--include $(ALL_OBJS:.o=.d)
+-include $(ALL_OBJS:.o=.d) $(KEXT_OBJS:.o=.d)

@@ -23,10 +23,34 @@ probe and at worst panic.
 
 ## Status
 
-**M0 is done** (2026-10-01): all 35 objects compile and `make link` joins them
+**M0 is done** (2026-10-01): every object compiles and `make link` joins them
 into one relocatable object whose only undefined symbols are 50 kernel imports
-(listed in [kernel-imports.md](kernel-imports.md)). There is no kext bundle yet
-and nothing has been loaded; that starts with M1.
+(listed in [kernel-imports.md](kernel-imports.md)).
+
+**M1 is built, not yet run on hardware.** `make kext` produces
+`build/out/AirPort_RTW89.kext`: an `IOService` that matches `10EC:B852`/`B85B`,
+maps BAR 2, and runs the driver's own `probe()` through the platform glue
+(`src/kext/` ↔ `src/compat_rtw89/rtw89_glue.[ch]`). All 349 symbols it imports
+resolve against the KPIs it declares (`tools/check_kpi.py`). Firmware
+`rtw8852b_fw-2.bin` is embedded. The first load is still to come.
+
+Before any load, `make hosttest` runs the same objects in userspace
+(`tools/hosttest/`): pthread stand-ins for the 50 kernel imports, then
+
+- a self-test of the compat helpers and the cfg80211/mac80211 stand-in,
+- `probe()`/`remove()` twice against a PCI device that never answers (the
+  power-on timeout and every error unwind),
+- the same with only the hardware steps of `rtw89_chip_info_setup()` replaced
+  (`fakechip_core.c`), so the real firmware image is parsed, the device is fully
+  registered, and a fully probed device is removed.
+
+That found and fixed, before they could panic the machine: `pcie_capability_*`
+writing to the wrong config-space offset, a failed firmware decompress reported
+as success, `dma_free_coherent(NULL)` not accepted, and a NULL dereference in
+`rtw89_regd_init_hint()` because registration did not report the initial
+regulatory domain the way Linux does. All three runs are also clean under Guard
+Malloc. What it cannot cover is anything that needs the chip to answer: power-on,
+firmware download, efuse.
 
 How M0 got there differs from the original plan below in one important way:
 instead of extending the simplified mac80211 shim inherited from AirPort_RTW88,
@@ -43,6 +67,8 @@ supply the code behind them:
 | `src/compat_rtw89/rtw89_cfg80211_bitrate.c` | `cfg80211_calculate_bitrate()`, copied verbatim from `net/wireless/util.c` |
 | `src/compat_rtw89/rtw89_mac80211.c` | hw allocation, vif/station/key lists behind the iterators, TXQ queues and scheduling, queue stop/wake, null-func/PS-Poll/probe-request templates, emulated chanctx |
 | `src/compat_rtw89/rtw89_net80211.h` | Internal state of the two files above and the interface the IOKit layer will use (`struct rtw89_m80211_glue_ops`, vif/sta/key lifetime, `rtw89_m80211_tx`) |
+| `src/compat_rtw89/rtw89_glue.[ch]` | Platform boundary, plain C: config space, mapped BAR and DMA memory in; `probe`/`remove`/interrupt/info out. Builds the `pci_dev`, PCI ops and bouncing DMA ops |
+| `src/kext/` | The IOKit side (`AirPort_RTW89`), `Info.plist`, kmod descriptor. Sees only `rtw89_glue.h` |
 
 The first compile against the inherited shim had 3,664 errors; the header switch
 alone took that to 235 because every 802.11 constant and struct is now the real
@@ -59,6 +85,10 @@ commented where it is defined):
 - **`cfg80211_bss_iter`** walks nothing: scan results live in IO80211.
 - **Firmware**: the blob table is empty until `make fetch-firmware` is run, so
   probe would fail with "firmware not in embedded blobs".
+
+Cosmetic: the kernel's `printf` does not know Linux's `%ph`/`%pM` extensions, so
+a few driver messages print a pointer where Linux prints bytes ("Firmware element
+BB version: 0x...h"). The kext logs the MAC address itself.
 
 Known limitation inherited from the rtw88 compat layer: `spinlock_t` is a
 heap-allocated `IORecursiveLock` (a sleeping lock) and Linux code never frees
@@ -163,3 +193,6 @@ to boot-args so panics show symbolized backtraces.
 - `tools/fetch_linux.sh` — re-download `third_party/linux-include` and `third_party/linux-reference` at the pinned commit.
 - `tools/extract_bitrate.sh` — rebuild `rtw89_cfg80211_bitrate.c` from the fetched `net/wireless/util.c`.
 - `tools/gen_fw_blobs.py` — embed `firmware/*.bin` (run by the Makefile).
+- `tools/hosttest/` — `make hosttest`, see Status.
+- `tools/check_kpi.py` — `make kext`: every import of the built kext must come from a declared KPI.
+- `tools/load.sh`, `tools/unload.sh` — run by a person with sudo, never automatically.

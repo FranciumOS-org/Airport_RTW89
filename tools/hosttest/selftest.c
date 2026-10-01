@@ -301,6 +301,8 @@ static void test_stack(void)
     wiphy->reg_notifier = st_reg_notifier;
     CHECK(ieee80211_register_hw(hw) == 0);
     CHECK(hw->conf.chandef.chan == &st_channels[0]);
+    /* registration reports the world domain before it returns */
+    CHECK(st.reg_calls == 1 && !strcmp(st.alpha2, "00"));
 
     /* wiphy works run in FIFO order with the mutex held; cancel removes one */
     for (i = 0; i < 3; i++) {
@@ -346,8 +348,8 @@ static void test_stack(void)
 
     /* a driver regulatory hint comes back through reg_notifier */
     CHECK(regulatory_hint(wiphy, "DE") == 0);
-    wait_for(&st.reg_calls, 1);
-    CHECK(st.reg_calls == 1 && !strcmp(st.alpha2, "DE"));
+    wait_for(&st.reg_calls, 2);
+    CHECK(st.reg_calls == 2 && !strcmp(st.alpha2, "DE"));
 
     /* interfaces and stations */
     vif = rtw89_m80211_vif_alloc(hw, NL80211_IFTYPE_STATION, own);

@@ -226,6 +226,35 @@ static void rtw89_cfg80211_reg_work(struct work_struct *work)
         rdev->wiphy.reg_notifier(&rdev->wiphy, &rdev->reg_request);
 }
 
+/*
+ * Registration. On Linux this is where the regulatory core first tells the
+ * driver which domain is in force (the world domain "00" until something sets
+ * a country), synchronously and before wiphy_register() returns. rtw89 depends
+ * on that: its notifier is what initialises rtwdev->regulatory.regd, which the
+ * rest of probe then dereferences.
+ */
+int wiphy_register(struct wiphy *wiphy)
+{
+    struct rtw89_cfg80211_rdev *rdev = wiphy_to_rdev(wiphy);
+
+    memset(&rdev->reg_request, 0, sizeof(rdev->reg_request));
+    rdev->reg_request.initiator = NL80211_REGDOM_SET_BY_CORE;
+    rdev->reg_request.alpha2[0] = '0';
+    rdev->reg_request.alpha2[1] = '0';
+    rdev->reg_request.dfs_region = NL80211_DFS_UNSET;
+
+    if (wiphy->reg_notifier)
+        wiphy->reg_notifier(wiphy, &rdev->reg_request);
+    return 0;
+}
+
+void wiphy_unregister(struct wiphy *wiphy)
+{
+    struct rtw89_cfg80211_rdev *rdev = wiphy_to_rdev(wiphy);
+
+    cancel_work_sync(&rdev->reg_work);
+}
+
 int regulatory_hint(struct wiphy *wiphy, const char *alpha2)
 {
     struct rtw89_cfg80211_rdev *rdev;
