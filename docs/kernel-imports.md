@@ -1,6 +1,6 @@
 # Kernel imports
 
-Symbols `AirPort_RTW89.o` leaves for the kernel to resolve (`make link`): **50**, unresolved: **0**.
+Symbols `AirPort_RTW89.o` leaves for the kernel to resolve (`make link`): **51**, unresolved: **0**.
 
 - `IODelay`
 - `IOFree`
@@ -23,8 +23,8 @@ Symbols `AirPort_RTW89.o` leaves for the kernel to resolve (`make link`): **50**
 - `IOSimpleLockUnlock`
 - `IOSleep`
 - `PE_parse_boot_argn`
+- `__bzero`
 - `__memcpy_chk`
-- `__memmove_chk`
 - `__strlcpy_chk`
 - `absolutetime_to_nanoseconds`
 - `bcopy`
@@ -38,6 +38,7 @@ Symbols `AirPort_RTW89.o` leaves for the kernel to resolve (`make link`): **50**
 - `mach_absolute_time`
 - `memcmp`
 - `memcpy`
+- `memmove`
 - `memset`
 - `read_random`
 - `scnprintf`

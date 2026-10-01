@@ -99,14 +99,31 @@ static void test_helpers(void)
         kfree_skb(skb);
     }
 
+    /* dev_alloc_skb reserves NET_SKB_PAD; skb_copy keeps head- and tailroom */
+    skb = dev_alloc_skb(100);
+    CHECK(skb_headroom(skb) == NET_SKB_PAD && skb_tailroom(skb) >= 100);
+    skb_reserve(skb, 10);
+    memcpy(skb_put(skb, 5), "hello", 5);
+    skb->priority = 6;
+    {
+        struct sk_buff *copy = skb_copy(skb, GFP_KERNEL);
+
+        CHECK(copy && copy->len == 5 && !memcmp(copy->data, "hello", 5));
+        CHECK(copy && skb_headroom(copy) == skb_headroom(skb));
+        CHECK(copy && skb_tailroom(copy) >= skb_tailroom(skb));
+        CHECK(copy && copy->priority == 6);
+        kfree_skb(copy);
+    }
+    kfree_skb(skb);
+
     /* pskb_expand_head keeps the payload and adds headroom */
     skb = dev_alloc_skb(64);
     skb_reserve(skb, 8);
     memcpy(skb_put(skb, 4), "abcd", 4);
     before = skb->head;
     CHECK(pskb_expand_head(skb, 32, 0, GFP_KERNEL) == 0);
-    CHECK(skb->head != before || skb_headroom(skb) == 40);
-    CHECK(skb_headroom(skb) == 40 && skb->len == 4 && !memcmp(skb->data, "abcd", 4));
+    CHECK(skb->head != before);
+    CHECK(skb_headroom(skb) == NET_SKB_PAD + 40 && skb->len == 4 && !memcmp(skb->data, "abcd", 4));
     kfree_skb(skb);
 }
 
@@ -424,6 +441,16 @@ static void test_stack(void)
     /* frame templates */
     skb = ieee80211_probereq_get(hw, own, (const u8 *)"net", 3, 20);
     CHECK(skb && skb->len == 24 + 5 && skb_headroom(skb) >= 16 && skb_tailroom(skb) >= 20);
+    if (skb) {
+        /* what rtw89_append_probe_req_ie() does: append IEs to a copy */
+        struct sk_buff *copy = skb_copy(skb, GFP_KERNEL);
+
+        CHECK(copy && skb_tailroom(copy) >= 20);
+        if (copy) {
+            skb_put_zero(copy, 20);
+            kfree_skb(copy);
+        }
+    }
     if (skb) {
         hdr = (struct ieee80211_hdr_3addr *)skb->data;
         CHECK(ieee80211_is_probe_req(hdr->frame_control));

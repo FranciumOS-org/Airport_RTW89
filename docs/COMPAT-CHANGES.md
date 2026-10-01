@@ -23,3 +23,6 @@
 | `rtw88_compat.c` | Timers: every `thread_call` a timer allocates is tracked, and `rtw88_compat_exit()` cancels and frees the ones never deleted with `del_timer_sync()`, so none can fire into an unloaded kext. | ⬆ |
 | `rtw88_compat.c` | Log prefix is `rtw89` under `RTW89_MACOS`. | — |
 | `linux/slab.h`, `rtw88_compat.c` | `kfree()`'s "not a kernel pointer" threshold is the variable `rtw88_kfree_min_addr` (same default) so the userspace smoke test can lower it. | — |
+| `linux/skbuff.h` | `skb_copy` allocated only `len + headroom` (+64 bytes of slack), so the copy lost the original's tailroom; rtw89 appends probe-request IEs to such a copy (`rtw89_append_probe_req_ie`) and would have written past the buffer. It now keeps head- and tailroom and the metadata fields, like Linux. | ⬆ |
+| `linux/skbuff.h`, `rtw88_compat.c` | `skb_put` / `skb_push` check the room and stop (`rtw88_skb_panic`) instead of silently corrupting the heap, as Linux's `skb_over_panic` does. | ⬆ |
+| `linux/skbuff.h` | `dev_alloc_skb` / `netdev_alloc_skb` reserve `NET_SKB_PAD` (64) bytes of headroom like Linux. | — |

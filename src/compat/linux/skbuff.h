@@ -132,14 +132,26 @@ static inline struct sk_buff *alloc_skb(u32 size, gfp_t priority)
     return skb;
 }
 
-static inline struct sk_buff *dev_alloc_skb(u32 size)
-{
-    return alloc_skb(size, GFP_ATOMIC);
-}
+/* Headroom Linux reserves in every skb from dev_alloc_skb()/netdev_alloc_skb()
+ * (max(32, L1_CACHE_BYTES)); drivers and stacks push headers into it. */
+#ifndef NET_SKB_PAD
+#define NET_SKB_PAD 64
+#endif
 
 static inline struct sk_buff *netdev_alloc_skb(void *dev, u32 size)
 {
-    return alloc_skb(size, GFP_ATOMIC);
+    struct sk_buff *skb = alloc_skb(size + NET_SKB_PAD, GFP_ATOMIC);
+
+    if (skb) {
+        skb->data += NET_SKB_PAD;
+        skb->tail += NET_SKB_PAD;
+    }
+    return skb;
+}
+
+static inline struct sk_buff *dev_alloc_skb(u32 size)
+{
+    return netdev_alloc_skb(NULL, size);
 }
 
 static inline struct sk_buff *netdev_alloc_skb_ip_align(void *dev, u32 size)
@@ -171,9 +183,17 @@ static inline void consume_skb(struct sk_buff *skb)
 }
 
 /* Data manipulation */
+
+/* Like Linux's skb_over_panic()/skb_under_panic(): writing past either end of
+ * the buffer is heap corruption, so stop at the call that would do it. */
+void rtw88_skb_panic(const struct sk_buff *skb, u32 len, const char *what)
+    __attribute__((noreturn));
+
 static inline void *skb_put(struct sk_buff *skb, u32 len)
 {
     void *tmp = skb->tail;
+    if (len > (u32)(skb->end - skb->tail))
+        rtw88_skb_panic(skb, len, "skb_put");
     skb->tail += len;
     skb->len  += len;
     return tmp;
@@ -194,6 +214,8 @@ static inline void skb_put_data(struct sk_buff *skb, const void *data, u32 len)
 
 static inline void *skb_push(struct sk_buff *skb, u32 len)
 {
+    if (len > (u32)(skb->data - skb->head))
+        rtw88_skb_panic(skb, len, "skb_push");
     skb->data -= len;
     skb->len  += len;
     return skb->data;
@@ -230,13 +252,22 @@ static inline u32 skb_tailroom(const struct sk_buff *skb)
     return (u32)(skb->end - skb->tail);
 }
 
+/* Same head- and tailroom as the original, like Linux: callers append to the
+ * copy relying on the room they reserved in the original. */
 static inline struct sk_buff *skb_copy(const struct sk_buff *skb, gfp_t prio)
 {
-    struct sk_buff *n = alloc_skb(skb->len + skb_headroom(skb), prio);
+    struct sk_buff *n = alloc_skb((u32)(skb->end - skb->head), prio);
     if (!n) return NULL;
     skb_reserve(n, skb_headroom(skb));
     memcpy(skb_put(n, skb->len), skb->data, skb->len);
     memcpy(n->cb, skb->cb, sizeof(n->cb));
+    n->protocol = skb->protocol;
+    n->pkt_type = skb->pkt_type;
+    n->priority = skb->priority;
+    n->queue_mapping = skb->queue_mapping;
+    n->network_header = skb->network_header;
+    n->transport_header = skb->transport_header;
+    n->mac_header = skb->mac_header;
     return n;
 }
 
