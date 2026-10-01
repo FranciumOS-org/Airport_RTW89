@@ -12,6 +12,7 @@
  *   hosttest 00 ok      probe must succeed: for the hosttest_fakechip binary,
  *                       where the hardware steps are replaced (fakechip_core.c)
  */
+#include <pthread.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -37,6 +38,8 @@ void rtw89_glue_test_rx(const uint8_t *frame, size_t len, uint16_t freq, int8_t 
  * data frame the station transmits */
 void rtw89_mlme_set_tx_tap(void (*tap)(const uint8_t *frame, size_t len));
 void rtw89_data_set_tx_tap(void (*tap)(const uint8_t *frame, size_t len));
+/* src/compat_rtw89/rtw89_data.c: frames waiting on a TID's transmit queue */
+unsigned int rtw89_data_tx_waiting(uint8_t tid);
 
 /* The access point the smoke test pretends to be, and the card (fakechip_core.c). */
 static const uint8_t ap_mac[6] = { 0x02, 0xaa, 0xbb, 0xcc, 0xdd, 0x01 };
@@ -128,9 +131,21 @@ static struct {
     uint8_t data[2400];
     size_t data_len;
     int data_count;
-    uint8_t action[64];
-    size_t action_len;
-    volatile int action_count;
+    /* BlockAck action frames from the station, by TID */
+    struct {
+        volatile int count;
+        uint8_t dialog;
+        uint16_t ssn, capab;
+    } addba_req[16];
+    struct {
+        volatile int count;
+        uint8_t dialog;
+        uint16_t status, capab;
+    } addba_resp[16];
+    struct {
+        volatile int count;
+        bool initiator;
+    } delba[16];
     /* packet numbers of the frames we send it */
     uint64_t tx_pn, gtk_pn;
 } ap;
@@ -139,11 +154,13 @@ static struct {
 static struct {
     uint8_t frame[2400];
     size_t len;
-    int count;
+    volatile int count;
+    uint8_t order[256];         /* the last byte of each frame, in arrival order */
 } sta_rx;
 
 static void sta_rx_frame(void *ctx, const uint8_t *frame, size_t len)
 {
+    sta_rx.order[sta_rx.count % 256] = frame[len - 1];
     sta_rx.count++;
     sta_rx.len = len;
     if (len <= sizeof(sta_rx.frame))
@@ -156,10 +173,27 @@ static void ap_tx_tap(const uint8_t *frame, size_t len)
     size_t hdrlen = (frame[0] & 0x80) ? 26 : 24;    /* QoS data has a QoS control field */
     bool prot = frame[1] & 0x40;
 
-    if (frame[0] == 0xd0 && len <= sizeof(ap.action)) {
-        memcpy(ap.action, frame, len);
-        ap.action_len = len;
-        ap.action_count++;
+    if (frame[0] == 0xd0 && len >= 24 + 6 && frame[24] == 3) {
+        const uint8_t *b = frame + 26;      /* after category and action code */
+        int tid;
+
+        if (frame[25] == 0 && len >= 24 + 9) {          /* ADDBA request */
+            tid = (b[1] >> 2) & 0x0f;
+            ap.addba_req[tid].dialog = b[0];
+            ap.addba_req[tid].capab = (uint16_t)(b[1] | b[2] << 8);
+            ap.addba_req[tid].ssn = (uint16_t)((b[5] | b[6] << 8) >> 4);
+            ap.addba_req[tid].count++;
+        } else if (frame[25] == 1 && len >= 24 + 9) {   /* ADDBA response */
+            tid = (b[3] >> 2) & 0x0f;
+            ap.addba_resp[tid].dialog = b[0];
+            ap.addba_resp[tid].status = (uint16_t)(b[1] | b[2] << 8);
+            ap.addba_resp[tid].capab = (uint16_t)(b[3] | b[4] << 8);
+            ap.addba_resp[tid].count++;
+        } else if (frame[25] == 2) {                    /* DELBA */
+            tid = b[1] >> 4;
+            ap.delba[tid].initiator = b[1] & 0x08;
+            ap.delba[tid].count++;
+        }
     }
     if ((frame[0] & 0x0c) != 0x08)                  /* not a data frame */
         return;
@@ -540,21 +574,178 @@ static int test_data(void)
     EXPECT(link.tx_frames >= 3 && link.rx_frames >= 7 && link.rx_replay >= 2 &&
            link.rx_undecrypted >= 1);
 
-    /* the AP asks for a BlockAck agreement: declined for now */
-    n = ap.action_count;
-    {
-        static const uint8_t addba[] = { 3, 0, 9, 0x02, 0x10, 0x00, 0x00, 0x10, 0x00 };
-        int i;
-
-        ap_send(0xd0, addba, sizeof(addba));
-        for (i = 0; i < 100 && ap.action_count == n; i++)
-            usleep(20 * 1000);
-    }
-    EXPECT(ap.action_count == n + 1 && ap.action_len == 24 + 9);
-    EXPECT(ap.action[24] == 3 && ap.action[25] == 1 && ap.action[26] == 9 &&
-           ap.action[27] == 37 && ap.action[28] == 0);
 #undef EXPECT
     printf("== data path test: %d failure(s)\n", failures);
+    return failures;
+}
+
+/* Wait (up to two seconds) for *@count to pass @above. */
+static int wait_count(volatile int *count, int above)
+{
+    int i;
+
+    for (i = 0; i < 100 && *count <= above; i++)
+        usleep(20 * 1000);
+    return *count > above;
+}
+
+static uint16_t link_ba(bool tx)
+{
+    struct rtw89_glue_link link;
+
+    rtw89_glue_link(&link);
+    return tx ? link.tx_ba : link.rx_ba;
+}
+
+/* One frame of the AP's aggregate on TID 0: sequence number @sn, marked with
+ * its low byte so the order of arrival at the stack can be checked. */
+static void ap_send_agg(uint16_t sn, uint64_t pn_base)
+{
+    uint8_t body[8 + sizeof(test_ip)];
+
+    memcpy(body, "\xaa\xaa\x03\x00\x00\x00\x08\x00", 8);
+    memcpy(body + 8, test_ip, sizeof(test_ip));
+    body[sizeof(body) - 1] = (uint8_t)sn;
+    ap_send_data(sta_mac, peer_mac, 0, false, false, sn, 0, pn_base + sn, true, body, sizeof(body));
+}
+
+static void ap_send_addba_resp(int tid, uint8_t dialog, uint16_t status)
+{
+    uint16_t capab = (uint16_t)(0x0002 | tid << 2 | 64 << 6);
+    uint8_t body[9] = { 3, 1, dialog, (uint8_t)status, (uint8_t)(status >> 8),
+                        (uint8_t)capab, (uint8_t)(capab >> 8), 0, 0 };
+
+    ap_send(0xd0, body, sizeof(body));
+}
+
+/* A frame from this interface on @tid (through the DSCP field). */
+static int sta_tx_tid(int tid)
+{
+    uint8_t eth[14 + sizeof(test_ip)];
+
+    memcpy(eth, peer_mac, 6);
+    memcpy(eth + 6, sta_mac, 6);
+    eth[12] = 0x08; eth[13] = 0x00;
+    memcpy(eth + 14, test_ip, sizeof(test_ip));
+    eth[15] = (uint8_t)(tid << 5);
+    return sta_tx(eth, sizeof(eth));
+}
+
+/* BlockAck sessions in both directions, connected. */
+static int test_aggregation(void)
+{
+    const uint64_t pn = ap.tx_pn + 1000;
+    int failures = 0, n, i;
+
+#define EXPECT(cond) do { if (!(cond)) { failures++; printf("== FAIL %s\n", #cond); } } while (0)
+#define ORDER(k) sta_rx.order[(n + (k)) % 256]
+    /* ---- the AP sends us aggregates on TID 0, starting at 300 ---- */
+    {
+        /* dialog 9; A-MSDU ok, immediate, TID 0, 64 frames; no timeout; start 300 */
+        static const uint8_t addba[] = { 3, 0, 9, 0x03, 0x10, 0x00, 0x00, 0xc0, 0x12 };
+
+        n = ap.addba_resp[0].count;
+        ap_send(0xd0, addba, sizeof(addba));
+        EXPECT(wait_count(&ap.addba_resp[0].count, n));
+        EXPECT(ap.addba_resp[0].dialog == 9 && ap.addba_resp[0].status == 0);
+        EXPECT(ap.addba_resp[0].capab == 0x1003);
+        EXPECT(link_ba(false) == 0x0001);
+    }
+
+    /* in order: straight through */
+    n = sta_rx.count;
+    ap_send_agg(300, pn);
+    EXPECT(sta_rx.count == n + 1);
+    /* 301 is missing: 302 and 303 wait for it, then all three go on in order */
+    ap_send_agg(302, pn);
+    ap_send_agg(303, pn);
+    EXPECT(sta_rx.count == n + 1);
+    ap_send_agg(301, pn);
+    EXPECT(sta_rx.count == n + 4);
+    EXPECT(ORDER(1) == (301 & 0xff) && ORDER(2) == (302 & 0xff) && ORDER(3) == (303 & 0xff));
+    /* a retransmission of something already handed on, and one of a frame waiting */
+    ap_send_agg(301, pn);
+    ap_send_agg(306, pn);
+    ap_send_agg(306, pn);
+    EXPECT(sta_rx.count == n + 4);
+    /* 304 and 305 never come: 306 is released once it has waited long enough */
+    usleep(300 * 1000);
+    EXPECT(sta_rx.count == n + 5 && ORDER(4) == (306 & 0xff));
+    /* a BlockAck request tells us to stop waiting for what is before 310 */
+    ap_send_agg(309, pn);
+    EXPECT(sta_rx.count == n + 5);
+    {
+        uint8_t bar[20] = { 0x84, 0x00, 0, 0 };
+
+        memcpy(bar + 4, sta_mac, 6);
+        memcpy(bar + 10, ap_mac, 6);
+        bar[16] = 0x04; bar[17] = 0x00;             /* compressed, TID 0 */
+        bar[18] = (uint8_t)(310 << 4); bar[19] = (uint8_t)(310 >> 4);
+        rtw89_glue_test_rx(bar, sizeof(bar), 2437, -40, false);
+    }
+    EXPECT(sta_rx.count == n + 6 && ORDER(5) == (309 & 0xff));
+    /* a frame far ahead moves the window: what was waiting goes on first */
+    ap_send_agg(312, pn);
+    ap_send_agg(400, pn);
+    EXPECT(sta_rx.count == n + 7 && ORDER(6) == (312 & 0xff));
+    usleep(300 * 1000);
+    EXPECT(sta_rx.count == n + 8 && ORDER(7) == (400 & 0xff));
+    /* the AP ends the session: frames are taken as they come again */
+    {
+        static const uint8_t delba[] = { 3, 2, 0x00, 0x08, 0x01, 0x00 };
+
+        ap_send(0xd0, delba, sizeof(delba));
+        for (i = 0; i < 100 && link_ba(false); i++)
+            usleep(20 * 1000);
+        EXPECT(link_ba(false) == 0);
+    }
+    ap_send_agg(403, pn);
+    ap_send_agg(405, pn);
+    EXPECT(sta_rx.count == n + 10);
+
+    /* ---- we send aggregates: the driver asks once it has sent a frame ---- */
+    n = ap.addba_req[3].count;
+    EXPECT(sta_tx_tid(3) == 0);
+    EXPECT(wait_count(&ap.addba_req[3].count, n));
+    /* immediate BlockAck, TID 3, 64 frames, starting after the frame already sent */
+    EXPECT((ap.addba_req[3].capab & 0xfffe) == 0x100e && ap.addba_req[3].ssn == 1);
+    /* until the AP answers, the TID's frames are held back */
+    EXPECT(sta_tx_tid(3) == 0 && sta_tx_tid(3) == 0);
+    usleep(100 * 1000);
+    EXPECT(rtw89_data_tx_waiting(3) == 2);
+    EXPECT(!(link_ba(true) & 0x08));
+    ap_send_addba_resp(3, ap.addba_req[3].dialog, 0);
+    for (i = 0; i < 100 && (!(link_ba(true) & 0x08) || rtw89_data_tx_waiting(3)); i++)
+        usleep(20 * 1000);
+    EXPECT((link_ba(true) & 0x08) && rtw89_data_tx_waiting(3) == 0);
+    /* the AP ends it */
+    {
+        static const uint8_t delba[] = { 3, 2, 0x00, 0x30, 0x01, 0x00 };
+
+        ap_send(0xd0, delba, sizeof(delba));
+        for (i = 0; i < 100 && (link_ba(true) & 0x08); i++)
+            usleep(20 * 1000);
+        EXPECT(!(link_ba(true) & 0x08));
+    }
+
+    /* an AP that says no: nothing is held back afterwards */
+    n = ap.addba_req[6].count;
+    EXPECT(sta_tx_tid(6) == 0);
+    EXPECT(wait_count(&ap.addba_req[6].count, n));
+    EXPECT(sta_tx_tid(6) == 0);
+    ap_send_addba_resp(6, ap.addba_req[6].dialog, 37);
+    for (i = 0; i < 100 && rtw89_data_tx_waiting(6); i++)
+        usleep(20 * 1000);
+    EXPECT(rtw89_data_tx_waiting(6) == 0 && !(link_ba(true) & 0x40));
+
+    /* an AP that does not answer (TID 5, from the data path test): after a
+     * second the station gives up and says so */
+    EXPECT(ap.addba_req[5].count >= 1);
+    EXPECT(wait_count(&ap.delba[5].count, 0) && ap.delba[5].initiator);
+    EXPECT(rtw89_data_tx_waiting(5) == 0);
+#undef ORDER
+#undef EXPECT
+    printf("== aggregation test: %d failure(s)\n", failures);
     return failures;
 }
 
@@ -653,6 +844,7 @@ static int test_join(void)
     }
 
     failures += test_data();
+    failures += test_aggregation();
 
     /* the AP throws us out; nothing can be sent after that */
     ap_send_deauth(7);
@@ -803,6 +995,31 @@ static void dma_free(void *ctx, void *cookie)
     free(cookie);
 }
 
+/*
+ * The one thing the pretend device does on its own (fakechip runs only): it
+ * "consumes" firmware commands. The driver puts its write index in the low
+ * half of the command ring's index register (R_AX_CH12_TXBD_IDX) and expects
+ * the hardware's read index in the high half; without this the ring fills up
+ * after a few joins and every later command fails for lack of room.
+ */
+#define FAKE_CH12_TXBD_IDX 0x1080
+
+static volatile int fake_device_run;
+static uint8_t *fake_device_mmio;
+
+static void *fake_device_thread(void *arg)
+{
+    while (fake_device_run) {
+        uint16_t host;
+
+        memcpy(&host, fake_device_mmio + FAKE_CH12_TXBD_IDX, 2);
+        host &= 0x0fff;
+        memcpy(fake_device_mmio + FAKE_CH12_TXBD_IDX + 2, &host, 2);
+        usleep(2000);
+    }
+    return NULL;
+}
+
 int main(int argc, char **argv)
 {
     struct rtw89_glue_platform plat = {
@@ -819,6 +1036,7 @@ int main(int argc, char **argv)
     void *mmio;
     int ret, round, rounds = 2;
     int expect_ok = argc > 2 && !strcmp(argv[2], "ok");
+    pthread_t fake_device;
     int failed = 0;
 
     rtw88_kfree_min_addr = 0;
@@ -841,6 +1059,12 @@ int main(int argc, char **argv)
 
     printf("== supports 10ec:b852: %d, 10ec:c822: %d\n",
            rtw89_glue_supports(0x10ec, 0xb852), rtw89_glue_supports(0x10ec, 0xc822));
+
+    if (expect_ok) {
+        fake_device_mmio = mmio;
+        fake_device_run = 1;
+        pthread_create(&fake_device, NULL, fake_device_thread, NULL);
+    }
 
     /* Twice: the second round proves the first one cleaned up after itself. */
     for (round = 1; round <= rounds; round++) {
@@ -867,6 +1091,11 @@ int main(int argc, char **argv)
         rtw89_glue_interrupt();
         rtw89_glue_remove();
         printf("== round %d: removed, %lu DMA allocation(s) live\n", round, dma_live);
+    }
+
+    if (expect_ok) {
+        fake_device_run = 0;
+        pthread_join(fake_device, NULL);
     }
 
     /* Let detached workqueue threads finish exiting before the process does. */

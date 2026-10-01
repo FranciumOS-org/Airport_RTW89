@@ -68,6 +68,21 @@ static struct {
     struct ieee80211_key_conf *ptk_conf;
     struct ieee80211_key_conf *gtk_conf[4];     /* by key id; the AP alternates */
 
+    /* BlockAck sessions */
+    struct mlme_tx_ba {
+        u8 state;               /* MLME_BA_* */
+        u8 dialog;
+        u8 tries;               /* requests since the AP last agreed */
+        u16 ssn;
+        unsigned long deadline; /* for the AP's answer */
+        unsigned long last_try;
+    } tx_ba[8];                 /* no aggregation on TIDs 8-15 */
+    unsigned long tx_ba_start_req, tx_ba_stop_req;  /* TID bits, set by driver threads */
+    u16 rx_ba;                  /* TIDs the AP may send aggregates on */
+    u8 dialog_token;
+    struct wiphy_work ba_work;
+    struct wiphy_delayed_work ba_timeout_work;
+
     void (*notify)(void);
     void (*tx_tap)(const u8 *frame, size_t len);
 
@@ -366,6 +381,8 @@ static void mlme_send_deauth(u16 reason)
         mlme.local->ops->flush(mlme.hw, mlme.vif, BIT(mlme.hw->queues) - 1, false);
 }
 
+static void mlme_ba_teardown(void);
+
 /* Undo whatever the join got to. @deauth_reason: tell the AP first if non-zero. */
 static void mlme_teardown(u16 deauth_reason)
 {
@@ -383,6 +400,7 @@ static void mlme_teardown(u16 deauth_reason)
 
     /* no more data in either direction, and nothing left queued for the AP */
     rtw89_data_detach();
+    mlme_ba_teardown();
 
     if (deauth_reason && mlme.sta && mlme.sta_state >= IEEE80211_STA_NONE)
         mlme_send_deauth(deauth_reason);
@@ -1093,6 +1111,8 @@ static void mlme_rx_eapol(const u8 *e, size_t len)
             }
             rtw89_data_set_rx_key(-1, true, 0);
             rtw89_data_set_tx_key(mlme.ptk_conf);
+            if (mlme.sta_state == IEEE80211_STA_AUTHORIZED)
+                mlme_info("pairwise key renewed");
         }
         if (mlme_gtk_install(gtk_idx, gtk, rsc)) {
             mlme_fail(-EIO, "the driver refused the group key");
@@ -1109,8 +1129,6 @@ static void mlme_rx_eapol(const u8 *e, size_t len)
             rtw89_data_authorize();
             mlme_set_state(RTW89_MLME_CONNECTED);
             mlme_info("WPA2 handshake complete: keys installed, connected");
-        } else {
-            mlme_info("pairwise key renewed");
         }
     } else {
         /* group key handshake, message 1: a new group key */
@@ -1133,19 +1151,93 @@ out:
 /*  Action frames                                                       */
 /* ------------------------------------------------------------------ */
 
-/*
- * The AP asks for a BlockAck agreement so it can send us aggregates. That
- * needs a reorder buffer on our side, which does not exist yet: decline, so
- * the AP stops asking and keeps sending single frames.
- */
+/* ------------------------------------------------------------------ */
+/*  BlockAck sessions (net/mac80211/agg-rx.c, agg-tx.c)                 */
+/* ------------------------------------------------------------------ */
+
+static int mlme_ampdu_action(enum ieee80211_ampdu_mlme_action action, u16 tid, u16 ssn,
+                             u16 buf_size, bool amsdu)
+{
+    struct ieee80211_ampdu_params params = {
+        .action = action,
+        .sta = mlme.sta,
+        .tid = tid,
+        .ssn = ssn,
+        .buf_size = buf_size,
+        .amsdu = amsdu,
+    };
+
+    if (!mlme.local->ops->ampdu_action)
+        return -EOPNOTSUPP;
+    return mlme.local->ops->ampdu_action(mlme.hw, mlme.vif, &params);
+}
+
+static void mlme_send_delba(u16 tid, bool initiator, u16 reason)
+{
+    const size_t len = IEEE80211_MIN_ACTION_SIZE(delba);
+    struct sk_buff *skb = mlme_alloc_frame(len);
+    struct ieee80211_mgmt *mgmt;
+
+    if (!skb)
+        return;
+    mgmt = mlme_mgmt_header(skb, IEEE80211_STYPE_ACTION, len);
+    mgmt->u.action.category = WLAN_CATEGORY_BACK;
+    mgmt->u.action.action_code = WLAN_ACTION_DELBA;
+    mgmt->u.action.delba.params = cpu_to_le16((u16)(tid << 12) |
+                                              (initiator ? IEEE80211_DELBA_PARAM_INITIATOR_MASK : 0));
+    mgmt->u.action.delba.reason_code = cpu_to_le16(reason);
+    mlme_tx_mgmt(skb);
+}
+
+/* ---- receive side: the AP sends us aggregates ---- */
+
+static void mlme_rx_ba_stop(u16 tid)
+{
+    if (tid >= IEEE80211_NUM_TIDS || !(mlme.rx_ba & BIT(tid)))
+        return;
+    mlme.rx_ba &= ~BIT(tid);
+    rtw89_data_rx_ba_stop((u8)tid);
+    mlme_ampdu_action(IEEE80211_AMPDU_RX_STOP, tid, 0, 0, false);
+}
+
+/* __ieee80211_start_rx_ba_session(): the AP asks to send us aggregates. */
 static void mlme_rx_addba_req(const struct ieee80211_mgmt *req, size_t len)
 {
     const size_t resp_len = IEEE80211_MIN_ACTION_SIZE(addba_resp);
+    u16 capab, tid, buf_size, ssn, status = WLAN_STATUS_SUCCESS;
     struct ieee80211_mgmt *mgmt;
     struct sk_buff *skb;
+    bool amsdu;
 
     if (len < IEEE80211_MIN_ACTION_SIZE(addba_req))
         return;
+    capab = le16_to_cpu(req->u.action.addba_req.capab);
+    tid = (capab & IEEE80211_ADDBA_PARAM_TID_MASK) >> 2;
+    buf_size = (capab & IEEE80211_ADDBA_PARAM_BUF_SIZE_MASK) >> 6;
+    ssn = le16_to_cpu(req->u.action.addba_req.start_seq_num) >> 4;
+    amsdu = (capab & IEEE80211_ADDBA_PARAM_AMSDU_MASK) &&
+            ieee80211_hw_check(mlme.hw, SUPPORTS_AMSDU_IN_AMPDU);
+
+    /* zero means "as many as you can take" */
+    if (!buf_size || buf_size > IEEE80211_MAX_AMPDU_BUF_HT)
+        buf_size = IEEE80211_MAX_AMPDU_BUF_HT;
+    if (buf_size > mlme.sta->max_rx_aggregation_subframes)
+        buf_size = mlme.sta->max_rx_aggregation_subframes;
+
+    if (!mlme.sta->deflink.ht_cap.ht_supported || !buf_size) {
+        status = WLAN_STATUS_REQUEST_DECLINED;
+    } else if (!(capab & IEEE80211_ADDBA_PARAM_POLICY_MASK)) {
+        status = WLAN_STATUS_INVALID_QOS_PARAM;     /* delayed BlockAck: not supported */
+    } else {
+        /* a new request replaces the session it had */
+        mlme_rx_ba_stop(tid);
+        if (mlme_ampdu_action(IEEE80211_AMPDU_RX_START, tid, ssn, buf_size, amsdu) ||
+            rtw89_data_rx_ba_start((u8)tid, ssn, buf_size))
+            status = WLAN_STATUS_REQUEST_DECLINED;
+        else
+            mlme.rx_ba |= BIT(tid);
+    }
+
     skb = mlme_alloc_frame(resp_len);
     if (!skb)
         return;
@@ -1153,10 +1245,227 @@ static void mlme_rx_addba_req(const struct ieee80211_mgmt *req, size_t len)
     mgmt->u.action.category = WLAN_CATEGORY_BACK;
     mgmt->u.action.action_code = WLAN_ACTION_ADDBA_RESP;
     mgmt->u.action.addba_resp.dialog_token = req->u.action.addba_req.dialog_token;
-    mgmt->u.action.addba_resp.status = cpu_to_le16(WLAN_STATUS_REQUEST_DECLINED);
-    mgmt->u.action.addba_resp.capab = req->u.action.addba_req.capab;
+    mgmt->u.action.addba_resp.status = cpu_to_le16(status);
+    mgmt->u.action.addba_resp.capab =
+        cpu_to_le16((amsdu ? IEEE80211_ADDBA_PARAM_AMSDU_MASK : 0) |
+                    IEEE80211_ADDBA_PARAM_POLICY_MASK | (u16)(tid << 2) | (u16)(buf_size << 6));
     mgmt->u.action.addba_resp.timeout = req->u.action.addba_req.timeout;
     mlme_tx_mgmt(skb);
+}
+
+/* ---- transmit side: the driver wants to send aggregates ---- */
+
+#define MLME_BA_NONE            0
+#define MLME_BA_WAIT            1       /* request sent, the TID's frames held back */
+#define MLME_BA_OPERATIONAL     2
+
+#define MLME_ADDBA_TIMEOUT      HZ          /* ADDBA_RESP_INTERVAL */
+#define MLME_BA_BURST_TRIES     3           /* HT_AGG_BURST_RETRIES */
+#define MLME_BA_MAX_TRIES       15          /* HT_AGG_MAX_RETRIES */
+#define MLME_BA_RETRY_PERIOD    (15 * HZ)   /* HT_AGG_RETRIES_PERIOD */
+
+/* End (or give up on) the session; the TID's frames flow again, one by one. */
+static void mlme_tx_ba_stop(u16 tid, bool send_delba, bool destroy)
+{
+    struct mlme_tx_ba *ba;
+
+    if (tid >= ARRAY_SIZE(mlme.tx_ba))
+        return;
+    ba = &mlme.tx_ba[tid];
+    if (ba->state == MLME_BA_NONE)
+        return;
+
+    mlme_ampdu_action(destroy ? IEEE80211_AMPDU_TX_STOP_FLUSH : IEEE80211_AMPDU_TX_STOP_CONT,
+                      tid, 0, 0, false);
+    if (send_delba)
+        mlme_send_delba(tid, true, WLAN_REASON_QSTA_NOT_USE);
+    ba->state = MLME_BA_NONE;
+    rtw89_data_tx_ba_resume((u8)tid);
+}
+
+/* ieee80211_tx_ba_session_handle_start() */
+static void mlme_tx_ba_start(u16 tid)
+{
+    const size_t len = IEEE80211_MIN_ACTION_SIZE(addba_req);
+    struct mlme_tx_ba *ba = &mlme.tx_ba[tid];
+    struct ieee80211_mgmt *mgmt;
+    struct sk_buff *skb;
+
+    if (mlme.state != RTW89_MLME_CONNECTED || ba->state != MLME_BA_NONE)
+        return;
+
+    if (rtw89_data_tx_ba_prepare((u8)tid, &ba->ssn))
+        return;
+    if (mlme_ampdu_action(IEEE80211_AMPDU_TX_START, tid, ba->ssn, 0, false) !=
+        IEEE80211_AMPDU_TX_START_IMMEDIATE) {
+        rtw89_data_tx_ba_resume((u8)tid);
+        return;
+    }
+
+    ba->state = MLME_BA_WAIT;
+    ba->tries++;
+    ba->last_try = jiffies;
+    ba->deadline = jiffies + MLME_ADDBA_TIMEOUT;
+    if (!++mlme.dialog_token)
+        mlme.dialog_token = 1;
+    ba->dialog = mlme.dialog_token;
+
+    skb = mlme_alloc_frame(len);
+    if (skb) {
+        mgmt = mlme_mgmt_header(skb, IEEE80211_STYPE_ACTION, len);
+        mgmt->u.action.category = WLAN_CATEGORY_BACK;
+        mgmt->u.action.action_code = WLAN_ACTION_ADDBA_REQ;
+        mgmt->u.action.addba_req.dialog_token = ba->dialog;
+        /* The size is the HT maximum whatever the driver will really send:
+         * mac80211 does the same because some APs mishandle smaller ones. */
+        mgmt->u.action.addba_req.capab =
+            cpu_to_le16(IEEE80211_ADDBA_PARAM_AMSDU_MASK | IEEE80211_ADDBA_PARAM_POLICY_MASK |
+                        (u16)(tid << 2) | (u16)(IEEE80211_MAX_AMPDU_BUF_HT << 6));
+        mgmt->u.action.addba_req.timeout = 0;
+        mgmt->u.action.addba_req.start_seq_num = cpu_to_le16((u16)(ba->ssn << 4));
+        mlme_tx_mgmt(skb);
+    }
+    /* without an answer (or without the request) the timeout cleans up */
+    wiphy_delayed_work_queue(mlme.hw->wiphy, &mlme.ba_timeout_work, MLME_ADDBA_TIMEOUT + 1);
+}
+
+/* ieee80211_process_addba_resp() */
+static void mlme_rx_addba_resp(const struct ieee80211_mgmt *mgmt, size_t len)
+{
+    u16 capab, tid, buf_size;
+    struct mlme_tx_ba *ba;
+
+    if (len < IEEE80211_MIN_ACTION_SIZE(addba_resp))
+        return;
+    capab = le16_to_cpu(mgmt->u.action.addba_resp.capab);
+    tid = (capab & IEEE80211_ADDBA_PARAM_TID_MASK) >> 2;
+    buf_size = (capab & IEEE80211_ADDBA_PARAM_BUF_SIZE_MASK) >> 6;
+    if (tid >= ARRAY_SIZE(mlme.tx_ba))
+        return;
+    ba = &mlme.tx_ba[tid];
+    if (ba->state != MLME_BA_WAIT || mgmt->u.action.addba_resp.dialog_token != ba->dialog)
+        return;
+
+    if (le16_to_cpu(mgmt->u.action.addba_resp.status) != WLAN_STATUS_SUCCESS || !buf_size) {
+        mlme_tx_ba_stop(tid, false, false);
+        return;
+    }
+
+    buf_size = min_t(u16, buf_size, mlme.hw->max_tx_aggregation_subframes);
+    mlme_ampdu_action(IEEE80211_AMPDU_TX_OPERATIONAL, tid, ba->ssn, buf_size,
+                      capab & IEEE80211_ADDBA_PARAM_AMSDU_MASK);
+    ba->state = MLME_BA_OPERATIONAL;
+    ba->tries = 0;
+    rtw89_data_tx_ba_resume((u8)tid);
+}
+
+/* ieee80211_process_delba() */
+static void mlme_rx_delba(const struct ieee80211_mgmt *mgmt, size_t len)
+{
+    u16 params, tid;
+
+    if (len < IEEE80211_MIN_ACTION_SIZE(delba))
+        return;
+    params = le16_to_cpu(mgmt->u.action.delba.params);
+    tid = (params & IEEE80211_DELBA_PARAM_TID_MASK) >> 12;
+
+    /* sent by the side that was sending aggregates, or by the receiving side */
+    if (params & IEEE80211_DELBA_PARAM_INITIATOR_MASK)
+        mlme_rx_ba_stop(tid);
+    else
+        mlme_tx_ba_stop(tid, false, false);
+}
+
+/* The AP did not answer an ADDBA request in time. */
+static void mlme_ba_timeout_work(struct wiphy *wiphy, struct wiphy_work *work)
+{
+    unsigned long next = 0;
+    u16 tid;
+
+    if (!mlme.running)
+        return;
+    for (tid = 0; tid < ARRAY_SIZE(mlme.tx_ba); tid++) {
+        struct mlme_tx_ba *ba = &mlme.tx_ba[tid];
+
+        if (ba->state != MLME_BA_WAIT)
+            continue;
+        if (time_after(jiffies, ba->deadline))
+            mlme_tx_ba_stop(tid, true, false);
+        else if (!next || time_before(ba->deadline, next))
+            next = ba->deadline;
+    }
+    if (next)
+        wiphy_delayed_work_queue(wiphy, &mlme.ba_timeout_work, next - jiffies + 1);
+}
+
+/* What the driver's threads asked for (rtw89_mlme_tx_ba_request()). */
+static void mlme_ba_work(struct wiphy *wiphy, struct wiphy_work *work)
+{
+    u16 tid;
+
+    if (!mlme.running)
+        return;
+    for (tid = 0; tid < ARRAY_SIZE(mlme.tx_ba); tid++) {
+        if (test_and_clear_bit(tid, &mlme.tx_ba_stop_req))
+            mlme_tx_ba_stop(tid, true, false);
+        if (test_and_clear_bit(tid, &mlme.tx_ba_start_req))
+            mlme_tx_ba_start(tid);
+    }
+}
+
+/*
+ * ieee80211_start_tx_ba_session() / ieee80211_stop_tx_ba_session(): the driver
+ * asks, from its own threads and with its own locks held. Only note the
+ * request here; the work above does the rest under the wiphy mutex.
+ */
+int rtw89_mlme_tx_ba_request(struct ieee80211_sta *sta, u16 tid, bool start)
+{
+    struct mlme_tx_ba *ba;
+
+    if (tid >= ARRAY_SIZE(mlme.tx_ba))
+        return -EINVAL;
+    if (!mlme.running || sta != mlme.sta || mlme.state != RTW89_MLME_CONNECTED)
+        return -EAGAIN;
+    ba = &mlme.tx_ba[tid];
+
+    if (!start) {
+        if (ba->state == MLME_BA_NONE)
+            return -ENOENT;
+        set_bit(tid, &mlme.tx_ba_stop_req);
+    } else {
+        /* -EINVAL makes rtw89 stop asking for this TID */
+        if (!sta->deflink.ht_cap.ht_supported || !sta->wme)
+            return -EINVAL;
+        if (ba->state != MLME_BA_NONE)
+            return -EAGAIN;
+        /* an AP that keeps saying no is asked a few times, then rarely, then
+         * not at all */
+        if (ba->tries > MLME_BA_MAX_TRIES ||
+            (ba->tries > MLME_BA_BURST_TRIES &&
+             time_before(jiffies, ba->last_try + MLME_BA_RETRY_PERIOD)))
+            return -EBUSY;
+        set_bit(tid, &mlme.tx_ba_start_req);
+    }
+    wiphy_work_queue(mlme.hw->wiphy, &mlme.ba_work);
+    return 0;
+}
+
+/* ieee80211_sta_tear_down_BA_sessions(): before the station goes away. */
+static void mlme_ba_teardown(void)
+{
+    u16 tid;
+
+    mlme.tx_ba_start_req = 0;
+    mlme.tx_ba_stop_req = 0;
+    wiphy_delayed_work_cancel(mlme.hw->wiphy, &mlme.ba_timeout_work);
+    if (mlme.sta && mlme.sta_state >= IEEE80211_STA_ASSOC) {
+        for (tid = 0; tid < ARRAY_SIZE(mlme.tx_ba); tid++)
+            mlme_tx_ba_stop(tid, false, true);
+        for (tid = 0; tid < IEEE80211_NUM_TIDS; tid++)
+            mlme_rx_ba_stop(tid);
+    }
+    memset(mlme.tx_ba, 0, sizeof(mlme.tx_ba));
+    mlme.rx_ba = 0;
 }
 
 static void mlme_rx_action(const struct ieee80211_mgmt *mgmt, size_t len)
@@ -1165,9 +1474,20 @@ static void mlme_rx_action(const struct ieee80211_mgmt *mgmt, size_t len)
         return;
     /* with a pairwise key these would have to be protected frames (802.11w),
      * which this driver does not negotiate */
-    if (mgmt->u.action.category == WLAN_CATEGORY_BACK &&
-        mgmt->u.action.action_code == WLAN_ACTION_ADDBA_REQ)
+    if (mgmt->u.action.category != WLAN_CATEGORY_BACK)
+        return;
+
+    switch (mgmt->u.action.action_code) {
+    case WLAN_ACTION_ADDBA_REQ:
         mlme_rx_addba_req(mgmt, len);
+        break;
+    case WLAN_ACTION_ADDBA_RESP:
+        mlme_rx_addba_resp(mgmt, len);
+        break;
+    case WLAN_ACTION_DELBA:
+        mlme_rx_delba(mgmt, len);
+        break;
+    }
 }
 
 static void mlme_rx_frame(struct sk_buff *skb)
@@ -1311,6 +1631,8 @@ void rtw89_mlme_start(struct ieee80211_hw *hw, struct ieee80211_vif *vif, void (
     skb_queue_head_init(&mlme.rxq);
     wiphy_work_init(&mlme.rx_work, mlme_rx_work);
     wiphy_work_init(&mlme.lost_work, mlme_lost_work);
+    wiphy_work_init(&mlme.ba_work, mlme_ba_work);
+    wiphy_delayed_work_init(&mlme.ba_timeout_work, mlme_ba_timeout_work);
     wiphy_delayed_work_init(&mlme.timeout_work, mlme_timeout_work);
     mlme.running = true;
 }
@@ -1325,6 +1647,8 @@ void rtw89_mlme_stop(void)
     wiphy_delayed_work_cancel(mlme.hw->wiphy, &mlme.timeout_work);
     wiphy_work_cancel(mlme.hw->wiphy, &mlme.rx_work);
     wiphy_work_cancel(mlme.hw->wiphy, &mlme.lost_work);
+    wiphy_work_cancel(mlme.hw->wiphy, &mlme.ba_work);
+    wiphy_delayed_work_cancel(mlme.hw->wiphy, &mlme.ba_timeout_work);
     skb_queue_purge(&mlme.rxq);
     spin_lock_destroy(&mlme.rxq.lock);
     memset(mlme.pmk, 0, sizeof(mlme.pmk));
@@ -1345,6 +1669,14 @@ void rtw89_mlme_get_status(struct rtw89_mlme_status *status)
     status->state = mlme.running ? mlme.state : RTW89_MLME_IDLE;
     status->last_error = mlme.last_error;
     status->eapol_rx = mlme.eapol_rx;
+    if (status->state >= RTW89_MLME_ASSOCIATED) {
+        unsigned int tid;
+
+        status->rx_ba = mlme.rx_ba;
+        for (tid = 0; tid < ARRAY_SIZE(mlme.tx_ba); tid++)
+            if (mlme.tx_ba[tid].state == MLME_BA_OPERATIONAL)
+                status->tx_ba |= BIT(tid);
+    }
     if (status->state != RTW89_MLME_IDLE) {
         memcpy(status->bssid, mlme.bss.bssid, ETH_ALEN);
         memcpy(status->ssid, mlme.bss.ssid, mlme.bss.ssid_len);

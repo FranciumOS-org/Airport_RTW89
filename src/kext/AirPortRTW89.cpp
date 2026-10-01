@@ -537,6 +537,8 @@ void AirPort_RTW89::publishLink()
     setProperty("RTW89 RX Dropped", link.rx_dropped, 32);
     setProperty("RTW89 RX Undecrypted", link.rx_undecrypted, 32);
     setProperty("RTW89 RX Replayed", link.rx_replay, 32);
+    setProperty("RTW89 TX Aggregation", link.tx_ba, 32);
+    setProperty("RTW89 RX Aggregation", link.rx_ba, 32);
 
     /* The stack starts DHCP when the link comes up and forgets its addresses
      * when it goes down. */
