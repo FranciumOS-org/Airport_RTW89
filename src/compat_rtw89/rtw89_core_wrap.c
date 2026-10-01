@@ -7,8 +7,9 @@
  * until the chip's status report for the same transmission (PPDU) arrives, so
  * that the signal measurements can be attached to it; if no report comes, the
  * frame is passed on when the next transmission is received. On the RTL8852BE
- * in this machine the report often did not come for larger frames, and the
- * next thing received was the access point's beacon, up to 102 ms later.
+ * in this machine the report does not come for most data frames (measured:
+ * four in ten frames of a download, nearly all sparse ones), and the next
+ * thing received was then the access point's beacon, up to 102 ms later.
  * rtw89_glue.c therefore calls rtw89_compat_flush_ppdu_rx() a couple of
  * milliseconds after a poll that left frames parked.
  */
