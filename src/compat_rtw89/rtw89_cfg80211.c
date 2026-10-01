@@ -47,6 +47,18 @@ struct wiphy *wiphy_new_nm(const struct cfg80211_ops *ops, int sizeof_priv,
     mutex_init(&rdev->wiphy.mtx);
     rdev->wiphy.dev.name = requested_name ? requested_name : "phy0";
 
+    /* The defaults of net/wireless/core.c. (u32)-1 means "off": rtw89 programs
+     * the RTS threshold into the chip, and zero would put an RTS/CTS exchange
+     * in front of nearly every frame. */
+    rdev->wiphy.retry_short = 7;
+    rdev->wiphy.retry_long = 4;
+    rdev->wiphy.frag_threshold = (u32)-1;
+    rdev->wiphy.rts_threshold = (u32)-1;
+    rdev->wiphy.coverage_class = 0;
+    rdev->wiphy.max_num_csa_counters = 1;
+    rdev->wiphy.max_sched_scan_plans = 1;
+    rdev->wiphy.max_sched_scan_plan_interval = U32_MAX;
+
     return &rdev->wiphy;
 }
 
