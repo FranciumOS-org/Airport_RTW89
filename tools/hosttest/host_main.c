@@ -33,8 +33,10 @@ void rtw89_glue_note_bss(const uint8_t *frame, size_t len, uint16_t freq, int8_t
 
 void rtw89_glue_test_rx(const uint8_t *frame, size_t len, uint16_t freq, int8_t signal,
                         bool decrypted);
-/* src/compat_rtw89/rtw89_mlme.c: see every frame the station transmits */
+/* src/compat_rtw89/rtw89_mlme.c and rtw89_data.c: see every management and
+ * data frame the station transmits */
 void rtw89_mlme_set_tx_tap(void (*tap)(const uint8_t *frame, size_t len));
+void rtw89_data_set_tx_tap(void (*tap)(const uint8_t *frame, size_t len));
 
 /* The access point the smoke test pretends to be, and the card (fakechip_core.c). */
 static const uint8_t ap_mac[6] = { 0x02, 0xaa, 0xbb, 0xcc, 0xdd, 0x01 };
@@ -122,7 +124,31 @@ static struct {
     bool eapol_protected;
     uint64_t eapol_pn;          /* CCMP packet number, if it was protected */
     volatile int eapol_count;
+    /* the last other data frame and the last action frame it sent */
+    uint8_t data[2400];
+    size_t data_len;
+    int data_count;
+    uint8_t action[64];
+    size_t action_len;
+    volatile int action_count;
+    /* packet numbers of the frames we send it */
+    uint64_t tx_pn, gtk_pn;
 } ap;
+
+/* What the station hands to the network stack. */
+static struct {
+    uint8_t frame[2400];
+    size_t len;
+    int count;
+} sta_rx;
+
+static void sta_rx_frame(void *ctx, const uint8_t *frame, size_t len)
+{
+    sta_rx.count++;
+    sta_rx.len = len;
+    if (len <= sizeof(sta_rx.frame))
+        memcpy(sta_rx.frame, frame, len);
+}
 
 static void ap_tx_tap(const uint8_t *frame, size_t len)
 {
@@ -130,6 +156,11 @@ static void ap_tx_tap(const uint8_t *frame, size_t len)
     size_t hdrlen = (frame[0] & 0x80) ? 26 : 24;    /* QoS data has a QoS control field */
     bool prot = frame[1] & 0x40;
 
+    if (frame[0] == 0xd0 && len <= sizeof(ap.action)) {
+        memcpy(ap.action, frame, len);
+        ap.action_len = len;
+        ap.action_count++;
+    }
     if ((frame[0] & 0x0c) != 0x08)                  /* not a data frame */
         return;
     if (prot) {
@@ -139,8 +170,14 @@ static void ap_tx_tap(const uint8_t *frame, size_t len)
                       (uint64_t)c[6] << 32 | (uint64_t)c[7] << 40;
         hdrlen += 8;
     }
-    if (len < hdrlen + 8 || memcmp(frame + hdrlen, llc, 8))
+    if (len < hdrlen + 8 || memcmp(frame + hdrlen, llc, 8)) {
+        if (len <= sizeof(ap.data)) {
+            memcpy(ap.data, frame, len);
+            ap.data_len = len;
+            ap.data_count++;
+        }
         return;
+    }
     ap.eapol_len = len - hdrlen - 8;
     if (ap.eapol_len > sizeof(ap.eapol))
         return;
@@ -172,6 +209,14 @@ static void ap_send_key(uint16_t key_info, const uint8_t *kd, size_t kd_len, boo
     memcpy(frame + 4, sta_mac, 6);
     memcpy(frame + 10, ap_mac, 6);
     memcpy(frame + 16, ap_mac, 6);
+    if (protect) {
+        /* the CCMP header: a packet number that goes up, key id 0 */
+        ap.tx_pn++;
+        frame[24] = (uint8_t)ap.tx_pn;
+        frame[25] = (uint8_t)(ap.tx_pn >> 8);
+        frame[27] = 0x20;
+        frame[28] = (uint8_t)(ap.tx_pn >> 16);
+    }
     memcpy(frame + hdr, "\xaa\xaa\x03\x00\x00\x00\x88\x8e", 8);
 
     e = frame + hdr + 8;
@@ -191,6 +236,11 @@ static void ap_send_key(uint16_t key_info, const uint8_t *kd, size_t kd_len, boo
         k[5 + i] = (uint8_t)(ap.replay >> (56 - 8 * i));
     if (key_info & 0x0008)
         memcpy(k + 13, ap.anonce, 32);
+    if (key_info & 0x1000) {
+        /* key RSC: how far the group key's packet numbers have got */
+        k[61] = (uint8_t)ap.gtk_pn;
+        k[62] = (uint8_t)(ap.gtk_pn >> 8);
+    }
     k[93] = (uint8_t)(wrapped >> 8);
     k[94] = (uint8_t)wrapped;
     if (key_info & 0x1000)
@@ -306,6 +356,208 @@ static int ap_group_rekey(const uint8_t gtk[16], int gtk_idx)
     return info == 0x0302 && ap.eapol_protected ? 0 : -1;
 }
 
+/* ---- data frames, once connected ---- */
+
+/* An 802.11 data frame from the AP. @body is what follows the 802.11 header
+ * (and CCMP header). @keyid < 0: in the clear. @tid < 0: not a QoS frame. */
+static void ap_send_data(const uint8_t *da, const uint8_t *sa, int tid, bool amsdu, bool retry,
+                         uint16_t seq, int keyid, uint64_t pn, bool hw_decrypted,
+                         const uint8_t *body, size_t body_len)
+{
+    uint8_t frame[2400];
+    size_t len = 24;
+
+    memset(frame, 0, 48);
+    frame[0] = tid >= 0 ? 0x88 : 0x08;
+    frame[1] = 0x02 | (retry ? 0x08 : 0) | (keyid >= 0 ? 0x40 : 0);
+    memcpy(frame + 4, da, 6);
+    memcpy(frame + 10, ap_mac, 6);
+    memcpy(frame + 16, sa, 6);
+    frame[22] = (uint8_t)(seq << 4);
+    frame[23] = (uint8_t)(seq >> 4);
+    if (tid >= 0) {
+        frame[24] = (uint8_t)tid | (amsdu ? 0x80 : 0);
+        len = 26;
+    }
+    if (keyid >= 0) {
+        frame[len] = (uint8_t)pn;
+        frame[len + 1] = (uint8_t)(pn >> 8);
+        frame[len + 3] = 0x20 | (uint8_t)(keyid << 6);
+        frame[len + 4] = (uint8_t)(pn >> 16);
+        len += 8;
+    }
+    memcpy(frame + len, body, body_len);
+    len += body_len;
+    if (keyid >= 0) {
+        memset(frame + len, 0xee, 8);       /* where the MIC was */
+        len += 8;
+    }
+    rtw89_glue_test_rx(frame, len, 2437, -40, keyid >= 0 && hw_decrypted);
+}
+
+/* Hand an Ethernet frame to the driver the way the kext does. */
+static int sta_tx(const uint8_t *eth, size_t len)
+{
+    uint8_t *buf = NULL;
+    void *handle = rtw89_glue_tx_alloc(len, &buf);
+
+    if (!handle)
+        return -12;
+    memcpy(buf, eth, len);
+    return rtw89_glue_tx(handle);
+}
+
+static const uint8_t peer_mac[6] = { 0x02, 0x11, 0x22, 0x33, 0x44, 0x55 };
+static const uint8_t bcast_mac[6] = { 0xff, 0xff, 0xff, 0xff, 0xff, 0xff };
+
+/* An IPv4/UDP packet with DSCP "expedited forwarding", so it maps to TID 5. */
+static const uint8_t test_ip[] = {
+    0x45, 0xb8, 0x00, 0x24, 0x12, 0x34, 0x00, 0x00, 0x40, 0x11, 0x00, 0x00,
+    192, 168, 1, 10, 192, 168, 1, 1,
+    0x30, 0x39, 0x00, 0x35, 0x00, 0x10, 0x00, 0x00,
+    'h', 'e', 'l', 'l', 'o', ' ', 'a', 'p',
+};
+
+/* A small frame from this interface; returns what the driver said. */
+static int sta_tx_test(void)
+{
+    uint8_t eth[14 + sizeof(test_ip)];
+
+    memcpy(eth, peer_mac, 6);
+    memcpy(eth + 6, sta_mac, 6);
+    eth[12] = 0x08; eth[13] = 0x00;
+    memcpy(eth + 14, test_ip, sizeof(test_ip));
+    return sta_tx(eth, sizeof(eth));
+}
+
+/* Both directions of the data path, with the handshake done. gtk ids 1 and 2
+ * are installed. Returns the number of failures. */
+static int test_data(void)
+{
+    uint8_t eth[14 + sizeof(test_ip)], body[8 + sizeof(test_ip)], amsdu[2 * (14 + 8 + 64)];
+    struct rtw89_glue_link link;
+    const uint8_t *f = ap.data;
+    int failures = 0, n;
+    uint64_t pn;
+    size_t len;
+
+#define EXPECT(cond) do { if (!(cond)) { failures++; printf("== FAIL %s\n", #cond); } } while (0)
+    /* ---- transmit ---- */
+    memcpy(eth, peer_mac, 6);
+    memcpy(eth + 6, sta_mac, 6);
+    eth[12] = 0x08; eth[13] = 0x00;
+    memcpy(eth + 14, test_ip, sizeof(test_ip));
+    pn = ap.eapol_pn;
+    n = ap.data_count;
+    EXPECT(sta_tx(eth, sizeof(eth)) == 0);
+    EXPECT(ap.data_count == n + 1);
+    /* QoS data to the DS, protected; receiver the AP, source us, destination the peer */
+    EXPECT(f[0] == 0x88 && f[1] == 0x41);
+    EXPECT(!memcmp(f + 4, ap_mac, 6) && !memcmp(f + 10, sta_mac, 6) && !memcmp(f + 16, peer_mac, 6));
+    EXPECT((f[24] & 0x0f) == 5 && !(f[24] & 0x80));
+    /* CCMP header: extended IV, key id 0, the next packet number */
+    EXPECT(f[29] == 0x20 && (f[26] | f[27] << 8) == (int)pn + 1);
+    EXPECT(!memcmp(f + 34, "\xaa\xaa\x03\x00\x00\x00\x08\x00", 8));
+    EXPECT(ap.data_len == 34 + 8 + sizeof(test_ip) && !memcmp(f + 42, test_ip, sizeof(test_ip)));
+    /* sequence numbers count per TID */
+    EXPECT(sta_tx(eth, sizeof(eth)) == 0);
+    EXPECT((f[22] >> 4 | f[23] << 4) == 1 && (f[26] | f[27] << 8) == (int)pn + 2);
+    /* an 802.3 frame (a length instead of a type) keeps its own LLC header */
+    eth[12] = 0x00; eth[13] = sizeof(test_ip);
+    EXPECT(sta_tx(eth, sizeof(eth)) == 0);
+    EXPECT((f[24] & 0x0f) == 0 && ap.data_len == 34 + sizeof(test_ip) &&
+           !memcmp(f + 34, test_ip, sizeof(test_ip)));
+    /* frames that are not from this interface are not sent */
+    memcpy(eth + 6, peer_mac, 6);
+    EXPECT(sta_tx(eth, sizeof(eth)) == -22);
+    EXPECT(sta_tx(eth, 10) == -12);
+
+    /* ---- receive ---- */
+    memcpy(body, "\xaa\xaa\x03\x00\x00\x00\x08\x00", 8);
+    memcpy(body + 8, test_ip, sizeof(test_ip));
+    pn = ap.tx_pn + 10;
+
+    n = sta_rx.count;
+    ap_send_data(sta_mac, peer_mac, 0, false, false, 100, 0, pn, true, body, sizeof(body));
+    EXPECT(sta_rx.count == n + 1 && sta_rx.len == 14 + sizeof(test_ip));
+    EXPECT(!memcmp(sta_rx.frame, sta_mac, 6) && !memcmp(sta_rx.frame + 6, peer_mac, 6));
+    EXPECT(sta_rx.frame[12] == 0x08 && sta_rx.frame[13] == 0x00 &&
+           !memcmp(sta_rx.frame + 14, test_ip, sizeof(test_ip)));
+
+    /* the same packet number again: a replay */
+    ap_send_data(sta_mac, peer_mac, 0, false, false, 101, 0, pn, true, body, sizeof(body));
+    EXPECT(sta_rx.count == n + 1);
+    /* a retry of a frame already received */
+    ap_send_data(sta_mac, peer_mac, 0, false, true, 101, 0, pn + 1, true, body, sizeof(body));
+    EXPECT(sta_rx.count == n + 1);
+    /* packet numbers count per TID: this one is new on TID 3 */
+    ap_send_data(sta_mac, peer_mac, 3, false, false, 7, 0, pn, true, body, sizeof(body));
+    EXPECT(sta_rx.count == n + 2);
+    /* in the clear on an encrypted network, or not decrypted by the chip */
+    ap_send_data(sta_mac, peer_mac, 0, false, false, 102, -1, 0, false, body, sizeof(body));
+    ap_send_data(sta_mac, peer_mac, 0, false, false, 103, 0, pn + 2, false, body, sizeof(body));
+    /* for somebody else, or from another access point's client */
+    ap_send_data(peer_mac, peer_mac, 0, false, false, 104, 0, pn + 3, true, body, sizeof(body));
+    EXPECT(sta_rx.count == n + 2);
+
+    /* broadcast: the group key with the id the AP names, above its RSC */
+    ap_send_data(bcast_mac, peer_mac, -1, false, false, 1, 2, ap.gtk_pn, true, body, sizeof(body));
+    EXPECT(sta_rx.count == n + 2);
+    ap_send_data(bcast_mac, peer_mac, -1, false, false, 2, 2, ap.gtk_pn + 1, true, body, sizeof(body));
+    EXPECT(sta_rx.count == n + 3 && !memcmp(sta_rx.frame, bcast_mac, 6));
+    ap_send_data(bcast_mac, peer_mac, -1, false, false, 3, 1, ap.gtk_pn + 1, true, body, sizeof(body));
+    EXPECT(sta_rx.count == n + 4);
+    /* a group key id that was never installed, and our own broadcast echoed */
+    ap_send_data(bcast_mac, peer_mac, -1, false, false, 4, 3, ap.gtk_pn + 2, true, body, sizeof(body));
+    ap_send_data(bcast_mac, sta_mac, -1, false, false, 5, 2, ap.gtk_pn + 2, true, body, sizeof(body));
+    EXPECT(sta_rx.count == n + 4);
+    /* a frame without SNAP header arrives as 802.3 with a length */
+    ap_send_data(sta_mac, peer_mac, 0, false, false, 105, 0, pn + 4, true, test_ip, sizeof(test_ip));
+    EXPECT(sta_rx.count == n + 5 && sta_rx.len == 14 + sizeof(test_ip));
+    EXPECT(sta_rx.frame[12] == 0 && sta_rx.frame[13] == sizeof(test_ip));
+
+    /* an A-MSDU with two subframes, the first padded to four bytes */
+    memset(amsdu, 0, sizeof(amsdu));
+    memcpy(amsdu, sta_mac, 6);
+    memcpy(amsdu + 6, peer_mac, 6);
+    amsdu[13] = 8 + 21;
+    memcpy(amsdu + 14, "\xaa\xaa\x03\x00\x00\x00\x08\x06", 8);
+    memset(amsdu + 22, 0x11, 21);
+    len = (14 + 8 + 21 + 3) & ~3u;
+    memcpy(amsdu + len, sta_mac, 6);
+    memcpy(amsdu + len + 6, peer_mac, 6);
+    amsdu[len + 13] = 8 + 30;
+    memcpy(amsdu + len + 14, "\xaa\xaa\x03\x00\x00\x00\x86\xdd", 8);
+    memset(amsdu + len + 22, 0x22, 30);
+    ap_send_data(sta_mac, peer_mac, 0, true, false, 106, 0, pn + 5, true, amsdu, len + 14 + 8 + 30);
+    EXPECT(sta_rx.count == n + 7 && sta_rx.len == 14 + 30);
+    EXPECT(sta_rx.frame[12] == 0x86 && sta_rx.frame[13] == 0xdd && sta_rx.frame[14 + 29] == 0x22);
+    /* a normal frame with the A-MSDU bit set by an attacker */
+    ap_send_data(sta_mac, peer_mac, 0, true, false, 107, 0, pn + 6, true, body, sizeof(body));
+    EXPECT(sta_rx.count == n + 7);
+
+    rtw89_glue_link(&link);
+    EXPECT(link.tx_frames >= 3 && link.rx_frames >= 7 && link.rx_replay >= 2 &&
+           link.rx_undecrypted >= 1);
+
+    /* the AP asks for a BlockAck agreement: declined for now */
+    n = ap.action_count;
+    {
+        static const uint8_t addba[] = { 3, 0, 9, 0x02, 0x10, 0x00, 0x00, 0x10, 0x00 };
+        int i;
+
+        ap_send(0xd0, addba, sizeof(addba));
+        for (i = 0; i < 100 && ap.action_count == n; i++)
+            usleep(20 * 1000);
+    }
+    EXPECT(ap.action_count == n + 1 && ap.action_len == 24 + 9);
+    EXPECT(ap.action[24] == 3 && ap.action[25] == 1 && ap.action[26] == 9 &&
+           ap.action[27] == 37 && ap.action[28] == 0);
+#undef EXPECT
+    printf("== data path test: %d failure(s)\n", failures);
+    return failures;
+}
+
 static enum rtw89_glue_link_state link_state(void)
 {
     struct rtw89_glue_link link;
@@ -349,6 +601,7 @@ static int test_join(void)
 
 #define EXPECT(cond) do { if (!(cond)) { failures++; printf("== FAIL %s\n", #cond); } } while (0)
     rtw89_mlme_set_tx_tap(ap_tx_tap);
+    rtw89_data_set_tx_tap(ap_tx_tap);
     ap_send_beacon();
     EXPECT(rtw89_glue_join((const uint8_t *)"nosuchnet", 9, AP_PASSWORD, strlen(AP_PASSWORD)) == -2);
     /* a WPA2 network needs a password of 8 to 63 characters */
@@ -399,17 +652,29 @@ static int test_join(void)
         EXPECT(ap.eapol_pn == 4);
     }
 
-    /* the AP throws us out */
+    failures += test_data();
+
+    /* the AP throws us out; nothing can be sent after that */
     ap_send_deauth(7);
     EXPECT(wait_link(RTW89_GLUE_LINK_DOWN));
     rtw89_glue_link(&link);
     EXPECT(link.last_error == -2007);
+    EXPECT(sta_tx_test() == -100);
 
     /* wrong password: the AP cannot verify message 2 and gives up */
     EXPECT(join_testnet("not the password", 0));
     EXPECT(wait_link(RTW89_GLUE_LINK_ASSOCIATED));
     EXPECT(ap_handshake(gtk1, 1) == 1);
     EXPECT(link_state() == RTW89_GLUE_LINK_ASSOCIATED);
+    /* associated but not authorised: no data in either direction */
+    EXPECT(sta_tx_test() == -100);
+    {
+        int n = sta_rx.count;
+
+        ap_send_data(sta_mac, peer_mac, 0, false, false, 1, -1, 0, false,
+                     (const uint8_t *)"\xaa\xaa\x03\x00\x00\x00\x08\x00test", 12);
+        EXPECT(sta_rx.count == n);
+    }
     ap_send_deauth(15);
     EXPECT(wait_link(RTW89_GLUE_LINK_DOWN));
     rtw89_glue_link(&link);
@@ -543,6 +808,7 @@ int main(int argc, char **argv)
     struct rtw89_glue_platform plat = {
         .cfg_read = cfg_read, .cfg_write = cfg_write,
         .dma_alloc = dma_alloc, .dma_free = dma_free,
+        .rx_frame = sta_rx_frame,
     };
     struct rtw89_glue_device dev = {
         .vendor = 0x10ec, .device = 0xb852,

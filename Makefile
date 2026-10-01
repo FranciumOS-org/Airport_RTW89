@@ -89,6 +89,7 @@ COMPAT89_SRCS := $(COMPAT89_DIR)/rtw89_compat.c \
                  $(COMPAT89_DIR)/rtw89_cfg80211_bitrate.c \
                  $(COMPAT89_DIR)/rtw89_mac80211.c \
                  $(COMPAT89_DIR)/rtw89_mlme.c \
+                 $(COMPAT89_DIR)/rtw89_data.c \
                  $(COMPAT89_DIR)/rtw89_glue.c \
                  $(COMPAT89_DIR)/rtw89_debug_shim.c
 

@@ -28,11 +28,20 @@ def main():
     for m in re.finditer(r"^\s+(\S+) in \S+: (\S+) \(", km.stdout + km.stderr, re.M):
         found.setdefault(m.group(1), set()).add(m.group(2))
 
-    missing = sorted(wanted - set(found))
+    # A C++ class keeps spare vtable slots named <Class>::_RESERVED<Class><n>().
+    # When a later version of the class starts using a slot, that symbol is no
+    # longer exported; the kext linker fills the subclass's slot from the
+    # parent's vtable instead ("pad slot" patching). Such symbols are expected
+    # for IONetworkController, whose slots 2-7 are in use on current systems.
+    pad_slots = {s for s in wanted - set(found) if re.search(r"\d+_RESERVED", s)}
+
+    missing = sorted(wanted - set(found) - pad_slots)
     undeclared = sorted(s for s in wanted & set(found) if not found[s] & declared)
     used = sorted({lib for s in wanted & set(found) for lib in found[s] & declared})
 
     print(f"  KPI  {len(wanted)} imports; libraries used: {', '.join(used)}")
+    if pad_slots:
+        print(f"    {len(pad_slots)} vtable pad slot(s) left for the kext linker to patch")
     for s in missing:
         print(f"    no KPI exports {s}")
     for s in undeclared:

@@ -66,14 +66,14 @@ static struct {
     u8 replay[8];               /* last replay counter accepted from the AP */
     bool replay_valid;
     struct ieee80211_key_conf *ptk_conf;
-    struct ieee80211_key_conf *gtk_conf;
-    u16 tx_sn[IEEE80211_NUM_TIDS];
+    struct ieee80211_key_conf *gtk_conf[4];     /* by key id; the AP alternates */
 
     void (*notify)(void);
     void (*tx_tap)(const u8 *frame, size_t len);
 
     struct sk_buff_head rxq;
     struct wiphy_work rx_work;
+    struct wiphy_work lost_work;
     struct wiphy_delayed_work timeout_work;
 } mlme;
 
@@ -323,8 +323,26 @@ static void mlme_key_remove(struct ieee80211_key_conf **slot, struct ieee80211_s
     *slot = NULL;
     mlme.local->ops->set_key(mlme.hw, DISABLE_KEY, mlme.vif, sta, conf);
     rtw89_m80211_key_del(mlme.hw, conf);
-    memset(conf, 0, sizeof(*conf) + WLAN_KEY_LEN_CCMP);
-    kfree(conf);
+    /* the key itself goes now; a frame still queued may point at the rest */
+    memset(conf->key, 0, WLAN_KEY_LEN_CCMP);
+    rtw89_m80211_free_later(mlme.hw, conf, NULL);
+}
+
+/* Install the group key with id @idx unless it is the one already there. */
+static int mlme_gtk_install(int idx, const u8 *gtk, u64 rsc)
+{
+    int ret;
+
+    if (mlme_key_is(mlme.gtk_conf[idx], gtk, (s8)idx))
+        return 0;
+    if (mlme.gtk_conf[idx]) {
+        rtw89_data_set_rx_key(idx, false, 0);
+        mlme_key_remove(&mlme.gtk_conf[idx], NULL);
+    }
+    ret = mlme_key_install(&mlme.gtk_conf[idx], NULL, gtk, (s8)idx);
+    if (!ret)
+        rtw89_data_set_rx_key(idx, true, rsc);
+    return ret;
 }
 
 /* ------------------------------------------------------------------ */
@@ -359,7 +377,12 @@ static void mlme_teardown(u16 deauth_reason)
     if (mlme.state == RTW89_MLME_IDLE)
         return;
 
+    int i;
+
     wiphy_delayed_work_cancel(mlme.hw->wiphy, &mlme.timeout_work);
+
+    /* no more data in either direction, and nothing left queued for the AP */
+    rtw89_data_detach();
 
     if (deauth_reason && mlme.sta && mlme.sta_state >= IEEE80211_STA_NONE)
         mlme_send_deauth(deauth_reason);
@@ -371,7 +394,8 @@ static void mlme_teardown(u16 deauth_reason)
 
     /* keys go before the station they belong to */
     mlme_key_remove(&mlme.ptk_conf, mlme.sta);
-    mlme_key_remove(&mlme.gtk_conf, NULL);
+    for (i = 0; i < ARRAY_SIZE(mlme.gtk_conf); i++)
+        mlme_key_remove(&mlme.gtk_conf[i], NULL);
     memset(&mlme.ptk, 0, sizeof(mlme.ptk));
     memset(&mlme.tptk, 0, sizeof(mlme.tptk));
     mlme.ptk_valid = false;
@@ -744,6 +768,8 @@ static void mlme_rx_assoc_resp(const struct ieee80211_mgmt *mgmt, size_t len)
         ops->link_info_changed(mlme.hw, mlme.vif, conf, changed);
 
     mlme.last_error = 0;
+    if (!mlme.rsn)
+        rtw89_data_authorize();
     mlme_set_state(mlme.rsn ? RTW89_MLME_ASSOCIATED : RTW89_MLME_CONNECTED);
     /* an AP that never starts or finishes the handshake must not leave us
      * associated without keys for ever */
@@ -823,73 +849,22 @@ static void mlme_rx_auth(const struct ieee80211_mgmt *mgmt, size_t len)
 
 static const u8 mlme_eapol_llc[8] = { 0xaa, 0xaa, 0x03, 0x00, 0x00, 0x00, 0x88, 0x8e };
 
-/* Send an EAPOL frame to the AP as a data frame, encrypted once there is a
- * pairwise key (what the control port does in mac80211). */
+/* Send an EAPOL frame to the AP. It takes the data path like any other frame
+ * (and so is encrypted once there is a pairwise key), but is let through
+ * before the port is authorised: what the control port does in mac80211. */
 static void mlme_tx_eapol(const u8 *eapol, size_t len)
 {
-    struct ieee80211_tx_control control = { .sta = mlme.sta };
-    bool qos = mlme.sta->wme;
-    unsigned int hdrlen = qos ? sizeof(struct ieee80211_qos_hdr) :
-                                sizeof(struct ieee80211_hdr_3addr);
-    struct ieee80211_key_conf *key = mlme.ptk_conf;
-    const u8 tid = 7;           /* control port frames go out at voice priority */
-    struct ieee80211_tx_info *info;
-    struct ieee80211_qos_hdr *hdr;
-    struct sk_buff *skb;
-    u16 fc;
+    struct sk_buff *skb = rtw89_data_tx_alloc(ETH_HLEN + len);
+    u8 *eth;
 
-    skb = mlme_alloc_frame(hdrlen + IEEE80211_CCMP_HDR_LEN + sizeof(mlme_eapol_llc) + len +
-                           IEEE80211_CCMP_MIC_LEN);
     if (!skb)
         return;
-
-    fc = IEEE80211_FTYPE_DATA | IEEE80211_FCTL_TODS |
-         (qos ? IEEE80211_STYPE_QOS_DATA : IEEE80211_STYPE_DATA);
-    if (key)
-        fc |= IEEE80211_FCTL_PROTECTED;
-
-    hdr = skb_put_zero(skb, hdrlen);
-    hdr->frame_control = cpu_to_le16(fc);
-    memcpy(hdr->addr1, mlme.bss.bssid, ETH_ALEN);       /* receiver: the AP */
-    memcpy(hdr->addr2, mlme.vif->addr, ETH_ALEN);       /* transmitter and source */
-    memcpy(hdr->addr3, mlme.bss.bssid, ETH_ALEN);       /* destination */
-    hdr->seq_ctrl = cpu_to_le16((mlme.tx_sn[qos ? tid : 0]++ & 0xfff) << 4);
-    if (qos)
-        hdr->qos_ctrl = cpu_to_le16(tid);
-
-    if (key) {
-        /* The driver asked for a generated IV: the CCMP header with the next
-         * packet number. The hardware encrypts and appends the MIC. */
-        u64 pn = atomic64_inc_return(&key->tx_pn);
-        u8 *ccmp = skb_put(skb, IEEE80211_CCMP_HDR_LEN);
-
-        ccmp[0] = (u8)pn;
-        ccmp[1] = (u8)(pn >> 8);
-        ccmp[2] = 0;
-        ccmp[3] = 0x20 | (key->keyidx << 6);            /* extended IV, key id */
-        ccmp[4] = (u8)(pn >> 16);
-        ccmp[5] = (u8)(pn >> 24);
-        ccmp[6] = (u8)(pn >> 32);
-        ccmp[7] = (u8)(pn >> 40);
-    }
-
-    skb_put_data(skb, mlme_eapol_llc, sizeof(mlme_eapol_llc));
-    skb_put_data(skb, eapol, len);
-
-    info = IEEE80211_SKB_CB(skb);
-    memset(info, 0, sizeof(*info));
-    info->control.vif = mlme.vif;
-    info->control.hw_key = key;
-    info->control.flags = IEEE80211_TX_CTRL_PORT_CTRL_PROTO;
-    info->band = mlme.chan->band;
-    info->hw_queue = mlme.vif->hw_queue[IEEE80211_AC_VO];
-    skb->protocol = htons(ETH_P_PAE);
-    skb->priority = tid;
-    skb_set_queue_mapping(skb, IEEE80211_AC_VO);
-
-    if (mlme.tx_tap)
-        mlme.tx_tap(skb->data, skb->len);
-    mlme.local->ops->tx(mlme.hw, &control, skb);
+    eth = skb->data;
+    memcpy(eth, mlme.bss.bssid, ETH_ALEN);
+    memcpy(eth + ETH_ALEN, mlme.vif->addr, ETH_ALEN);
+    put_unaligned_be16(ETH_P_PAE, eth + 2 * ETH_ALEN);
+    memcpy(eth + ETH_HLEN, eapol, len);
+    rtw89_data_tx(skb);
 }
 
 /* Build and send an EAPOL-Key reply with a valid MIC. */
@@ -1012,6 +987,7 @@ static void mlme_rx_eapol(const u8 *e, size_t len)
     u8 plain[256], copy[512];
     u16 key_info, body_len, kd_len;
     int gtk_idx = -1;
+    u64 rsc;
 
     if (!mlme.eapol_rx++)
         mlme_info("the AP started the key handshake");
@@ -1027,6 +1003,10 @@ static void mlme_rx_eapol(const u8 *e, size_t len)
 
     key_info = get_unaligned_be16(k + KEY_OFF_INFO);
     kd_len = get_unaligned_be16(k + KEY_OFF_DATA_LEN);
+    /* the packet number the AP has reached with the group key, low byte first */
+    rsc = k[KEY_OFF_RSC] | (u64)k[KEY_OFF_RSC + 1] << 8 | (u64)k[KEY_OFF_RSC + 2] << 16 |
+          (u64)k[KEY_OFF_RSC + 3] << 24 | (u64)k[KEY_OFF_RSC + 4] << 32 |
+          (u64)k[KEY_OFF_RSC + 5] << 40;
     kd = k + EAPOL_KEY_FIXED_LEN;
     if ((size_t)kd_len + EAPOL_KEY_FIXED_LEN > body_len)
         return;
@@ -1103,18 +1083,20 @@ static void mlme_rx_eapol(const u8 *e, size_t len)
          * a packet number breaks CCMP (the KRACK attack).
          */
         if ((key_info & KEY_INFO_INSTALL) && !mlme_key_is(mlme.ptk_conf, mlme.ptk.tk, 0)) {
+            /* a renewed key: data waits until the new one is in */
+            rtw89_data_set_tx_key(NULL);
+            rtw89_data_set_rx_key(-1, false, 0);
             mlme_key_remove(&mlme.ptk_conf, mlme.sta);
             if (mlme_key_install(&mlme.ptk_conf, mlme.sta, mlme.ptk.tk, 0)) {
                 mlme_fail(-EIO, "the driver refused the pairwise key");
                 goto out;
             }
+            rtw89_data_set_rx_key(-1, true, 0);
+            rtw89_data_set_tx_key(mlme.ptk_conf);
         }
-        if (!mlme_key_is(mlme.gtk_conf, gtk, (s8)gtk_idx)) {
-            mlme_key_remove(&mlme.gtk_conf, NULL);
-            if (mlme_key_install(&mlme.gtk_conf, NULL, gtk, (s8)gtk_idx)) {
-                mlme_fail(-EIO, "the driver refused the group key");
-                goto out;
-            }
+        if (mlme_gtk_install(gtk_idx, gtk, rsc)) {
+            mlme_fail(-EIO, "the driver refused the group key");
+            goto out;
         }
         mlme.snonce_valid = false;      /* the next handshake gets a new one */
 
@@ -1124,6 +1106,7 @@ static void mlme_rx_eapol(const u8 *e, size_t len)
                 goto out;
             }
             wiphy_delayed_work_cancel(mlme.hw->wiphy, &mlme.timeout_work);
+            rtw89_data_authorize();
             mlme_set_state(RTW89_MLME_CONNECTED);
             mlme_info("WPA2 handshake complete: keys installed, connected");
         } else {
@@ -1135,10 +1118,9 @@ static void mlme_rx_eapol(const u8 *e, size_t len)
             goto out;
         mlme_send_eapol_key(&mlme.ptk, e[0], KEY_INFO_SECURE, k + KEY_OFF_REPLAY,
                             NULL, NULL, 0);
-        if (mlme_key_is(mlme.gtk_conf, gtk, (s8)gtk_idx))
+        if (mlme_key_is(mlme.gtk_conf[gtk_idx], gtk, (s8)gtk_idx))
             goto out;
-        mlme_key_remove(&mlme.gtk_conf, NULL);
-        if (mlme_key_install(&mlme.gtk_conf, NULL, gtk, (s8)gtk_idx))
+        if (mlme_gtk_install(gtk_idx, gtk, rsc))
             mlme_info("the driver refused the new group key");
         else
             mlme_info("group key renewed");
@@ -1147,36 +1129,45 @@ out:
     memset(plain, 0, sizeof(plain));
 }
 
-static void mlme_rx_data(struct sk_buff *skb)
+/* ------------------------------------------------------------------ */
+/*  Action frames                                                       */
+/* ------------------------------------------------------------------ */
+
+/*
+ * The AP asks for a BlockAck agreement so it can send us aggregates. That
+ * needs a reorder buffer on our side, which does not exist yet: decline, so
+ * the AP stops asking and keeps sending single frames.
+ */
+static void mlme_rx_addba_req(const struct ieee80211_mgmt *req, size_t len)
 {
-    const struct ieee80211_rx_status *status = IEEE80211_SKB_RXCB(skb);
-    const struct ieee80211_hdr *hdr = (const void *)skb->data;
-    unsigned int hdrlen = ieee80211_hdrlen(hdr->frame_control);
-    const u8 *payload = skb->data + hdrlen;
-    size_t len = skb->len;
+    const size_t resp_len = IEEE80211_MIN_ACTION_SIZE(addba_resp);
+    struct ieee80211_mgmt *mgmt;
+    struct sk_buff *skb;
 
-    if (!ieee80211_is_data_present(hdr->frame_control) || len < hdrlen)
+    if (len < IEEE80211_MIN_ACTION_SIZE(addba_req))
         return;
-    len -= hdrlen;
-
-    if (ieee80211_has_protected(hdr->frame_control)) {
-        /* Decrypted by the hardware, which leaves the CCMP header and MIC. */
-        if (!(status->flag & RX_FLAG_DECRYPTED) ||
-            len < IEEE80211_CCMP_HDR_LEN + IEEE80211_CCMP_MIC_LEN)
-            return;
-        payload += IEEE80211_CCMP_HDR_LEN;
-        len -= IEEE80211_CCMP_HDR_LEN + IEEE80211_CCMP_MIC_LEN;
-    }
-    /*
-     * Unencrypted EAPOL is accepted even with a pairwise key in place, as in
-     * ieee80211_frame_allowed(): an AP that missed our message 4 repeats
-     * message 3 before it has installed its own key. What such a frame can do
-     * is limited by its MIC.
-     */
-
-    if (len < sizeof(mlme_eapol_llc) || memcmp(payload, mlme_eapol_llc, sizeof(mlme_eapol_llc)))
+    skb = mlme_alloc_frame(resp_len);
+    if (!skb)
         return;
-    mlme_rx_eapol(payload + sizeof(mlme_eapol_llc), len - sizeof(mlme_eapol_llc));
+    mgmt = mlme_mgmt_header(skb, IEEE80211_STYPE_ACTION, resp_len);
+    mgmt->u.action.category = WLAN_CATEGORY_BACK;
+    mgmt->u.action.action_code = WLAN_ACTION_ADDBA_RESP;
+    mgmt->u.action.addba_resp.dialog_token = req->u.action.addba_req.dialog_token;
+    mgmt->u.action.addba_resp.status = cpu_to_le16(WLAN_STATUS_REQUEST_DECLINED);
+    mgmt->u.action.addba_resp.capab = req->u.action.addba_req.capab;
+    mgmt->u.action.addba_resp.timeout = req->u.action.addba_req.timeout;
+    mlme_tx_mgmt(skb);
+}
+
+static void mlme_rx_action(const struct ieee80211_mgmt *mgmt, size_t len)
+{
+    if (mlme.state < RTW89_MLME_ASSOCIATED || len < IEEE80211_MIN_ACTION_SIZE(action_code))
+        return;
+    /* with a pairwise key these would have to be protected frames (802.11w),
+     * which this driver does not negotiate */
+    if (mgmt->u.action.category == WLAN_CATEGORY_BACK &&
+        mgmt->u.action.action_code == WLAN_ACTION_ADDBA_REQ)
+        mlme_rx_addba_req(mgmt, len);
 }
 
 static void mlme_rx_frame(struct sk_buff *skb)
@@ -1188,16 +1179,6 @@ static void mlme_rx_frame(struct sk_buff *skb)
     if (mlme.state == RTW89_MLME_IDLE || len < sizeof(struct ieee80211_hdr_3addr))
         return;
 
-    if (ieee80211_is_data(fc)) {
-        const struct ieee80211_hdr *hdr = (const void *)skb->data;
-
-        /* from the AP to us: addr1 = us, addr2 = BSSID */
-        if (ether_addr_equal(hdr->addr1, mlme.vif->addr) &&
-            ether_addr_equal(hdr->addr2, mlme.bss.bssid))
-            mlme_rx_data(skb);
-        return;
-    }
-
     if (!ieee80211_is_mgmt(fc) || !ether_addr_equal(mgmt->bssid, mlme.bss.bssid) ||
         !ether_addr_equal(mgmt->da, mlme.vif->addr))
         return;
@@ -1206,6 +1187,8 @@ static void mlme_rx_frame(struct sk_buff *skb)
         mlme_rx_auth(mgmt, len);
     } else if (ieee80211_is_assoc_resp(fc) || ieee80211_is_reassoc_resp(fc)) {
         mlme_rx_assoc_resp(mgmt, len);
+    } else if (ieee80211_is_action(fc)) {
+        mlme_rx_action(mgmt, len);
     } else if ((ieee80211_is_deauth(fc) || ieee80211_is_disassoc(fc)) &&
                len >= offsetof(struct ieee80211_mgmt, u.deauth) + 2) {
         u16 reason = le16_to_cpu(mgmt->u.deauth.reason_code);
@@ -1222,10 +1205,31 @@ static void mlme_rx_work(struct wiphy *wiphy, struct wiphy_work *work)
     struct sk_buff *skb;
 
     while ((skb = skb_dequeue(&mlme.rxq))) {
-        if (mlme.running)
+        if (!mlme.running)
+            ;
+        else if (skb->protocol == htons(ETH_P_PAE))
+            mlme_rx_eapol(skb->data, skb->len);
+        else
             mlme_rx_frame(skb);
         kfree_skb(skb);
     }
+}
+
+/* An EAPOL frame from the AP, found by the data path. Any context: it is
+ * queued behind the management frames that arrived before it. */
+void rtw89_mlme_rx_eapol(const u8 *eapol, size_t len)
+{
+    struct sk_buff *skb;
+
+    if (!mlme.running || mlme.state == RTW89_MLME_IDLE || skb_queue_len(&mlme.rxq) > 64)
+        return;
+    skb = dev_alloc_skb((u32)len);
+    if (!skb)
+        return;
+    skb_put_data(skb, eapol, (u32)len);
+    skb->protocol = htons(ETH_P_PAE);
+    skb_queue_tail(&mlme.rxq, skb);
+    wiphy_work_queue(mlme.hw->wiphy, &mlme.rx_work);
 }
 
 void rtw89_mlme_rx(struct sk_buff *skb)
@@ -1238,8 +1242,25 @@ void rtw89_mlme_rx(struct sk_buff *skb)
         kfree_skb(skb);
         return;
     }
+    skb->protocol = 0;          /* an 802.11 frame, see mlme_rx_work() */
     skb_queue_tail(&mlme.rxq, skb);
     wiphy_work_queue(mlme.hw->wiphy, &mlme.rx_work);
+}
+
+/* The firmware stopped hearing the AP. Any context. */
+void rtw89_mlme_connection_lost(void)
+{
+    if (mlme.running)
+        wiphy_work_queue(mlme.hw->wiphy, &mlme.lost_work);
+}
+
+static void mlme_lost_work(struct wiphy *wiphy, struct wiphy_work *work)
+{
+    if (!mlme.running || mlme.state < RTW89_MLME_ASSOCIATED)
+        return;
+    mlme_info("lost the access point");
+    mlme.last_error = -ENOLINK;
+    mlme_teardown(WLAN_REASON_DISASSOC_DUE_TO_INACTIVITY);
 }
 
 static void mlme_timeout_work(struct wiphy *wiphy, struct wiphy_work *work)
@@ -1289,6 +1310,7 @@ void rtw89_mlme_start(struct ieee80211_hw *hw, struct ieee80211_vif *vif, void (
     mlme.local = hw_to_local(hw);
     skb_queue_head_init(&mlme.rxq);
     wiphy_work_init(&mlme.rx_work, mlme_rx_work);
+    wiphy_work_init(&mlme.lost_work, mlme_lost_work);
     wiphy_delayed_work_init(&mlme.timeout_work, mlme_timeout_work);
     mlme.running = true;
 }
@@ -1302,6 +1324,7 @@ void rtw89_mlme_stop(void)
     mlme.running = false;
     wiphy_delayed_work_cancel(mlme.hw->wiphy, &mlme.timeout_work);
     wiphy_work_cancel(mlme.hw->wiphy, &mlme.rx_work);
+    wiphy_work_cancel(mlme.hw->wiphy, &mlme.lost_work);
     skb_queue_purge(&mlme.rxq);
     spin_lock_destroy(&mlme.rxq.lock);
     memset(mlme.pmk, 0, sizeof(mlme.pmk));
@@ -1409,7 +1432,10 @@ int rtw89_mlme_connect(const struct rtw89_mlme_bss *bss, const u8 *pmk)
     conf->basic_rates = basic;
     conf->beacon_int = bss->beacon_int;
 
-    memset(mlme.tx_sn, 0, sizeof(mlme.tx_sn));
+    /* Frames from the AP are sorted from now on: the first handshake message
+     * can arrive before the association response has been dealt with. Nothing
+     * but the handshake passes until the port is authorised. */
+    rtw89_data_attach(mlme.vif, mlme.sta, bss->bssid, mlme.chan->band, mlme.rsn);
 
     /* from here on mlme_teardown() cleans up */
     mlme_set_state(RTW89_MLME_AUTHENTICATING);

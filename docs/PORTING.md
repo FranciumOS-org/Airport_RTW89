@@ -90,10 +90,39 @@ clean unload afterwards.
 Not checked yet: that the RSN element in message 3 equals the one in the beacon
 (a downgrade check that matters once more than one cipher/AKM is supported).
 
-Not there yet: the data path (so no network interface and no traffic), receive
-packet number checks, wider channels and VHT/HE. Networks that are WPA3-only,
-enterprise, WEP/WPA1, or require management frame protection are refused with a
-message.
+Networks that are WPA3-only, enterprise, WEP/WPA1, or require management frame
+protection are refused with a message.
+
+**Data path and network interface (built, not yet run on hardware).**
+`src/compat_rtw89/rtw89_data.c` converts between Ethernet and 802.11 data
+frames, following mac80211's tx.c and rx.c. Transmit: QoS header with the TID
+taken from the DSCP field, per-TID sequence numbers, SNAP encapsulation, the
+CCMP header with the next packet number (the chip encrypts), then onto the
+station's TXQ, which the driver's own TX work drains. Receive: address and
+duplicate checks, the CCMP packet number must advance per key and TID (group
+keys start from the RSC the AP gave in the handshake), A-MSDU subframes,
+conversion back to Ethernet; EAPOL goes to the MLME, everything else to the
+network stack, and only once the handshake is done. Unencrypted data on an
+encrypted network is dropped in both directions.
+
+The kext is now an `IOEthernetController`: macOS sees an Ethernet port (`enX`)
+whose link comes up when a network is joined and its keys are installed, and
+configures it with DHCP. This needs no EFI change and no IO80211; the price is
+that there is no Wi-Fi menu and networks are joined with `rtw89ctl`.
+
+Objects the driver's threads may still be using when they are removed
+(stations, their TXQs, keys) are unlinked at once and freed two seconds later
+or when the driver stops: a stand-in for the RCU grace period Linux relies on.
+
+Not there yet:
+- BlockAck in either direction. The AP's ADDBA requests are declined and none
+  are sent, so every frame travels alone: correct, but far below the speeds
+  802.11n aggregation gives. Needs a reorder buffer (RX) and the ADDBA exchange
+  (TX).
+- Channels wider than 20 MHz, VHT and HE.
+- Fragmented frames (dropped), software decryption of frames the chip did not
+  decrypt (dropped and counted), power save, roaming, and beacon-loss detection
+  beyond what the firmware reports.
 
 The reference for the IOKit side of M2/M3 is `reference/airport_rtw88/`
 (AirPort_RTW88's IO80211 controller and its own MLME, GPL-2.0, not compiled).
@@ -121,7 +150,10 @@ Before any load, `make hosttest` runs the same objects in userspace
   message 3, a forged message 1, a wrong password, a refusal, silence (three
   tries then timeout), an AP that never starts the handshake, a
   deauthentication, leaving while connected, and the radio going down while
-  connected.
+  connected. Once connected it sends and receives data frames and checks the
+  conversion byte for byte, along with replayed, duplicated, unencrypted,
+  undecrypted, misaddressed and A-MSDU frames, group keys by id, and that
+  nothing passes before the handshake or after leaving.
 
 That found and fixed, before they could panic the machine: `pcie_capability_*`
 writing to the wrong config-space offset, a failed firmware decompress reported

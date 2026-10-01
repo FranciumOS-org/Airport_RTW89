@@ -64,6 +64,7 @@ struct ieee80211_hw *ieee80211_alloc_hw_nm(size_t priv_data_len,
     INIT_LIST_HEAD(&local->vifs);
     INIT_LIST_HEAD(&local->stas);
     INIT_LIST_HEAD(&local->keys);
+    INIT_LIST_HEAD(&local->dead);
     for (ac = 0; ac < IEEE80211_NUM_ACS; ac++) {
         spin_lock_init(&local->active_txq_lock[ac]);
         INIT_LIST_HEAD(&local->active_txqs[ac]);
@@ -81,6 +82,7 @@ void ieee80211_free_hw(struct ieee80211_hw *hw)
     cancel_work_sync(&local->wake_txqs_work);
     WARN_ON(!list_empty(&local->vifs));
     WARN_ON(!list_empty(&local->stas));
+    rtw89_m80211_reap(hw, true);
     for (ac = 0; ac < IEEE80211_NUM_ACS; ac++)
         spin_lock_destroy(&local->active_txq_lock[ac]);
     spin_lock_destroy(&local->lock);
@@ -146,6 +148,70 @@ void rtw89_m80211_set_glue(struct ieee80211_hw *hw,
 }
 
 /* ------------------------------------------------------------------ */
+/*  Deferred free                                                       */
+/* ------------------------------------------------------------------ */
+
+/*
+ * Linux frees stations, their TXQs and keys after an RCU grace period, so a
+ * driver thread that picked one up a moment ago (the TX work between
+ * ieee80211_next_txq() and ieee80211_return_txq(), say) can finish with it.
+ * There is no RCU here. The object is unlinked at once, so nobody new finds
+ * it, and its memory is kept for a while: until it has been dead for
+ * RTW89_M80211_GRACE, or until the driver is stopped.
+ */
+#define RTW89_M80211_GRACE  (2 * HZ)
+
+struct rtw89_m80211_dead {
+    struct list_head list;
+    unsigned long died;         /* jiffies */
+    void *ptr;
+    void (*release)(void *ptr); /* before the kfree(), may be NULL */
+};
+
+void rtw89_m80211_reap(struct ieee80211_hw *hw, bool all)
+{
+    struct rtw89_m80211_local *local = hw_to_local(hw);
+    struct rtw89_m80211_dead *dead, *tmp;
+    LIST_HEAD(reap);
+
+    spin_lock_bh(&local->lock);
+    list_for_each_entry_safe(dead, tmp, &local->dead, list) {
+        if (all || time_after(jiffies, dead->died + RTW89_M80211_GRACE)) {
+            list_del(&dead->list);
+            list_add_tail(&dead->list, &reap);
+        }
+    }
+    spin_unlock_bh(&local->lock);
+
+    list_for_each_entry_safe(dead, tmp, &reap, list) {
+        if (dead->release)
+            dead->release(dead->ptr);
+        kfree(dead->ptr);
+        kfree(dead);
+    }
+}
+
+void rtw89_m80211_free_later(struct ieee80211_hw *hw, void *ptr, void (*release)(void *ptr))
+{
+    struct rtw89_m80211_local *local = hw_to_local(hw);
+    struct rtw89_m80211_dead *dead;
+
+    if (!ptr)
+        return;
+    rtw89_m80211_reap(hw, false);
+
+    dead = kzalloc(sizeof(*dead), GFP_KERNEL);
+    if (!dead)
+        return;                 /* out of memory: leak it rather than free it early */
+    dead->ptr = ptr;
+    dead->release = release;
+    dead->died = jiffies;
+    spin_lock_bh(&local->lock);
+    list_add_tail(&dead->list, &local->dead);
+    spin_unlock_bh(&local->lock);
+}
+
+/* ------------------------------------------------------------------ */
 /*  Work                                                                */
 /* ------------------------------------------------------------------ */
 
@@ -198,8 +264,10 @@ static struct ieee80211_txq *rtw89_m80211_txq_alloc(struct rtw89_m80211_local *l
     return &mtxq->txq;
 }
 
-static void rtw89_m80211_txq_free(struct rtw89_m80211_local *local,
-                                  struct ieee80211_txq *txq)
+/* Take the TXQ off the schedule and drop what is waiting on it. A killed TXQ
+ * takes no more frames and is never scheduled again. */
+static void rtw89_m80211_txq_purge(struct rtw89_m80211_local *local,
+                                   struct ieee80211_txq *txq, bool kill)
 {
     struct rtw89_m80211_txq *mtxq;
     struct sk_buff *skb;
@@ -209,14 +277,38 @@ static void rtw89_m80211_txq_free(struct rtw89_m80211_local *local,
     mtxq = to_mtxq(txq);
 
     spin_lock_bh(&local->active_txq_lock[txq->ac]);
+    if (kill)
+        mtxq->dead = true;
     if (!list_empty(&mtxq->schedule_entry))
         list_del_init(&mtxq->schedule_entry);
     spin_unlock_bh(&local->active_txq_lock[txq->ac]);
 
-    while ((skb = skb_dequeue(&mtxq->frames)))
+    spin_lock_bh(&mtxq->frames.lock);
+    while (!skb_queue_empty(&mtxq->frames)) {
+        skb = skb_peek(&mtxq->frames);
+        __skb_unlink(skb, &mtxq->frames);
         ieee80211_free_txskb(&local->hw, skb);
+    }
+    mtxq->byte_cnt = 0;
+    spin_unlock_bh(&mtxq->frames.lock);
+}
+
+static void rtw89_m80211_txq_release(void *ptr)
+{
+    struct rtw89_m80211_txq *mtxq = ptr;
+
     spin_lock_destroy(&mtxq->frames.lock);
-    kfree(mtxq);
+}
+
+/* The memory stays for a grace period: the driver's TX work may still hold
+ * the pointer. */
+static void rtw89_m80211_txq_free(struct rtw89_m80211_local *local,
+                                  struct ieee80211_txq *txq)
+{
+    if (!txq)
+        return;
+    rtw89_m80211_txq_purge(local, txq, true);
+    rtw89_m80211_free_later(&local->hw, to_mtxq(txq), rtw89_m80211_txq_release);
 }
 
 void rtw89_m80211_tx(struct ieee80211_hw *hw, struct ieee80211_txq *txq,
@@ -225,6 +317,10 @@ void rtw89_m80211_tx(struct ieee80211_hw *hw, struct ieee80211_txq *txq,
     struct rtw89_m80211_local *local = hw_to_local(hw);
     struct rtw89_m80211_txq *mtxq = to_mtxq(txq);
 
+    if (mtxq->dead) {
+        ieee80211_free_txskb(hw, skb);
+        return;
+    }
     spin_lock_bh(&mtxq->frames.lock);
     __skb_queue_tail(&mtxq->frames, skb);
     mtxq->byte_cnt += skb->len;
@@ -310,7 +406,7 @@ void __ieee80211_schedule_txq(struct ieee80211_hw *hw, struct ieee80211_txq *txq
     struct rtw89_m80211_txq *mtxq = to_mtxq(txq);
 
     spin_lock_bh(&local->active_txq_lock[txq->ac]);
-    if (list_empty(&mtxq->schedule_entry) &&
+    if (!mtxq->dead && list_empty(&mtxq->schedule_entry) &&
         (force || !skb_queue_empty(&mtxq->frames)))
         list_add_tail(&mtxq->schedule_entry, &local->active_txqs[txq->ac]);
     spin_unlock_bh(&local->active_txq_lock[txq->ac]);
@@ -501,7 +597,7 @@ void rtw89_m80211_vif_free(struct ieee80211_vif *vif)
     spin_unlock_bh(&local->lock);
 
     rtw89_m80211_txq_free(local, vif->txq);
-    kfree(mvif);
+    rtw89_m80211_free_later(&local->hw, mvif, NULL);
 }
 
 void rtw89_m80211_vif_set_in_driver(struct ieee80211_vif *vif, bool in_driver)
@@ -583,7 +679,17 @@ void rtw89_m80211_sta_free(struct ieee80211_sta *sta)
 
     for (i = 0; i < ARRAY_SIZE(sta->txq); i++)
         rtw89_m80211_txq_free(local, sta->txq[i]);
-    kfree(msta);
+    rtw89_m80211_free_later(&local->hw, msta, NULL);
+}
+
+/* Drop every frame waiting for @sta (ieee80211_purge_sta_txqs()). */
+void rtw89_m80211_sta_purge_txqs(struct ieee80211_sta *sta)
+{
+    struct rtw89_m80211_local *local = to_msta(sta)->mvif->local;
+    int i;
+
+    for (i = 0; i < ARRAY_SIZE(sta->txq); i++)
+        rtw89_m80211_txq_purge(local, sta->txq[i], false);
 }
 
 void rtw89_m80211_sta_set_uploaded(struct ieee80211_sta *sta, bool uploaded)
@@ -897,7 +1003,8 @@ int ieee80211_start_tx_ba_session(struct ieee80211_sta *sta, u16 tid, u16 timeou
 
     if (local->glue && local->glue->start_tx_ba)
         return local->glue->start_tx_ba(local->glue_ctx, sta, tid, timeout);
-    return -EOPNOTSUPP;
+    /* -EINVAL is what makes rtw89 stop asking for this TID */
+    return -EINVAL;
 }
 
 int ieee80211_stop_tx_ba_session(struct ieee80211_sta *sta, u16 tid)

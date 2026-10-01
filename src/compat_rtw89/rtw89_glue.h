@@ -42,6 +42,11 @@ struct rtw89_glue_platform {
      * driver thread with driver locks held: do not call back into the glue
      * other than rtw89_glue_link(). */
     void (*link_changed)(void *ctx);
+
+    /* Optional: a received Ethernet frame (destination, source, type,
+     * payload) for the network stack. Called from the driver's receive
+     * thread, may sleep; @frame is only valid during the call. */
+    void (*rx_frame)(void *ctx, const uint8_t *frame, size_t len);
 };
 
 struct rtw89_glue_device {
@@ -149,9 +154,29 @@ struct rtw89_glue_link {
     uint16_t aid;
     int      last_error;            /* 0, -errno, -1000-status or -2000-reason */
     uint32_t eapol_rx;
+
+    /* data frames since the driver was probed */
+    uint32_t tx_frames;
+    uint32_t tx_dropped;
+    uint32_t rx_frames;
+    uint32_t rx_dropped;            /* all reasons, including the ones below */
+    uint32_t rx_undecrypted;        /* encrypted frames the chip did not decrypt */
+    uint32_t rx_replay;             /* frames with a packet number already used */
 };
 
 void rtw89_glue_link(struct rtw89_glue_link *link);
+
+/*
+ * Transmit one Ethernet frame (destination, source, type, payload; no FCS) of
+ * @len bytes. rtw89_glue_tx_alloc() returns a handle and, in *@frame, the
+ * buffer to fill in; rtw89_glue_tx() queues it for the access point, or
+ * rtw89_glue_tx_cancel() gives it back. Any thread that may sleep, between
+ * probe and remove. rtw89_glue_tx() returns 0, -ENETDOWN while not connected,
+ * or -ENOBUFS when too many frames are waiting.
+ */
+void *rtw89_glue_tx_alloc(size_t len, uint8_t **frame);
+int rtw89_glue_tx(void *handle);
+void rtw89_glue_tx_cancel(void *handle);
 
 #ifdef __cplusplus
 }
