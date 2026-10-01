@@ -12,7 +12,7 @@ sync
 kmutil unload -b com.rtw89.driver
 sleep 2
 echo "--- kernel log (AirPort_RTW89 / rtw89), last minute"
-log show --last 1m --style compact \
+/usr/bin/log show --last 1m --style compact \
     --predicate 'sender == "AirPort_RTW89" OR eventMessage CONTAINS "rtw89" OR eventMessage CONTAINS "rtw88:"' \
     | tail -30
 if kmutil showloaded 2>/dev/null | grep -q com.rtw89.driver; then

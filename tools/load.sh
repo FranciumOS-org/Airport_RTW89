@@ -34,6 +34,6 @@ kmutil load -p "$stage/AirPort_RTW89.kext"
 # start() runs the whole probe (firmware download included); give it time.
 sleep 10
 echo "--- kernel log (AirPort_RTW89 / rtw89), last 2 minutes"
-log show --last 2m --style compact \
+/usr/bin/log show --last 2m --style compact \
     --predicate 'sender == "AirPort_RTW89" OR eventMessage CONTAINS "rtw89" OR eventMessage CONTAINS "rtw88:"' \
     | tail -80
