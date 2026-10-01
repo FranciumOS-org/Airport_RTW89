@@ -49,8 +49,12 @@ available (interrupt index 1); and `log show` does not contain the lines a kext
 prints while it is being unloaded, `dmesg` does (which is why `unload.sh` reads
 that).
 
-**Towards M2: radio up and scan at the driver level (built, not yet run on
-hardware).** Before any IO80211 work, the glue can do what mac80211 does when an
+**Towards M2: radio up and scan at the driver level, working on hardware**
+(2026-10-01). `sudo build/out/rtw89ctl scan` on the TUF A15 listed 76 networks
+in about 2.3 s over 39 channels, 2.4 and 5 GHz including DFS channels heard
+passively, and the kext unloaded cleanly afterwards. That proves the hardware
+start, MSI interrupts, the RX path through the bouncing DMA ops, firmware
+commands and events, and scan offload. Before any IO80211 work, the glue can do what mac80211 does when an
 interface is opened and a scan requested: `rtw89_glue_up()` (driver `start()`,
 one station interface, interrupts on), `rtw89_glue_scan()` (firmware scan
 offload over all enabled channels) and `rtw89_glue_down()`. Received beacons and
