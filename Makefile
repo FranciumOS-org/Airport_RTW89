@@ -207,6 +207,7 @@ KEXT_CXXFLAGS := $(ARCH) $(MINOS) -isysroot $(SDK) -nostdinc \
                  -std=gnu++17 -mkernel -fapple-kext -fno-rtti -fno-exceptions \
                  -fno-builtin -fno-common -fno-stack-protector \
                  -DKERNEL -DKERNEL_PRIVATE -DDRIVER_PRIVATE -DAPPLE -DNeXT \
+                 -D__PRIVATE_SPI__ \
                  -I$(MKSDK)/Headers -I$(COMPAT89_DIR) -Wall -MMD -MP
 KEXT_OBJS     := $(BUILD_DIR)/kext/AirPortRTW89.o $(BUILD_DIR)/kext/kmod_info.o
 KEXT_BUNDLE   := $(BUILD_DIR)/out/AirPort_RTW89.kext

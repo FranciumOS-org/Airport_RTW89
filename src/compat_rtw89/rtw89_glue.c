@@ -69,6 +69,7 @@ static struct {
 
 static struct ieee80211_hw *glue_hw(void);
 static void glue_deliver(const u8 *frame, size_t len);
+static void glue_tx_wake(void);
 
 /* ------------------------------------------------------------------ */
 /*  PCI ops                                                             */
@@ -425,7 +426,7 @@ int rtw89_glue_probe(const struct rtw89_glue_platform *platform,
         return ret;
     }
 
-    rtw89_data_init(glue_hw(), glue_deliver);
+    rtw89_data_init(glue_hw(), glue_deliver, glue_tx_wake);
     glue.probed = true;
     return 0;
 }
@@ -591,6 +592,17 @@ static void glue_deliver(const u8 *frame, size_t len)
         glue.plat.rx_frame(glue.plat.ctx, frame, len);
 }
 
+static void glue_tx_wake(void)
+{
+    if (glue.plat.tx_wake)
+        glue.plat.tx_wake(glue.plat.ctx);
+}
+
+static void glue_tx_dequeued(void *ctx, struct ieee80211_txq *txq)
+{
+    rtw89_data_tx_dequeued(txq);
+}
+
 static void glue_link_event(void *ctx, struct ieee80211_vif *vif,
                             enum rtw89_m80211_link_event event, s32 rssi)
 {
@@ -657,6 +669,7 @@ static int glue_stop_tx_ba(void *ctx, struct ieee80211_sta *sta, u16 tid)
 static const struct rtw89_m80211_glue_ops glue_m80211_ops = {
     .rx = glue_rx,
     .tx_status = glue_tx_status,
+    .tx_dequeued = glue_tx_dequeued,
     .scan_done = glue_scan_done,
     .link_event = glue_link_event,
     .start_tx_ba = glue_start_tx_ba,
@@ -987,6 +1000,8 @@ void rtw89_glue_link(struct rtw89_glue_link *link)
     link->rx_dropped = stats.rx_dropped;
     link->rx_undecrypted = stats.rx_undecrypted;
     link->rx_replay = stats.rx_replay;
+    link->rx_dup = stats.rx_dup;
+    link->rx_reorder_timeout = stats.rx_reorder_timeout;
     if (!glue.up)
         return;
 
@@ -1035,6 +1050,11 @@ void *rtw89_glue_tx_alloc(size_t len, uint8_t **frame)
 int rtw89_glue_tx(void *handle)
 {
     return rtw89_data_tx(handle);
+}
+
+unsigned int rtw89_glue_tx_room(void)
+{
+    return rtw89_data_tx_room();
 }
 
 void rtw89_glue_tx_cancel(void *handle)

@@ -207,17 +207,20 @@ static void print_link(io_service_t service)
     }
     print_interface(service);
     printf("%-10s sent %ld (dropped %ld), received %ld (dropped %ld: %ld not decrypted, "
-           "%ld replayed)\n", "frames",
+           "%ld replayed, %ld duplicates)\n", "frames",
            get_long(service, CFSTR("RTW89 TX Frames")), get_long(service, CFSTR("RTW89 TX Dropped")),
            get_long(service, CFSTR("RTW89 RX Frames")), get_long(service, CFSTR("RTW89 RX Dropped")),
            get_long(service, CFSTR("RTW89 RX Undecrypted")),
-           get_long(service, CFSTR("RTW89 RX Replayed")));
+           get_long(service, CFSTR("RTW89 RX Replayed")),
+           get_long(service, CFSTR("RTW89 RX Duplicates")));
     if (strcmp(state, "down")) {
         char tx[64], rx[64];
 
-        printf("%-10s sending on TIDs: %s; receiving on TIDs: %s\n", "aggregation",
+        printf("%-10s sending on TIDs: %s; receiving on TIDs: %s (%ld frame(s) released "
+               "after waiting for a missing one)\n", "aggregation",
                tid_list(get_long(service, CFSTR("RTW89 TX Aggregation")), tx, sizeof(tx)),
-               tid_list(get_long(service, CFSTR("RTW89 RX Aggregation")), rx, sizeof(rx)));
+               tid_list(get_long(service, CFSTR("RTW89 RX Aggregation")), rx, sizeof(rx)),
+               get_long(service, CFSTR("RTW89 RX Reorder Timeouts")));
     }
     print_error(get_long(service, CFSTR("RTW89 Link Error")));
 }

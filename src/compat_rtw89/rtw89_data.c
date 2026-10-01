@@ -14,6 +14,11 @@
  * back in order (ieee80211_sta_manage_reorder_buf() and friends). The
  * sessions themselves are negotiated by rtw89_mlme.c.
  *
+ * Flow control: the network stack is told how many more frames may be queued
+ * (rtw89_data_tx_room()) and is woken when the driver has taken enough of
+ * them off the TXQs, so a fast sender waits in the stack's own queue, where
+ * TCP can be slowed down properly, instead of losing frames here.
+ *
  * Not here yet: fragments (dropped) and software decryption (a protected
  * frame the hardware did not decrypt is dropped and counted).
  *
@@ -31,6 +36,8 @@
 /* 802.11 QoS header, CCMP header and LLC/SNAP in front of the payload */
 #define DATA_TX_HEADROOM    (sizeof(struct ieee80211_qos_hdr) + IEEE80211_CCMP_HDR_LEN + 8)
 #define DATA_TXQ_LIMIT      512         /* frames waiting per TID before new ones are dropped */
+#define DATA_TX_HIGH        256         /* frames waiting, all TIDs: the stack stops sending */
+#define DATA_TX_LOW         64          /* ... and is woken again */
 #define DATA_NUM_TIDS       (IEEE80211_NUM_TIDS + 1)    /* the last one: frames without QoS */
 #define DATA_NOQOS          IEEE80211_NUM_TIDS
 
@@ -69,6 +76,7 @@ static struct {
 
     struct ieee80211_hw *hw;
     void (*deliver)(const u8 *frame, size_t len);
+    void (*tx_wake)(void);
     void (*tx_tap)(const u8 *frame, size_t len);
 
     /* the access point; sta is NULL while not associated */
@@ -82,6 +90,8 @@ static struct {
 
     struct ieee80211_key_conf *tx_key;
     u16 tx_sn[DATA_NUM_TIDS];
+    unsigned int tx_backlog;    /* frames on the station's TXQs */
+    bool tx_throttled;          /* the stack was told there is no room */
 
     struct data_rx_key rx_ptk;
     struct data_rx_key rx_gtk[4];
@@ -106,7 +116,8 @@ static const u8 data_tid_to_ac[8] = {
 
 static void data_rx_reorder_timer(struct timer_list *t);
 
-void rtw89_data_init(struct ieee80211_hw *hw, void (*deliver)(const u8 *frame, size_t len))
+void rtw89_data_init(struct ieee80211_hw *hw, void (*deliver)(const u8 *frame, size_t len),
+                     void (*tx_wake)(void))
 {
     void (*tap)(const u8 *, size_t) = data.tx_tap;
     int i;
@@ -119,6 +130,7 @@ void rtw89_data_init(struct ieee80211_hw *hw, void (*deliver)(const u8 *frame, s
         timer_setup(&data.rx_ba[i].timer, data_rx_reorder_timer, 0);
     data.hw = hw;
     data.deliver = deliver;
+    data.tx_wake = tx_wake;
     data.inited = true;
 }
 
@@ -150,6 +162,7 @@ void rtw89_data_attach(struct ieee80211_vif *vif, struct ieee80211_sta *sta,
     data.protect = protect;
     data.authorized = false;
     data.tx_key = NULL;
+    data.tx_backlog = 0;
     memset(data.tx_sn, 0, sizeof(data.tx_sn));
     memset(&data.rx_ptk, 0, sizeof(data.rx_ptk));
     memset(data.rx_gtk, 0, sizeof(data.rx_gtk));
@@ -164,6 +177,7 @@ void rtw89_data_attach(struct ieee80211_vif *vif, struct ieee80211_sta *sta,
 void rtw89_data_detach(void)
 {
     struct ieee80211_sta *sta;
+    bool wake;
     int i;
 
     if (!data.inited)
@@ -180,20 +194,78 @@ void rtw89_data_detach(void)
     data.tx_key = NULL;
     data.rx_ptk.valid = false;
     memset(data.rx_gtk, 0, sizeof(data.rx_gtk));
+    data.tx_backlog = 0;
+    wake = data.tx_throttled;
+    data.tx_throttled = false;
     spin_unlock(&data.tx_lock);
     spin_unlock(&data.rx_lock);
 
     if (sta)
         rtw89_m80211_sta_purge_txqs(sta);
+    /* a stack that is waiting for room gets to send again, into the void */
+    if (wake && data.tx_wake)
+        data.tx_wake();
 }
 
 void rtw89_data_authorize(void)
 {
+    bool wake;
+
     spin_lock(&data.rx_lock);
     spin_lock(&data.tx_lock);
     data.authorized = data.sta != NULL;
+    wake = data.tx_throttled;
+    data.tx_throttled = false;
     spin_unlock(&data.tx_lock);
     spin_unlock(&data.rx_lock);
+
+    if (wake && data.tx_wake)
+        data.tx_wake();
+}
+
+/*
+ * How many more frames rtw89_data_tx() has room for. Zero tells the caller to
+ * stop until tx_wake() is called. While not connected there is always room:
+ * the frames are dropped, which is what should happen to them.
+ */
+unsigned int rtw89_data_tx_room(void)
+{
+    unsigned int room = DATA_TX_HIGH;
+
+    if (!data.inited)
+        return room;
+
+    spin_lock(&data.tx_lock);
+    if (data.sta && data.authorized) {
+        room = data.tx_backlog < DATA_TX_HIGH ? DATA_TX_HIGH - data.tx_backlog : 0;
+        if (!room)
+            data.tx_throttled = true;
+    }
+    spin_unlock(&data.tx_lock);
+    return room;
+}
+
+/* The driver took a frame off @txq. Its TX work's thread. */
+void rtw89_data_tx_dequeued(struct ieee80211_txq *txq)
+{
+    bool wake = false;
+
+    if (!data.inited)
+        return;
+
+    spin_lock(&data.tx_lock);
+    if (data.sta && txq->sta == data.sta) {
+        if (data.tx_backlog)
+            data.tx_backlog--;
+        if (data.tx_throttled && data.tx_backlog <= DATA_TX_LOW) {
+            data.tx_throttled = false;
+            wake = true;
+        }
+    }
+    spin_unlock(&data.tx_lock);
+
+    if (wake && data.tx_wake)
+        data.tx_wake();
 }
 
 /* The pairwise key to send with from now on; NULL stops data until the next. */
@@ -398,6 +470,7 @@ int rtw89_data_tx(struct sk_buff *skb)
 
     if (data.tx_tap)
         data.tx_tap(skb->data, skb->len);
+    data.tx_backlog++;
     rtw89_m80211_tx(data.hw, txq, skb);
     data.stats.tx_frames++;
     spin_unlock(&data.tx_lock);
@@ -806,6 +879,7 @@ static void data_rx_reorder_timer(struct timer_list *t)
     spin_lock(&data.rx_lock);
     if (ba->active && ba->stored)
         data_reorder_release(ba, &frames);
+    data.stats.rx_reorder_timeout += skb_queue_len(&frames);
     data_rx_frames(&frames);
     spin_unlock(&data.rx_lock);
 }

@@ -158,6 +158,14 @@ static struct {
     uint8_t order[256];         /* the last byte of each frame, in arrival order */
 } sta_rx;
 
+/* How often the driver told the stack that it has room for frames again. */
+static volatile int sta_tx_wakes;
+
+static void sta_tx_wake(void *ctx)
+{
+    sta_tx_wakes++;
+}
+
 static void sta_rx_frame(void *ctx, const uint8_t *frame, size_t len)
 {
     sta_rx.order[sta_rx.count % 256] = frame[len - 1];
@@ -712,12 +720,19 @@ static int test_aggregation(void)
     /* until the AP answers, the TID's frames are held back */
     EXPECT(sta_tx_tid(3) == 0 && sta_tx_tid(3) == 0);
     usleep(100 * 1000);
-    EXPECT(rtw89_data_tx_waiting(3) == 2);
+    EXPECT(rtw89_data_tx_waiting(3) == 2 && rtw89_glue_tx_room() == 254);
     EXPECT(!(link_ba(true) & 0x08));
+    /* a stack that keeps sending is told to stop when 256 frames are waiting */
+    for (i = 0; i < 400 && rtw89_glue_tx_room(); i++)
+        EXPECT(sta_tx_tid(3) == 0);
+    EXPECT(i == 254 && rtw89_data_tx_waiting(3) == 256);
+    n = sta_tx_wakes;
     ap_send_addba_resp(3, ap.addba_req[3].dialog, 0);
     for (i = 0; i < 100 && (!(link_ba(true) & 0x08) || rtw89_data_tx_waiting(3)); i++)
         usleep(20 * 1000);
     EXPECT((link_ba(true) & 0x08) && rtw89_data_tx_waiting(3) == 0);
+    /* ... and once, when most of them have gone, to start again */
+    EXPECT(sta_tx_wakes == n + 1 && rtw89_glue_tx_room() == 256);
     /* the AP ends it */
     {
         static const uint8_t delba[] = { 3, 2, 0x00, 0x30, 0x01, 0x00 };
@@ -997,12 +1012,14 @@ static void dma_free(void *ctx, void *cookie)
 
 /*
  * The one thing the pretend device does on its own (fakechip runs only): it
- * "consumes" firmware commands. The driver puts its write index in the low
- * half of the command ring's index register (R_AX_CH12_TXBD_IDX) and expects
- * the hardware's read index in the high half; without this the ring fills up
- * after a few joins and every later command fails for lack of room.
+ * "consumes" what the driver puts on its transmit rings. The driver writes its
+ * index into the low half of each ring's index register and expects the
+ * hardware's read index in the high half; without this the firmware command
+ * ring fills up after a few joins and every later command fails for lack of
+ * room. Registers R_AX_ACH0_TXBD_IDX .. R_AX_CH12_TXBD_IDX.
  */
-#define FAKE_CH12_TXBD_IDX 0x1080
+#define FAKE_TXBD_IDX_FIRST 0x1058
+#define FAKE_TXBD_IDX_LAST  0x1080
 
 static volatile int fake_device_run;
 static uint8_t *fake_device_mmio;
@@ -1010,11 +1027,14 @@ static uint8_t *fake_device_mmio;
 static void *fake_device_thread(void *arg)
 {
     while (fake_device_run) {
+        unsigned int reg;
         uint16_t host;
 
-        memcpy(&host, fake_device_mmio + FAKE_CH12_TXBD_IDX, 2);
-        host &= 0x0fff;
-        memcpy(fake_device_mmio + FAKE_CH12_TXBD_IDX + 2, &host, 2);
+        for (reg = FAKE_TXBD_IDX_FIRST; reg <= FAKE_TXBD_IDX_LAST; reg += 4) {
+            memcpy(&host, fake_device_mmio + reg, 2);
+            host &= 0x0fff;
+            memcpy(fake_device_mmio + reg + 2, &host, 2);
+        }
         usleep(2000);
     }
     return NULL;
@@ -1026,6 +1046,7 @@ int main(int argc, char **argv)
         .cfg_read = cfg_read, .cfg_write = cfg_write,
         .dma_alloc = dma_alloc, .dma_free = dma_free,
         .rx_frame = sta_rx_frame,
+        .tx_wake = sta_tx_wake,
     };
     struct rtw89_glue_device dev = {
         .vendor = 0x10ec, .device = 0xb852,
