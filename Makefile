@@ -88,6 +88,7 @@ COMPAT89_SRCS := $(COMPAT89_DIR)/rtw89_compat.c \
                  $(COMPAT89_DIR)/rtw89_cfg80211.c \
                  $(COMPAT89_DIR)/rtw89_cfg80211_bitrate.c \
                  $(COMPAT89_DIR)/rtw89_mac80211.c \
+                 $(COMPAT89_DIR)/rtw89_mlme.c \
                  $(COMPAT89_DIR)/rtw89_glue.c \
                  $(COMPAT89_DIR)/rtw89_debug_shim.c
 
@@ -168,8 +169,8 @@ HOST_OBJS := $(BUILD_DIR)/out/host_main.o $(BUILD_DIR)/out/host_kernel.o $(BUILD
 # Runs one smoke-test binary: $(call hostrun,<binary>,<args>,<log name>)
 define hostrun
 	@echo "  RUN  $(1) $(2)"
-	@perl -e 'alarm 300; exec @ARGV' $(1) $(2) > $(BUILD_DIR)/log/$(3).log 2>&1; \
-	    rc=$$?; grep -E '^==|WARN|BUG|ERR|HOST:' $(BUILD_DIR)/log/$(3).log; \
+	@perl -e 'alarm 600; exec @ARGV' $(1) $(2) > $(BUILD_DIR)/log/$(3).log 2>&1; \
+	    rc=$$?; grep -E '^==|WARN|BUG|HOST:|mlme\]' $(BUILD_DIR)/log/$(3).log; \
 	    [ $$rc -eq 0 ] || { echo "  hosttest FAILED (exit $$rc), see $(BUILD_DIR)/log/$(3).log"; exit 1; }
 endef
 

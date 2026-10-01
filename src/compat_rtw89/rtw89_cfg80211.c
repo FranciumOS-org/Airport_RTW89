@@ -497,6 +497,40 @@ cfg80211_find_elem_match(u8 eid, const u8 *ies, unsigned int len,
     return NULL;
 }
 
+const struct element *cfg80211_find_vendor_elem(unsigned int oui, int oui_type,
+                                                const u8 *ies, unsigned int len)
+{
+    const struct element *elem;
+    u8 match[] = { oui >> 16, oui >> 8, oui, oui_type };
+    int match_len = (oui_type < 0) ? 3 : sizeof(match);
+
+    if (WARN_ON(oui_type > 0xff))
+        return NULL;
+
+    elem = cfg80211_find_elem_match(WLAN_EID_VENDOR_SPECIFIC, ies, len,
+                                    match, match_len, 0);
+    if (!elem || elem->datalen < 4)
+        return NULL;
+
+    return elem;
+}
+
+struct ieee80211_channel *ieee80211_get_channel_khz(struct wiphy *wiphy, u32 freq)
+{
+    struct ieee80211_supported_band *sband;
+    int band, i;
+
+    for (band = 0; band < NUM_NL80211_BANDS; band++) {
+        sband = wiphy->bands[band];
+        if (!sband)
+            continue;
+        for (i = 0; i < sband->n_channels; i++)
+            if (ieee80211_channel_to_khz(&sband->channels[i]) == freq)
+                return &sband->channels[i];
+    }
+    return NULL;
+}
+
 int cfg80211_get_ies_channel_number(const u8 *ie, size_t ielen,
                                     enum nl80211_band band)
 {

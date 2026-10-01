@@ -322,6 +322,21 @@ void AirPort_RTW89::publishScanResults()
     setProperty("RTW89 Scanning", rtw89_glue_scanning());
     setProperty("RTW89 Radio Up", rtw89_glue_is_up());
     IOFree(list, kMax * sizeof(*list));
+
+    /* link state */
+    static const char *const kStates[] = { "down", "joining", "associated", "connected" };
+    struct rtw89_glue_link link;
+    char bssid[18];
+
+    rtw89_glue_link(&link);
+    snprintf(bssid, sizeof(bssid), "%02x:%02x:%02x:%02x:%02x:%02x", link.bssid[0],
+             link.bssid[1], link.bssid[2], link.bssid[3], link.bssid[4], link.bssid[5]);
+    setProperty("RTW89 Link State", kStates[link.state]);
+    setProperty("RTW89 Link BSSID", bssid);
+    setProperty("RTW89 Link Frequency", link.freq, 32);
+    setProperty("RTW89 Link AID", link.aid, 32);
+    setProperty("RTW89 Link EAPOL Frames", link.eapol_rx, 32);
+    setProperty("RTW89 Link Error", (unsigned long long)(long long)link.last_error, 32);
 }
 
 IOReturn AirPort_RTW89::setProperties(OSObject *properties)
@@ -350,6 +365,18 @@ IOReturn AirPort_RTW89::setProperties(OSObject *properties)
         ret = rtw89_glue_up();
         if (!ret)
             ret = rtw89_glue_scan();
+    } else if (command->isEqualTo("join")) {
+        OSData *ssid = OSDynamicCast(OSData, dict->getObject("RTW89SSID"));
+
+        if (!ssid || !ssid->getLength()) {
+            result = kIOReturnBadArgument;
+        } else {
+            LOG("join requested");
+            ret = rtw89_glue_join(static_cast<const uint8_t *>(ssid->getBytesNoCopy()),
+                                  ssid->getLength());
+        }
+    } else if (command->isEqualTo("leave")) {
+        rtw89_glue_leave();
     } else if (command->isEqualTo("results")) {
         /* only refreshes the properties below */
     } else {

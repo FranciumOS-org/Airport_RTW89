@@ -63,6 +63,21 @@ drives it through the kext's `setProperties` (administrators only) and prints th
 networks. This exercises interrupts, the RX path, firmware commands and scan
 offload without needing the legacy Wi-Fi stack or any EFI change.
 
+**Towards M3: association (built, not yet run on hardware).**
+`src/compat_rtw89/rtw89_mlme.c` is a station MLME for one non-MLO interface,
+following `net/mac80211/mlme.c` call for call: channel context on the AP's
+channel, station entry, open-system authentication, association (802.11n on
+20 MHz, WMM, a WPA2-PSK/CCMP RSN element), `sta_state` transitions,
+`vif_cfg_changed`/`link_info_changed`, EDCA parameters, and the reverse on
+leaving or when the AP deauthenticates. `rtw89ctl join SSID` / `leave` drive it.
+Not there yet: the WPA2 key handshake (EAPOL frames from the AP are only
+counted, so a WPA2 AP drops the association after a few seconds), wider channels
+and VHT/HE, and the data path. Networks that are WPA3-only, enterprise, WEP/WPA1,
+or require management frame protection are refused with a message.
+
+The reference for the IOKit side of M2/M3 is `reference/airport_rtw88/`
+(AirPort_RTW88's IO80211 controller and its own MLME, GPL-2.0, not compiled).
+
 Regulatory: with no country known, `wiphy_register()` applies the world domain
 (channels 12-14 and all of 5 GHz listen-only, radar flags on 5250-5730 MHz,
 nothing above 5835 MHz), so the scan only sends probe requests on 2.4 GHz
@@ -79,7 +94,10 @@ Before any load, `make hosttest` runs the same objects in userspace
   `rtw89_chip_info_setup()` and `rtw89_core_start()`/`stop()`), so the real
   firmware image is parsed, the device is fully registered, the radio is brought
   "up", an interface added, a scan request built, the periodic tracking work run,
-  and everything taken down and removed again.
+  and everything taken down and removed again. In this variant the test also
+  plays an access point: beacon, authentication and association responses, an
+  EAPOL frame, a refusal, silence (three tries then timeout), a deauthentication,
+  leaving while associated, and the radio going down while associated.
 
 That found and fixed, before they could panic the machine: `pcie_capability_*`
 writing to the wrong config-space offset, a failed firmware decompress reported

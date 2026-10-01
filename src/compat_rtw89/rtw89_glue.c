@@ -33,6 +33,15 @@ struct rtw89_glue_dma {
 
 #define RTW89_GLUE_DMA_BUCKETS 256
 #define RTW89_GLUE_MAX_BSS 128
+#define RTW89_GLUE_MAX_IES 1024
+
+/* A network heard in a scan: what callers see plus what a join needs. */
+struct rtw89_glue_bss_entry {
+    struct rtw89_glue_bss pub;
+    u16 beacon_int;
+    u16 ies_len;
+    u8 ies[RTW89_GLUE_MAX_IES];
+};
 
 static struct {
     bool active;
@@ -53,7 +62,7 @@ static struct {
     bool scanning;
     struct ieee80211_scan_request *scan_req;    /* kept until the next scan */
     spinlock_t bss_lock;
-    struct rtw89_glue_bss bss[RTW89_GLUE_MAX_BSS];
+    struct rtw89_glue_bss_entry bss[RTW89_GLUE_MAX_BSS];
     unsigned int n_bss;
 } glue;
 
@@ -479,8 +488,9 @@ void rtw89_glue_note_bss(const u8 *frame, size_t len, u16 freq, s8 signal)
 {
     const struct ieee80211_mgmt *mgmt = (const void *)frame;
     const size_t fixed = offsetof(struct ieee80211_mgmt, u.beacon.variable);
+    struct rtw89_glue_bss_entry *e = NULL;
     const struct element *ssid;
-    struct rtw89_glue_bss *bss = NULL;
+    bool has_ssid;
     unsigned int i;
 
     if (len < fixed)
@@ -490,35 +500,41 @@ void rtw89_glue_note_bss(const u8 *frame, size_t len, u16 freq, s8 signal)
         return;
 
     ssid = cfg80211_find_elem(WLAN_EID_SSID, frame + fixed, len - fixed);
+    /* A hidden network beacons an empty or all-zero SSID. */
+    has_ssid = ssid && ssid->datalen && ssid->datalen <= IEEE80211_MAX_SSID_LEN &&
+               ssid->data[0];
 
     spin_lock(&glue.bss_lock);
     for (i = 0; i < glue.n_bss; i++) {
-        if (ether_addr_equal(glue.bss[i].bssid, mgmt->bssid)) {
-            bss = &glue.bss[i];
+        if (ether_addr_equal(glue.bss[i].pub.bssid, mgmt->bssid)) {
+            e = &glue.bss[i];
             break;
         }
     }
-    if (!bss && glue.n_bss < RTW89_GLUE_MAX_BSS) {
-        bss = &glue.bss[glue.n_bss++];
-        memset(bss, 0, sizeof(*bss));
-        memcpy(bss->bssid, mgmt->bssid, ETH_ALEN);
-        bss->signal = signal;
+    if (!e && glue.n_bss < RTW89_GLUE_MAX_BSS) {
+        e = &glue.bss[glue.n_bss++];
+        memset(e, 0, sizeof(*e));
+        memcpy(e->pub.bssid, mgmt->bssid, ETH_ALEN);
+        e->pub.signal = signal;
     }
-    if (bss) {
-        /* A hidden network beacons an empty SSID; keep a real one if a probe
-         * response supplied it. */
-        if (ssid && ssid->datalen && ssid->datalen <= IEEE80211_MAX_SSID_LEN &&
-            ssid->data[0]) {
-            bss->ssid_len = ssid->datalen;
-            memcpy(bss->ssid, ssid->data, ssid->datalen);
-            bss->ssid[ssid->datalen] = 0;
+    if (e) {
+        if (has_ssid) {
+            e->pub.ssid_len = ssid->datalen;
+            memcpy(e->pub.ssid, ssid->data, ssid->datalen);
+            e->pub.ssid[ssid->datalen] = 0;
         }
-        bss->freq = freq;
-        bss->channel = (u8)ieee80211_frequency_to_channel(freq);
-        if (signal > bss->signal)
-            bss->signal = signal;
-        bss->capability = le16_to_cpu(mgmt->u.beacon.capab_info);
-        bss->seen++;
+        /* Keep the elements of a frame that names the network, if any did. */
+        if ((has_ssid || !e->pub.ssid_len) && len - fixed <= RTW89_GLUE_MAX_IES) {
+            e->ies_len = (u16)(len - fixed);
+            memcpy(e->ies, frame + fixed, len - fixed);
+            e->beacon_int = le16_to_cpu(mgmt->u.beacon.beacon_int);
+            e->pub.capability = le16_to_cpu(mgmt->u.beacon.capab_info);
+        }
+        e->pub.freq = freq;
+        e->pub.channel = (u8)ieee80211_frequency_to_channel(freq);
+        if (signal > e->pub.signal)
+            e->pub.signal = signal;
+        e->pub.seen++;
     }
     spin_unlock(&glue.bss_lock);
 }
@@ -527,14 +543,49 @@ void rtw89_glue_note_bss(const u8 *frame, size_t len, u16 freq, s8 signal)
 static void glue_rx(void *ctx, struct ieee80211_sta *sta, struct sk_buff *skb)
 {
     struct ieee80211_rx_status *status = IEEE80211_SKB_RXCB(skb);
+    const struct ieee80211_hdr *hdr = (const void *)skb->data;
     size_t len = skb->len;
 
-    /* The driver leaves the FCS on (RX_INCLUDES_FCS). */
-    if (len >= FCS_LEN)
-        len -= FCS_LEN;
-    if (!(status->flag & (RX_FLAG_FAILED_FCS_CRC | RX_FLAG_NO_PSDU)))
-        rtw89_glue_note_bss(skb->data, len, status->freq, status->signal);
-    kfree_skb(skb);
+    if ((status->flag & (RX_FLAG_FAILED_FCS_CRC | RX_FLAG_NO_PSDU)) ||
+        len < sizeof(struct ieee80211_hdr_3addr) + FCS_LEN) {
+        kfree_skb(skb);
+        return;
+    }
+
+    if (ieee80211_is_beacon(hdr->frame_control) ||
+        ieee80211_is_probe_resp(hdr->frame_control)) {
+        /* The driver leaves the FCS on (RX_INCLUDES_FCS). */
+        rtw89_glue_note_bss(skb->data, len - FCS_LEN, status->freq, status->signal);
+        kfree_skb(skb);
+        return;
+    }
+
+    /* Everything else is for the station MLME, which takes the skb. */
+    rtw89_mlme_rx(skb);
+}
+
+/*
+ * Feed one received 802.11 frame (without FCS) through the same path the
+ * driver uses. For the userspace smoke test, which plays the access point.
+ */
+void rtw89_glue_test_rx(const u8 *frame, size_t len, u16 freq, s8 signal);
+void rtw89_glue_test_rx(const u8 *frame, size_t len, u16 freq, s8 signal)
+{
+    struct ieee80211_rx_status *status;
+    struct sk_buff *skb;
+
+    if (!glue.probed)
+        return;
+    skb = dev_alloc_skb(len + FCS_LEN);
+    if (!skb)
+        return;
+    skb_put_data(skb, frame, len);
+    skb_put_zero(skb, FCS_LEN);
+    status = IEEE80211_SKB_RXCB(skb);
+    memset(status, 0, sizeof(*status));
+    status->freq = freq;
+    status->signal = signal;
+    ieee80211_rx_napi(glue_hw(), NULL, skb, NULL);
 }
 
 static void glue_tx_status(void *ctx, struct sk_buff *skb)
@@ -601,6 +652,7 @@ int rtw89_glue_up(void)
     }
     rtw89_m80211_vif_set_in_driver(glue.vif, true);
     local->ops->configure_filter(hw, 0, &filter, 0);
+    rtw89_mlme_start(hw, glue.vif);
     wiphy_unlock(hw->wiphy);
 
     glue.up = true;
@@ -630,6 +682,7 @@ void rtw89_glue_down(void)
     wiphy_lock(hw->wiphy);
     if (glue.scanning && local->ops->cancel_hw_scan)
         local->ops->cancel_hw_scan(hw, glue.vif);
+    rtw89_mlme_stop();
     rtw89_m80211_vif_set_in_driver(glue.vif, false);
     local->ops->remove_interface(hw, glue.vif);
     local->ops->stop(hw, false);
@@ -750,7 +803,102 @@ unsigned int rtw89_glue_scan_results(struct rtw89_glue_bss *out, unsigned int ma
 
     spin_lock(&glue.bss_lock);
     n = min(glue.n_bss, max);
-    memcpy(out, glue.bss, n * sizeof(*out));
+    for (unsigned int i = 0; i < n; i++)
+        out[i] = glue.bss[i].pub;
     spin_unlock(&glue.bss_lock);
     return n;
+}
+
+/* ------------------------------------------------------------------ */
+/*  Join / leave                                                        */
+/* ------------------------------------------------------------------ */
+
+int rtw89_glue_join(const uint8_t *ssid, size_t ssid_len)
+{
+    static u8 ies[RTW89_GLUE_MAX_IES];  /* calls are serialised by the caller */
+    struct rtw89_glue_bss_entry *best = NULL;
+    struct rtw89_mlme_bss bss = {};
+    struct ieee80211_hw *hw;
+    unsigned int i;
+    int ret;
+
+    if (!glue.up)
+        return -ENETDOWN;
+    if (!ssid_len || ssid_len > IEEE80211_MAX_SSID_LEN)
+        return -EINVAL;
+
+    spin_lock(&glue.bss_lock);
+    for (i = 0; i < glue.n_bss; i++) {
+        struct rtw89_glue_bss_entry *e = &glue.bss[i];
+
+        if (e->pub.ssid_len != ssid_len || memcmp(e->pub.ssid, ssid, ssid_len) ||
+            !e->ies_len)
+            continue;
+        if (!best || e->pub.signal > best->pub.signal)
+            best = e;
+    }
+    if (best) {
+        memcpy(bss.bssid, best->pub.bssid, ETH_ALEN);
+        memcpy(bss.ssid, ssid, ssid_len);
+        bss.ssid_len = (u8)ssid_len;
+        bss.freq = best->pub.freq;
+        bss.capability = best->pub.capability;
+        bss.beacon_int = best->beacon_int;
+        memcpy(ies, best->ies, best->ies_len);
+        bss.ies = ies;
+        bss.ies_len = best->ies_len;
+    }
+    spin_unlock(&glue.bss_lock);
+    if (!best)
+        return -ENOENT;
+
+    hw = glue_hw();
+    wiphy_lock(hw->wiphy);
+    ret = rtw89_mlme_connect(&bss);
+    wiphy_unlock(hw->wiphy);
+    return ret;
+}
+
+void rtw89_glue_leave(void)
+{
+    struct ieee80211_hw *hw;
+
+    if (!glue.up)
+        return;
+    hw = glue_hw();
+    wiphy_lock(hw->wiphy);
+    rtw89_mlme_disconnect(WLAN_REASON_DEAUTH_LEAVING);
+    wiphy_unlock(hw->wiphy);
+}
+
+void rtw89_glue_link(struct rtw89_glue_link *link)
+{
+    struct rtw89_mlme_status st;
+
+    memset(link, 0, sizeof(*link));
+    if (!glue.up)
+        return;
+
+    rtw89_mlme_get_status(&st);
+    switch (st.state) {
+    case RTW89_MLME_AUTHENTICATING:
+    case RTW89_MLME_ASSOCIATING:
+        link->state = RTW89_GLUE_LINK_JOINING;
+        break;
+    case RTW89_MLME_ASSOCIATED:
+        link->state = RTW89_GLUE_LINK_ASSOCIATED;
+        break;
+    case RTW89_MLME_CONNECTED:
+        link->state = RTW89_GLUE_LINK_CONNECTED;
+        break;
+    default:
+        link->state = RTW89_GLUE_LINK_DOWN;
+        break;
+    }
+    memcpy(link->bssid, st.bssid, ETH_ALEN);
+    memcpy(link->ssid, st.ssid, sizeof(link->ssid));
+    link->freq = st.freq;
+    link->aid = st.aid;
+    link->last_error = st.last_error;
+    link->eapol_rx = st.eapol_rx;
 }
