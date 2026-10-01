@@ -132,17 +132,21 @@ is told to stop when 256 frames are waiting on the driver's TXQs and is woken
 when they have drained to 64. That part has not run on hardware yet.
 
 With that, uploads ran at 85-96 Mb/s with no drops and downloads at about
-80 Mb/s (three runs each).
+80 Mb/s (three runs each); on the next build 94-96 Mb/s down and 56-88 up.
 
-**Latency of larger received frames (fix built, not yet run on hardware).**
+**Latency of larger received frames (fixed, confirmed on hardware).**
 Small pings took 2 ms, but replies of 150 bytes and more took anything from 1
 to 98 ms, evenly spread: they were handed to the stack when the *next* frame
 was received, usually the AP's beacon (102 ms interval). Transmit was fine at
 every size (measured one way, between the card and the wired port of the same
 machine). `rtw89_core_rx()` parks each data frame until the chip's PPDU status
 report for the same transmission arrives and otherwise flushes on the next
-reception; the working theory is that the report often does not come for
-these frames. `src/compat_rtw89/rtw89_core_wrap.c` compiles the driver's
+reception. On this card the report does not come for most data frames: with
+the fix in, 49,520 of 127,000 frames of a download were released by it rather
+than by a report, and round trips with 1000-byte replies went from a 15-22 ms
+median (up to 98 ms) to 3.3 ms (worst 9 ms). Why the reports are missing is
+not known; beacons and other low-rate frames get theirs.
+`src/compat_rtw89/rtw89_core_wrap.c` compiles the driver's
 core.c unchanged and adds a flush the glue runs 2 ms after a poll that left
 frames parked (`rtw89ctl flush off` disables it, for comparison). Timing
 counters in `rtw89ctl status`, based on the chip's receive timestamps, show
