@@ -67,6 +67,9 @@ static struct {
     unsigned int n_bss;
 } glue;
 
+static struct ieee80211_hw *glue_hw(void);
+static void glue_deliver(const u8 *frame, size_t len);
+
 /* ------------------------------------------------------------------ */
 /*  PCI ops                                                             */
 /* ------------------------------------------------------------------ */
@@ -422,6 +425,7 @@ int rtw89_glue_probe(const struct rtw89_glue_platform *platform,
         return ret;
     }
 
+    rtw89_data_init(glue_hw(), glue_deliver);
     glue.probed = true;
     return 0;
 }
@@ -435,6 +439,7 @@ void rtw89_glue_remove(void)
 
     if (glue.probed) {
         glue.probed = false;
+        rtw89_data_exit();
         glue.drv->remove(&glue.pdev);
     }
     glue_teardown();
@@ -540,7 +545,7 @@ void rtw89_glue_note_bss(const u8 *frame, size_t len, u16 freq, s8 signal)
     spin_unlock(&glue.bss_lock);
 }
 
-/* Every received frame lands here until there is a network stack to give it to. */
+/* Every received frame lands here, on the driver's receive thread. */
 static void glue_rx(void *ctx, struct ieee80211_sta *sta, struct sk_buff *skb)
 {
     struct ieee80211_rx_status *status = IEEE80211_SKB_RXCB(skb);
@@ -561,8 +566,29 @@ static void glue_rx(void *ctx, struct ieee80211_sta *sta, struct sk_buff *skb)
         return;
     }
 
+    if (ieee80211_is_data(hdr->frame_control)) {
+        rtw89_data_rx(skb);
+        return;
+    }
+
     /* Everything else is for the station MLME, which takes the skb. */
     rtw89_mlme_rx(skb);
+}
+
+/* A received Ethernet frame from the data path. */
+static void glue_deliver(const u8 *frame, size_t len)
+{
+    if (glue.plat.rx_frame)
+        glue.plat.rx_frame(glue.plat.ctx, frame, len);
+}
+
+static void glue_link_event(void *ctx, struct ieee80211_vif *vif,
+                            enum rtw89_m80211_link_event event, s32 rssi)
+{
+    if (event == RTW89_M80211_CONNECTION_LOSS)
+        rtw89_mlme_connection_lost();
+    else if (event == RTW89_M80211_BEACON_LOSS)
+        IOLog("[rtw89] the driver reports missed beacons\n");
 }
 
 /*
@@ -613,6 +639,7 @@ static const struct rtw89_m80211_glue_ops glue_m80211_ops = {
     .rx = glue_rx,
     .tx_status = glue_tx_status,
     .scan_done = glue_scan_done,
+    .link_event = glue_link_event,
 };
 
 /* ------------------------------------------------------------------ */
@@ -703,6 +730,8 @@ void rtw89_glue_down(void)
 
     rtw89_m80211_vif_free(glue.vif);
     glue.vif = NULL;
+    /* the driver is stopped: nothing can still be using what was freed */
+    rtw89_m80211_reap(hw, true);
 }
 
 /* ------------------------------------------------------------------ */
@@ -925,7 +954,18 @@ void rtw89_glue_link(struct rtw89_glue_link *link)
 {
     struct rtw89_mlme_status st;
 
+    struct rtw89_data_stats stats;
+
     memset(link, 0, sizeof(*link));
+    if (!glue.probed)
+        return;
+    rtw89_data_get_stats(&stats);
+    link->tx_frames = stats.tx_frames;
+    link->tx_dropped = stats.tx_dropped;
+    link->rx_frames = stats.rx_frames;
+    link->rx_dropped = stats.rx_dropped;
+    link->rx_undecrypted = stats.rx_undecrypted;
+    link->rx_replay = stats.rx_replay;
     if (!glue.up)
         return;
 
@@ -951,4 +991,30 @@ void rtw89_glue_link(struct rtw89_glue_link *link)
     link->aid = st.aid;
     link->last_error = st.last_error;
     link->eapol_rx = st.eapol_rx;
+}
+
+/* ------------------------------------------------------------------ */
+/*  Data                                                                */
+/* ------------------------------------------------------------------ */
+
+void *rtw89_glue_tx_alloc(size_t len, uint8_t **frame)
+{
+    struct sk_buff *skb;
+
+    if (!glue.probed)
+        return NULL;
+    skb = rtw89_data_tx_alloc(len);
+    if (skb)
+        *frame = skb->data;
+    return skb;
+}
+
+int rtw89_glue_tx(void *handle)
+{
+    return rtw89_data_tx(handle);
+}
+
+void rtw89_glue_tx_cancel(void *handle)
+{
+    kfree_skb(handle);
 }

@@ -349,6 +349,10 @@ void wiphy_rfkill_start_polling(struct wiphy *wiphy)
 /*  Frame / channel helpers (net/wireless/util.c, chan.c, scan.c)       */
 /* ------------------------------------------------------------------ */
 
+/* Bridge-Tunnel header (for EtherTypes 80F3 and 8137) */
+const unsigned char bridge_tunnel_header[6] __aligned(2) =
+    { 0xaa, 0xaa, 0x03, 0x00, 0x00, 0xf8 };
+
 const unsigned char rfc1042_header[6] __aligned(2) =
     { 0xaa, 0xaa, 0x03, 0x00, 0x00, 0x00 };
 

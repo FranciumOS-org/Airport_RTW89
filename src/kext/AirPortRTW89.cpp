@@ -3,9 +3,11 @@
 
 #include <IOKit/IOLib.h>
 #include <IOKit/IOUserClient.h>
+#include <libkern/OSAtomic.h>
+#include <sys/kpi_mbuf.h>
 
-#define super IOService
-OSDefineMetaClassAndStructors(AirPort_RTW89, IOService)
+#define super IOEthernetController
+OSDefineMetaClassAndStructors(AirPort_RTW89, IOEthernetController)
 
 #define LOG(fmt, ...) IOLog("AirPort_RTW89: " fmt "\n", ##__VA_ARGS__)
 
@@ -138,6 +140,179 @@ void AirPort_RTW89::irqEnable(void *ctx, bool enable)
 }
 
 /* ------------------------------------------------------------------ */
+/*  Network interface                                                   */
+/* ------------------------------------------------------------------ */
+
+bool AirPort_RTW89::createWorkLoop()
+{
+    if (!_netWorkLoop)
+        _netWorkLoop = IOWorkLoop::workLoop();
+    return _netWorkLoop != nullptr;
+}
+
+IOWorkLoop *AirPort_RTW89::getWorkLoop() const
+{
+    return _netWorkLoop;
+}
+
+const OSString *AirPort_RTW89::newVendorString() const
+{
+    return OSString::withCString("Realtek");
+}
+
+const OSString *AirPort_RTW89::newModelString() const
+{
+    return OSString::withCString("RTL8852BE");
+}
+
+IOReturn AirPort_RTW89::getHardwareAddress(IOEthernetAddress *addr)
+{
+    *addr = _mac;
+    return kIOReturnSuccess;
+}
+
+/* The chip passes unicast for us, broadcast and the multicast of the network
+ * it has joined; there is nothing to program per group address. */
+IOReturn AirPort_RTW89::getPacketFilters(const OSSymbol *group, UInt32 *filters) const
+{
+    if (group == gIONetworkFilterGroup) {
+        *filters = kIOPacketFilterUnicast | kIOPacketFilterBroadcast |
+                   kIOPacketFilterMulticast | kIOPacketFilterMulticastAll;
+        return kIOReturnSuccess;
+    }
+    return super::getPacketFilters(group, filters);
+}
+
+IOReturn AirPort_RTW89::setPromiscuousMode(bool active)
+{
+    return kIOReturnSuccess;
+}
+
+IOReturn AirPort_RTW89::setMulticastMode(bool active)
+{
+    return kIOReturnSuccess;
+}
+
+IOReturn AirPort_RTW89::setMulticastList(IOEthernetAddress *addrs, UInt32 count)
+{
+    return kIOReturnSuccess;
+}
+
+bool AirPort_RTW89::configureInterface(IONetworkInterface *netif)
+{
+    IONetworkData *data;
+
+    if (!super::configureInterface(netif))
+        return false;
+
+    data = netif->getParameter(kIONetworkStatsKey);
+    if (!data)
+        return false;
+    _netStats = const_cast<IONetworkStats *>(static_cast<const IONetworkStats *>(data->getBuffer()));
+    if (!_netStats)
+        return false;
+    return true;
+}
+
+/*
+ * The stack brings the interface up or down. The radio is not tied to that:
+ * it is started and a network joined with rtw89ctl, and the link state tells
+ * the stack when there is somewhere to send to.
+ */
+IOReturn AirPort_RTW89::enable(IONetworkInterface *netif)
+{
+    _netifEnabled = true;
+    return kIOReturnSuccess;
+}
+
+IOReturn AirPort_RTW89::disable(IONetworkInterface *netif)
+{
+    _netifEnabled = false;
+    return kIOReturnSuccess;
+}
+
+/*
+ * One Ethernet frame from the stack. There is no output queue, so this runs
+ * on whichever thread is sending, several at a time; the Linux side orders
+ * them. The frame is copied into the driver's own buffer and the mbuf freed.
+ */
+UInt32 AirPort_RTW89::outputPacket(mbuf_t m, void *param)
+{
+    size_t len = mbuf_pkthdr_len(m);
+    uint8_t *frame = nullptr;
+    void *handle;
+    int ret = -1;
+
+    OSIncrementAtomic(&_txBusy);
+    if (_dataReady && (handle = rtw89_glue_tx_alloc(len, &frame))) {
+        if (mbuf_copydata(m, 0, len, frame) == 0) {
+            ret = rtw89_glue_tx(handle);
+        } else {
+            rtw89_glue_tx_cancel(handle);
+        }
+    }
+    OSDecrementAtomic(&_txBusy);
+
+    freePacket(m);
+    if (_netStats) {
+        if (ret)
+            _netStats->outputErrors++;
+        else
+            _netStats->outputPackets++;
+    }
+    return ret ? kIOReturnOutputDropped : kIOReturnOutputSuccess;
+}
+
+/* One received Ethernet frame, on the driver's receive thread. */
+void AirPort_RTW89::rxFrame(void *ctx, const uint8_t *frame, size_t len)
+{
+    AirPort_RTW89 *me = static_cast<AirPort_RTW89 *>(ctx);
+    mbuf_t m;
+
+    if (!me->_dataReady || !me->_netifEnabled)
+        return;
+
+    m = me->allocatePacket((UInt32)len);
+    if (!m) {
+        me->_netStats->inputErrors++;
+        return;
+    }
+    if (mbuf_copyback(m, 0, len, frame, MBUF_DONTWAIT) != 0) {
+        me->freePacket(m);
+        me->_netStats->inputErrors++;
+        return;
+    }
+    me->_netif->inputPacket(m, (UInt32)len);
+    me->_netStats->inputPackets++;
+}
+
+bool AirPort_RTW89::setupInterface()
+{
+    struct rtw89_glue_info info;
+
+    if (!rtw89_glue_get_info(&info))
+        return false;
+    memcpy(_mac.bytes, info.mac, sizeof(_mac.bytes));
+
+    /* One medium: the stack only needs to know whether the link is up. */
+    _mediumDict = OSDictionary::withCapacity(1);
+    _medium = IONetworkMedium::medium(kIOMediumEthernetAuto, 0);
+    if (!_mediumDict || !_medium)
+        return false;
+    IONetworkMedium::addMedium(_mediumDict, _medium);
+    _medium->release();         /* the dictionary keeps it */
+    if (!publishMediumDictionary(_mediumDict) || !setCurrentMedium(_medium))
+        return false;
+    setLinkStatus(kIONetworkLinkValid, _medium, 0);
+
+    if (!attachInterface(reinterpret_cast<IONetworkInterface **>(&_netif), false) || !_netif)
+        return false;
+    _dataReady = true;
+    _netif->registerService();
+    return true;
+}
+
+/* ------------------------------------------------------------------ */
 /*  IOService                                                           */
 /* ------------------------------------------------------------------ */
 
@@ -220,6 +395,7 @@ bool AirPort_RTW89::start(IOService *provider)
     platform.dma_free = dmaFree;
     platform.irq_enable = irqEnable;
     platform.link_changed = linkChanged;
+    platform.rx_frame = rxFrame;
 
     LOG("probing");
     ret = rtw89_glue_probe(&platform, &device);
@@ -234,6 +410,12 @@ bool AirPort_RTW89::start(IOService *provider)
 
     /* The interrupt source stays disabled: probe leaves the chip powered down.
      * The glue enables it (irqEnable) when the radio is brought up. */
+
+    if (!setupInterface()) {
+        LOG("could not create the network interface");
+        teardown();
+        return false;
+    }
 
     registerService();
     return true;
@@ -349,6 +531,22 @@ void AirPort_RTW89::publishLink()
     setProperty("RTW89 Link AID", link.aid, 32);
     setProperty("RTW89 Link EAPOL Frames", link.eapol_rx, 32);
     setProperty("RTW89 Link Error", (unsigned long long)(long long)link.last_error, 32);
+    setProperty("RTW89 TX Frames", link.tx_frames, 32);
+    setProperty("RTW89 TX Dropped", link.tx_dropped, 32);
+    setProperty("RTW89 RX Frames", link.rx_frames, 32);
+    setProperty("RTW89 RX Dropped", link.rx_dropped, 32);
+    setProperty("RTW89 RX Undecrypted", link.rx_undecrypted, 32);
+    setProperty("RTW89 RX Replayed", link.rx_replay, 32);
+
+    /* The stack starts DHCP when the link comes up and forgets its addresses
+     * when it goes down. */
+    bool active = link.state == RTW89_GLUE_LINK_CONNECTED;
+    if (_medium && active != _linkActive) {
+        _linkActive = active;
+        setLinkStatus(active ? (kIONetworkLinkValid | kIONetworkLinkActive) : kIONetworkLinkValid,
+                      _medium, active ? 100 * 1000000ULL : 0);
+        LOG("link %s", active ? "up" : "down");
+    }
 }
 
 IOReturn AirPort_RTW89::setProperties(OSObject *properties)
@@ -413,6 +611,11 @@ IOReturn AirPort_RTW89::setProperties(OSObject *properties)
 
 void AirPort_RTW89::teardown()
 {
+    /* No new frames into the driver, and wait for the ones on their way. */
+    _dataReady = false;
+    while (_txBusy)
+        IOSleep(1);
+
     if (_commandLock)
         IOLockLock(_commandLock);
 
@@ -455,6 +658,14 @@ void AirPort_RTW89::teardown()
 
     if (_commandLock)
         IOLockUnlock(_commandLock);
+
+    /* The driver is gone, so nothing calls rxFrame() any more. */
+    if (_netif) {
+        detachInterface(_netif, true);
+        _netif->release();
+        _netif = nullptr;
+    }
+    _linkActive = false;
 }
 
 void AirPort_RTW89::stop(IOService *provider)
@@ -470,6 +681,15 @@ void AirPort_RTW89::free()
     if (_commandLock) {
         IOLockFree(_commandLock);
         _commandLock = nullptr;
+    }
+    if (_mediumDict) {
+        _mediumDict->release();
+        _mediumDict = nullptr;
+        _medium = nullptr;
+    }
+    if (_netWorkLoop) {
+        _netWorkLoop->release();
+        _netWorkLoop = nullptr;
     }
     super::free();
 }

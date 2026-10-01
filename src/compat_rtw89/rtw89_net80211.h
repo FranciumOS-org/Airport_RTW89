@@ -78,6 +78,7 @@ struct rtw89_m80211_glue_ops {
 struct rtw89_m80211_txq {
     struct list_head schedule_entry;    /* on local->active_txqs[ac] while scheduled */
     u16 schedule_round;
+    bool dead;                          /* being freed: takes no more frames */
     struct sk_buff_head frames;
     unsigned long byte_cnt;
     struct ieee80211_txq txq;           /* must be last: drv_priv[] follows */
@@ -115,6 +116,7 @@ struct rtw89_m80211_local {
     struct list_head vifs;
     struct list_head stas;
     struct list_head keys;
+    struct list_head dead;              /* struct rtw89_m80211_dead: freed after a grace period */
 
     spinlock_t active_txq_lock[IEEE80211_NUM_ACS];
     struct list_head active_txqs[IEEE80211_NUM_ACS];
@@ -166,6 +168,14 @@ struct ieee80211_sta *rtw89_m80211_sta_alloc(struct ieee80211_vif *vif, const u8
 void rtw89_m80211_sta_free(struct ieee80211_sta *sta);
 void rtw89_m80211_sta_set_uploaded(struct ieee80211_sta *sta, bool uploaded);
 
+/* Drop the frames queued for @sta. */
+void rtw89_m80211_sta_purge_txqs(struct ieee80211_sta *sta);
+
+/* kfree() @ptr once no driver thread can still be using it; see rtw89_mac80211.c.
+ * rtw89_m80211_reap(hw, true) frees everything now: only with the driver stopped. */
+void rtw89_m80211_free_later(struct ieee80211_hw *hw, void *ptr, void (*release)(void *ptr));
+void rtw89_m80211_reap(struct ieee80211_hw *hw, bool all);
+
 int rtw89_m80211_key_add(struct ieee80211_hw *hw, struct ieee80211_vif *vif,
                          struct ieee80211_sta *sta, struct ieee80211_key_conf *conf);
 void rtw89_m80211_key_del(struct ieee80211_hw *hw, struct ieee80211_key_conf *conf);
@@ -210,13 +220,56 @@ void rtw89_mlme_start(struct ieee80211_hw *hw, struct ieee80211_vif *vif, void (
 void rtw89_mlme_stop(void);
 /* @pmk: the 32-byte pairwise master key for a WPA2-PSK network, else NULL. */
 int rtw89_mlme_connect(const struct rtw89_mlme_bss *bss, const u8 *pmk);
-/* For tests: see every frame the MLME transmits. */
+/* For tests: see every management frame the MLME transmits. */
 void rtw89_mlme_set_tx_tap(void (*tap)(const u8 *frame, size_t len));
 void rtw89_mlme_disconnect(u16 reason);
 void rtw89_mlme_get_status(struct rtw89_mlme_status *status);
-/* A received frame that is not a beacon or probe response; takes the skb.
- * Any context: the frame is queued and handled under the wiphy mutex. */
+/* A received management frame that is not a beacon or probe response; takes
+ * the skb. Any context: the frame is queued and handled under the wiphy mutex. */
 void rtw89_mlme_rx(struct sk_buff *skb);
+/* An EAPOL frame from the AP (without Ethernet header), from the data path. */
+void rtw89_mlme_rx_eapol(const u8 *eapol, size_t len);
+/* The driver reports that the AP is gone. Any context. */
+void rtw89_mlme_connection_lost(void);
+
+/* ------------------------------------------------------------------ */
+/*  Data path (rtw89_data.c)                                            */
+/* ------------------------------------------------------------------ */
+
+struct rtw89_data_stats {
+    u32 tx_frames;
+    u32 tx_dropped;
+    u32 rx_frames;              /* handed to the network stack */
+    u32 rx_dropped;
+    u32 rx_dup;                 /* retries of a frame already seen */
+    u32 rx_replay;              /* packet number did not advance */
+    u32 rx_undecrypted;         /* protected, but not decrypted by the hardware */
+    u32 rx_unprotected;         /* in the clear on an encrypted network */
+    u32 rx_fragments;           /* fragmented frames, not supported */
+};
+
+/* @deliver gets each received Ethernet frame; called from the receive thread. */
+void rtw89_data_init(struct ieee80211_hw *hw, void (*deliver)(const u8 *frame, size_t len));
+void rtw89_data_exit(void);
+
+/* For the MLME, with the wiphy mutex held. Between attach and detach, frames
+ * from @bssid are handled and the key handshake can be sent; everything else
+ * waits for rtw89_data_authorize(). */
+void rtw89_data_attach(struct ieee80211_vif *vif, struct ieee80211_sta *sta,
+                       const u8 *bssid, enum nl80211_band band, bool protect);
+void rtw89_data_detach(void);
+void rtw89_data_authorize(void);
+void rtw89_data_set_tx_key(struct ieee80211_key_conf *key);
+void rtw89_data_set_rx_key(int keyidx, bool valid, u64 rsc);
+
+/* Transmit an Ethernet frame: allocate, fill skb->data, send. Any thread. */
+struct sk_buff *rtw89_data_tx_alloc(size_t len);
+int rtw89_data_tx(struct sk_buff *skb);
+/* A received 802.11 data frame (FCS on); takes the skb. */
+void rtw89_data_rx(struct sk_buff *skb);
+void rtw89_data_get_stats(struct rtw89_data_stats *stats);
+/* For tests: see every data frame as it is queued for the driver. */
+void rtw89_data_set_tx_tap(void (*tap)(const u8 *frame, size_t len));
 
 /*
  * Queue a frame on @txq and wake the driver. The caller has filled

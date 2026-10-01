@@ -41,8 +41,10 @@ Loading is manual and at your own risk (a driver bug panics the machine):
 `sudo tools/load.sh`, then `sudo tools/unload.sh`. With the kext loaded,
 `sudo build/out/rtw89ctl scan` starts the radio, scans and lists the networks;
 `sudo build/out/rtw89ctl join SSID` asks for the password and joins one of them
-(association and WPA2 key handshake; there is no network interface yet, so no
-traffic); `sudo build/out/rtw89ctl down` stops the radio.
+(WPA2-PSK or open); `sudo build/out/rtw89ctl down` stops the radio. The kext
+publishes an Ethernet-style interface (`rtw89ctl status` shows its name, e.g.
+`en7`) whose link comes up once a network is joined; macOS then configures it
+with DHCP. There is no Wi-Fi menu yet.
 
 Per-file compiler output is kept in `build/log/`.
 

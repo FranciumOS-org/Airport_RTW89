@@ -10,6 +10,10 @@
  *   sudo rtw89ctl down      stop the radio
  *        rtw89ctl status    print what the kext has published
  *
+ * Once a network is joined, traffic flows through the Ethernet-style
+ * interface the kext publishes (the "interface" line of status, e.g. en7):
+ * macOS configures it with DHCP like any other Ethernet port.
+ *
  * Commands go in through IORegistryEntrySetCFProperties (the kext requires an
  * administrator); results come back as registry properties.
  */
@@ -101,6 +105,20 @@ static void print_error(long error)
         printf("%-10s %ld\n", "last error", error);
 }
 
+/* The BSD name (en7, ...) of the kext's network interface, once it has one. */
+static void print_interface(io_service_t service)
+{
+    CFTypeRef v = IORegistryEntrySearchCFProperty(service, kIOServicePlane, CFSTR("BSD Name"),
+                                                  NULL, kIORegistryIterateRecursively);
+    char name[32];
+
+    if (v && CFGetTypeID(v) == CFStringGetTypeID() &&
+        CFStringGetCString(v, name, sizeof(name), kCFStringEncodingUTF8))
+        printf("%-10s %s\n", "interface", name);
+    if (v)
+        CFRelease(v);
+}
+
 static void print_link(io_service_t service)
 {
     char state[32], bssid[32];
@@ -117,6 +135,13 @@ static void print_link(io_service_t service)
         printf("%-10s %ld EAPOL frame(s) from the AP\n", "handshake",
                get_long(service, CFSTR("RTW89 Link EAPOL Frames")));
     }
+    print_interface(service);
+    printf("%-10s sent %ld (dropped %ld), received %ld (dropped %ld: %ld not decrypted, "
+           "%ld replayed)\n", "frames",
+           get_long(service, CFSTR("RTW89 TX Frames")), get_long(service, CFSTR("RTW89 TX Dropped")),
+           get_long(service, CFSTR("RTW89 RX Frames")), get_long(service, CFSTR("RTW89 RX Dropped")),
+           get_long(service, CFSTR("RTW89 RX Undecrypted")),
+           get_long(service, CFSTR("RTW89 RX Replayed")));
     print_error(get_long(service, CFSTR("RTW89 Link Error")));
 }
 
@@ -216,6 +241,8 @@ int main(int argc, char **argv)
         print_string(service, CFSTR("RTW89 MAC Address"), "MAC");
         print_string(service, CFSTR("RTW89 Firmware Version"), "firmware");
         printf("%-10s %s\n", "radio", get_bool(service, CFSTR("RTW89 Radio Up")) ? "up" : "down");
+        /* the counters are only refreshed on request */
+        send_command(service, "results");
         print_link(service);
         print_results(service);
         return 0;

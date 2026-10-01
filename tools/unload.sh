@@ -9,7 +9,15 @@ set -eu
 [ "$(id -u)" = 0 ] || { echo "run with sudo: sudo tools/unload.sh" >&2; exit 1; }
 
 sync
-kmutil unload -b com.rtw89.driver
+# The network interface is released by the system a moment after the driver
+# stops, and the kext cannot be unloaded until then: try a few times.
+n=0
+until kmutil unload -b com.rtw89.driver; do
+    n=$((n + 1))
+    [ "$n" -lt 5 ] || break
+    echo "not unloaded yet, trying again in 2 s"
+    sleep 2
+done
 sleep 2
 # On the first unload the kext's "stopping" line never showed up in the unified
 # log, so read the kernel message buffer, which gets every IOLog line directly.

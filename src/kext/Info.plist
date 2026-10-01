@@ -42,6 +42,8 @@
 	<string>13.0</string>
 	<key>OSBundleLibraries</key>
 	<dict>
+		<key>com.apple.iokit.IONetworkingFamily</key>
+		<string>1.5.0</string>
 		<key>com.apple.iokit.IOPCIFamily</key>
 		<string>2.9</string>
 		<key>com.apple.kpi.bsd</key>
