@@ -27,12 +27,27 @@ probe and at worst panic.
 into one relocatable object whose only undefined symbols are 50 kernel imports
 (listed in [kernel-imports.md](kernel-imports.md)).
 
-**M1 is built, not yet run on hardware.** `make kext` produces
+**M1 is done** (2026-10-01, macOS 15.8.1, TUF A15). `make kext` produces
 `build/out/AirPort_RTW89.kext`: an `IOService` that matches `10EC:B852`/`B85B`,
 maps BAR 2, and runs the driver's own `probe()` through the platform glue
 (`src/kext/` ↔ `src/compat_rtw89/rtw89_glue.[ch]`). All 349 symbols it imports
 resolve against the KPIs it declares (`tools/check_kpi.py`). Firmware
-`rtw8852b_fw-2.bin` is embedded. The first load is still to come.
+`rtw8852b_fw-2.bin` is embedded.
+
+Loaded twice with `sudo tools/load.sh` and unloaded twice with
+`sudo tools/unload.sh`, no panic, same result both times: power-on, firmware
+download and efuse read take about 0.35 s, and the kernel log shows
+
+    [rtw89 INFO rtw89_8852be] Firmware version 0.29.29.18 (9e3d777f), cmd version 0, type 5
+    [rtw89 INFO rtw89_8852be] chip info CID: 0, CV: 1, AID: 0, ACV: 1, RFE: 1
+    AirPort_RTW89: RTL8852BE cut B, RFE type 1, 2T2R
+    AirPort_RTW89: MAC address a8:41:f4:e1:b1:4a
+
+Things learned from the real load: Sequoia loads the loose, ad-hoc-signed kext
+directly (no approval prompt, no reboot) with this machine's SIP settings; MSI is
+available (interrupt index 1); and `log show` does not contain the lines a kext
+prints while it is being unloaded, `dmesg` does (which is why `unload.sh` reads
+that).
 
 Before any load, `make hosttest` runs the same objects in userspace
 (`tools/hosttest/`): pthread stand-ins for the 50 kernel imports, then
@@ -144,7 +159,7 @@ Each milestone ends with something observable on real hardware.
 | # | Milestone | Done when |
 |---|---|---|
 | M0 ✅ | **Builds** — fork Feixiao glue into this repo, vendor the rtw89 subset + firmware, extend shims until everything compiles and links | `make link`: zero undefined symbols except kernel imports. (The kext bundle itself needs the IOKit glue and is the first step of M1.) |
-| M1 | **Talks to the chip** — standalone IOService (no IO80211 yet): match `10EC:B852`, map BAR, `rtw89_pci_probe` → power on → firmware download → read efuse | `dmesg` shows firmware version and the card's real MAC address; kext unloads cleanly |
+| M1 ✅ | **Talks to the chip** — standalone IOService (no IO80211 yet): match `10EC:B852`, map BAR, `rtw89_pci_probe` → power on → firmware download → read efuse | `dmesg` shows firmware version and the card's real MAC address; kext unloads cleanly |
 | M2 | **Scans** — attach to IO80211FamilyLegacy using the adapted `RTW88IEEE80211` layer; rtw89 uses firmware `hw_scan` | Networks appear in the Wi-Fi menu |
 | M3 | **Associates** — open + WPA2 via the existing internal RSN/EAPOL path | DHCP lease, pings |
 | M4 | **Stable** — sustained traffic, network switching, SER (firmware error recovery), sleep/wake | 1 h iperf without drops; survives 10 sleep cycles |
