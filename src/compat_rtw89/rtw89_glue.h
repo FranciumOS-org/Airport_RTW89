@@ -34,6 +34,9 @@ struct rtw89_glue_platform {
      */
     void *(*dma_alloc)(void *ctx, size_t size, uint64_t *bus_addr, void **cookie);
     void (*dma_free)(void *ctx, void *cookie);
+
+    /* Let the device's interrupt reach rtw89_glue_interrupt(), or stop it. */
+    void (*irq_enable)(void *ctx, bool enable);
 };
 
 struct rtw89_glue_device {
@@ -78,6 +81,40 @@ void rtw89_glue_interrupt(void);
 
 /* Valid between a successful probe and remove. */
 bool rtw89_glue_get_info(struct rtw89_glue_info *info);
+
+/*
+ * Radio up/down: what mac80211 does when the first interface is opened.
+ * up() starts the hardware (power on, firmware, calibration, interrupts) and
+ * adds one station interface with the card's own address; down() reverses it.
+ * Both may sleep for a long time. Not reentrant: serialise calls.
+ */
+int rtw89_glue_up(void);
+void rtw89_glue_down(void);
+bool rtw89_glue_is_up(void);
+
+/*
+ * Start a firmware scan over every enabled channel: active (wildcard probe
+ * request) where regulations allow, passive elsewhere. Returns 0 once the scan
+ * is running; it finishes on its own after a few seconds. -EBUSY if one is
+ * already running, -ENETDOWN if the radio is down.
+ */
+int rtw89_glue_scan(void);
+bool rtw89_glue_scanning(void);
+
+struct rtw89_glue_bss {
+    uint8_t  bssid[6];
+    uint8_t  ssid_len;
+    char     ssid[33];          /* NUL-terminated; not necessarily printable */
+    uint16_t freq;              /* MHz */
+    uint8_t  channel;
+    int8_t   signal;            /* dBm */
+    uint16_t capability;
+    uint32_t seen;              /* beacons and probe responses heard */
+};
+
+/* Networks heard since the last rtw89_glue_scan() (beacons and probe
+ * responses). Returns how many were copied to @out. */
+unsigned int rtw89_glue_scan_results(struct rtw89_glue_bss *out, unsigned int max);
 
 #ifdef __cplusplus
 }

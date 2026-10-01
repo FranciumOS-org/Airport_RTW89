@@ -32,6 +32,7 @@ struct rtw89_glue_dma {
 };
 
 #define RTW89_GLUE_DMA_BUCKETS 256
+#define RTW89_GLUE_MAX_BSS 128
 
 static struct {
     bool active;
@@ -43,6 +44,17 @@ static struct {
     spinlock_t dma_lock;
     struct hlist_head dma_hash[RTW89_GLUE_DMA_BUCKETS];
     unsigned int dma_count;
+
+    /* radio up: one station interface */
+    bool up;
+    struct ieee80211_vif *vif;
+
+    /* scan */
+    bool scanning;
+    struct ieee80211_scan_request *scan_req;    /* kept until the next scan */
+    spinlock_t bss_lock;
+    struct rtw89_glue_bss bss[RTW89_GLUE_MAX_BSS];
+    unsigned int n_bss;
 } glue;
 
 /* ------------------------------------------------------------------ */
@@ -338,6 +350,9 @@ static void glue_teardown(void)
 
     rtw88_compat_exit();
 
+    kfree(glue.scan_req);
+    spin_lock_destroy(&glue.bss_lock);
+
     leaked = glue_dma_reap();
     if (leaked)
         IOLog("[rtw89] released %u DMA mapping(s) the driver left behind\n", leaked);
@@ -374,6 +389,7 @@ int rtw89_glue_probe(const struct rtw89_glue_platform *platform,
     glue.plat = *platform;
     glue.drv = rtw89_compat_pci_driver();
     spin_lock_init(&glue.dma_lock);
+    spin_lock_init(&glue.bss_lock);
     for (i = 0; i < RTW89_GLUE_DMA_BUCKETS; i++)
         INIT_HLIST_HEAD(&glue.dma_hash[i]);
 
@@ -404,6 +420,8 @@ void rtw89_glue_remove(void)
 {
     if (!glue.active)
         return;
+
+    rtw89_glue_down();
 
     if (glue.probed) {
         glue.probed = false;
@@ -441,4 +459,298 @@ bool rtw89_glue_get_info(struct rtw89_glue_info *info)
     info->tx_streams = rtwdev->hal.tx_nss;
     info->rx_streams = rtwdev->hal.rx_nss;
     return true;
+}
+
+/* ------------------------------------------------------------------ */
+/*  Upcalls from the mac80211 stand-in                                  */
+/* ------------------------------------------------------------------ */
+
+static struct ieee80211_hw *glue_hw(void)
+{
+    return pci_get_drvdata(&glue.pdev);
+}
+
+/*
+ * Remember a network from a beacon or probe response. Non-static so the smoke
+ * test can feed it frames; everything else reaches it through glue_rx().
+ */
+void rtw89_glue_note_bss(const u8 *frame, size_t len, u16 freq, s8 signal);
+void rtw89_glue_note_bss(const u8 *frame, size_t len, u16 freq, s8 signal)
+{
+    const struct ieee80211_mgmt *mgmt = (const void *)frame;
+    const size_t fixed = offsetof(struct ieee80211_mgmt, u.beacon.variable);
+    const struct element *ssid;
+    struct rtw89_glue_bss *bss = NULL;
+    unsigned int i;
+
+    if (len < fixed)
+        return;
+    if (!ieee80211_is_beacon(mgmt->frame_control) &&
+        !ieee80211_is_probe_resp(mgmt->frame_control))
+        return;
+
+    ssid = cfg80211_find_elem(WLAN_EID_SSID, frame + fixed, len - fixed);
+
+    spin_lock(&glue.bss_lock);
+    for (i = 0; i < glue.n_bss; i++) {
+        if (ether_addr_equal(glue.bss[i].bssid, mgmt->bssid)) {
+            bss = &glue.bss[i];
+            break;
+        }
+    }
+    if (!bss && glue.n_bss < RTW89_GLUE_MAX_BSS) {
+        bss = &glue.bss[glue.n_bss++];
+        memset(bss, 0, sizeof(*bss));
+        memcpy(bss->bssid, mgmt->bssid, ETH_ALEN);
+        bss->signal = signal;
+    }
+    if (bss) {
+        /* A hidden network beacons an empty SSID; keep a real one if a probe
+         * response supplied it. */
+        if (ssid && ssid->datalen && ssid->datalen <= IEEE80211_MAX_SSID_LEN &&
+            ssid->data[0]) {
+            bss->ssid_len = ssid->datalen;
+            memcpy(bss->ssid, ssid->data, ssid->datalen);
+            bss->ssid[ssid->datalen] = 0;
+        }
+        bss->freq = freq;
+        bss->channel = (u8)ieee80211_frequency_to_channel(freq);
+        if (signal > bss->signal)
+            bss->signal = signal;
+        bss->capability = le16_to_cpu(mgmt->u.beacon.capab_info);
+        bss->seen++;
+    }
+    spin_unlock(&glue.bss_lock);
+}
+
+/* Every received frame lands here until there is a network stack to give it to. */
+static void glue_rx(void *ctx, struct ieee80211_sta *sta, struct sk_buff *skb)
+{
+    struct ieee80211_rx_status *status = IEEE80211_SKB_RXCB(skb);
+    size_t len = skb->len;
+
+    /* The driver leaves the FCS on (RX_INCLUDES_FCS). */
+    if (len >= FCS_LEN)
+        len -= FCS_LEN;
+    if (!(status->flag & (RX_FLAG_FAILED_FCS_CRC | RX_FLAG_NO_PSDU)))
+        rtw89_glue_note_bss(skb->data, len, status->freq, status->signal);
+    kfree_skb(skb);
+}
+
+static void glue_tx_status(void *ctx, struct sk_buff *skb)
+{
+    kfree_skb(skb);
+}
+
+static void glue_scan_done(void *ctx, bool aborted)
+{
+    glue.scanning = false;
+    IOLog("[rtw89] scan %s: %u network(s) heard\n", aborted ? "aborted" : "finished",
+          glue.n_bss);
+}
+
+static const struct rtw89_m80211_glue_ops glue_m80211_ops = {
+    .rx = glue_rx,
+    .tx_status = glue_tx_status,
+    .scan_done = glue_scan_done,
+};
+
+/* ------------------------------------------------------------------ */
+/*  Radio up / down                                                     */
+/* ------------------------------------------------------------------ */
+
+bool rtw89_glue_is_up(void)
+{
+    return glue.up;
+}
+
+int rtw89_glue_up(void)
+{
+    struct rtw89_m80211_local *local;
+    struct ieee80211_hw *hw;
+    unsigned int filter = 0;
+    int ret;
+
+    if (!glue.probed)
+        return -ENODEV;
+    if (glue.up)
+        return 0;
+
+    hw = glue_hw();
+    local = hw_to_local(hw);
+    rtw89_m80211_set_glue(hw, &glue_m80211_ops, NULL);
+
+    glue.vif = rtw89_m80211_vif_alloc(hw, NL80211_IFTYPE_STATION, hw->wiphy->perm_addr);
+    if (!glue.vif)
+        return -ENOMEM;
+
+    /* The driver enables the chip's interrupt mask inside start(). */
+    if (glue.plat.irq_enable)
+        glue.plat.irq_enable(glue.plat.ctx, true);
+
+    /* mac80211 calls every driver op with the wiphy mutex held. */
+    wiphy_lock(hw->wiphy);
+    ret = local->ops->start(hw);
+    if (ret)
+        goto err_unlock;
+
+    ret = local->ops->add_interface(hw, glue.vif);
+    if (ret) {
+        local->ops->stop(hw, false);
+        goto err_unlock;
+    }
+    rtw89_m80211_vif_set_in_driver(glue.vif, true);
+    local->ops->configure_filter(hw, 0, &filter, 0);
+    wiphy_unlock(hw->wiphy);
+
+    glue.up = true;
+    return 0;
+
+err_unlock:
+    wiphy_unlock(hw->wiphy);
+    if (glue.plat.irq_enable)
+        glue.plat.irq_enable(glue.plat.ctx, false);
+    rtw89_m80211_vif_free(glue.vif);
+    glue.vif = NULL;
+    return ret;
+}
+
+void rtw89_glue_down(void)
+{
+    struct rtw89_m80211_local *local;
+    struct ieee80211_hw *hw;
+
+    if (!glue.up)
+        return;
+    glue.up = false;
+
+    hw = glue_hw();
+    local = hw_to_local(hw);
+
+    wiphy_lock(hw->wiphy);
+    if (glue.scanning && local->ops->cancel_hw_scan)
+        local->ops->cancel_hw_scan(hw, glue.vif);
+    rtw89_m80211_vif_set_in_driver(glue.vif, false);
+    local->ops->remove_interface(hw, glue.vif);
+    local->ops->stop(hw, false);
+    wiphy_unlock(hw->wiphy);
+    glue.scanning = false;
+
+    if (glue.plat.irq_enable)
+        glue.plat.irq_enable(glue.plat.ctx, false);
+
+    rtw89_m80211_vif_free(glue.vif);
+    glue.vif = NULL;
+}
+
+/* ------------------------------------------------------------------ */
+/*  Scan                                                                */
+/* ------------------------------------------------------------------ */
+
+/* Probe request IEs per band: supported rates only for now. */
+static const u8 glue_ies_2ghz[] = {
+    WLAN_EID_SUPP_RATES, 8, 0x82, 0x84, 0x8b, 0x96, 0x0c, 0x12, 0x18, 0x24,
+    WLAN_EID_EXT_SUPP_RATES, 4, 0x30, 0x48, 0x60, 0x6c,
+};
+static const u8 glue_ies_5ghz[] = {
+    WLAN_EID_SUPP_RATES, 8, 0x8c, 0x12, 0x98, 0x24, 0xb0, 0x48, 0x60, 0x6c,
+};
+
+bool rtw89_glue_scanning(void)
+{
+    return glue.scanning;
+}
+
+int rtw89_glue_scan(void)
+{
+    struct rtw89_m80211_local *local;
+    struct ieee80211_scan_request *sreq;
+    struct ieee80211_supported_band *sband;
+    struct cfg80211_scan_request *req;
+    struct cfg80211_ssid *ssid;
+    struct ieee80211_hw *hw;
+    unsigned int n_channels = 0;
+    u8 *ies;
+    int band, i, ret;
+
+    if (!glue.up)
+        return -ENETDOWN;
+    if (glue.scanning)
+        return -EBUSY;
+
+    hw = glue_hw();
+    local = hw_to_local(hw);
+
+    for (band = 0; band < NUM_NL80211_BANDS; band++)
+        if (hw->wiphy->bands[band])
+            n_channels += hw->wiphy->bands[band]->n_channels;
+
+    /* One allocation: request, channel pointers, one wildcard SSID, the IEs. */
+    sreq = kzalloc(sizeof(*sreq) + n_channels * sizeof(sreq->req.channels[0]) +
+                   sizeof(*ssid) + sizeof(glue_ies_2ghz) + sizeof(glue_ies_5ghz),
+                   GFP_KERNEL);
+    if (!sreq)
+        return -ENOMEM;
+    req = &sreq->req;
+    ssid = (void *)&req->channels[n_channels];
+    ies = (u8 *)(ssid + 1);
+
+    for (band = 0; band < NUM_NL80211_BANDS; band++) {
+        sband = hw->wiphy->bands[band];
+        if (!sband)
+            continue;
+        for (i = 0; i < sband->n_channels; i++)
+            if (!(sband->channels[i].flags & IEEE80211_CHAN_DISABLED))
+                req->channels[req->n_channels++] = &sband->channels[i];
+    }
+
+    req->ssids = ssid;          /* zero length: the wildcard SSID */
+    req->n_ssids = 1;
+    req->wiphy = hw->wiphy;
+    req->scan_start = jiffies;
+    ether_addr_copy(req->mac_addr, glue.vif->addr);
+    eth_broadcast_addr(req->bssid);
+
+    memcpy(ies, glue_ies_2ghz, sizeof(glue_ies_2ghz));
+    memcpy(ies + sizeof(glue_ies_2ghz), glue_ies_5ghz, sizeof(glue_ies_5ghz));
+    req->ie = ies;
+    req->ie_len = sizeof(glue_ies_2ghz) + sizeof(glue_ies_5ghz);
+    sreq->ies.ies[NL80211_BAND_2GHZ] = ies;
+    sreq->ies.len[NL80211_BAND_2GHZ] = sizeof(glue_ies_2ghz);
+    sreq->ies.ies[NL80211_BAND_5GHZ] = ies + sizeof(glue_ies_2ghz);
+    sreq->ies.len[NL80211_BAND_5GHZ] = sizeof(glue_ies_5ghz);
+
+    spin_lock(&glue.bss_lock);
+    glue.n_bss = 0;
+    spin_unlock(&glue.bss_lock);
+
+    wiphy_lock(hw->wiphy);
+    /* The previous request is no longer referenced once a new scan starts. */
+    kfree(glue.scan_req);
+    glue.scan_req = sreq;
+    glue.scanning = true;
+    ret = local->ops->hw_scan(hw, glue.vif, sreq);
+    if (ret)
+        glue.scanning = false;
+    wiphy_unlock(hw->wiphy);
+
+    if (ret > 0)    /* "do a software scan instead": the firmware lacks scan offload */
+        ret = -EOPNOTSUPP;
+    if (!ret)
+        IOLog("[rtw89] scan started on %u channel(s)\n", req->n_channels);
+    return ret;
+}
+
+unsigned int rtw89_glue_scan_results(struct rtw89_glue_bss *out, unsigned int max)
+{
+    unsigned int n;
+
+    if (!glue.active)
+        return 0;
+
+    spin_lock(&glue.bss_lock);
+    n = min(glue.n_bss, max);
+    memcpy(out, glue.bss, n * sizeof(*out));
+    spin_unlock(&glue.bss_lock);
+    return n;
 }

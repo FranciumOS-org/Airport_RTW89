@@ -87,6 +87,7 @@ struct rtw89_m80211_vif {
     struct list_head list;              /* on local->vifs */
     struct rtw89_m80211_local *local;
     bool in_driver;                     /* add_interface succeeded */
+    u8 bssid[ETH_ALEN];                 /* what bss_conf.bssid points at (station) */
     struct ieee80211_vif vif;           /* must be last: drv_priv[] follows */
 };
 

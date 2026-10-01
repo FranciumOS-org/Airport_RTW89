@@ -223,6 +223,8 @@ kext: hosttest $(KEXT_OBJS) $(KEXT_SRC)/Info.plist
 	@codesign --force --sign - $(KEXT_BUNDLE) 2>/dev/null || true
 	@echo "  KEXT $(KEXT_BUNDLE)"
 	@python3 tools/check_kpi.py $(KEXT_BUNDLE)
+	@cc -O2 -Wall -o $(BUILD_DIR)/out/rtw89ctl tools/rtw89ctl.c -framework IOKit -framework CoreFoundation
+	@echo "  TOOL $(BUILD_DIR)/out/rtw89ctl"
 
 FW_NAME := rtw8852b_fw-2.bin
 FW_URL  := https://git.kernel.org/pub/scm/linux/kernel/git/firmware/linux-firmware.git/plain/rtw89/$(FW_NAME)

@@ -310,6 +310,9 @@ static inline bool __test_and_set_bit(unsigned long nr, unsigned long *addr)
 #ifndef EBADMSG
 #define EBADMSG  74
 #endif
+#ifndef ENETDOWN
+#define ENETDOWN 100
+#endif
 #ifndef ENOBUFS
 #define ENOBUFS  105
 #endif

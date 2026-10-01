@@ -38,7 +38,9 @@ make kext             # userspace smoke test, then build/out/AirPort_RTW89.kext
 ```
 
 Loading is manual and at your own risk (a driver bug panics the machine):
-`sudo tools/load.sh`, then `sudo tools/unload.sh`.
+`sudo tools/load.sh`, then `sudo tools/unload.sh`. With the kext loaded,
+`sudo build/out/rtw89ctl scan` starts the radio, scans and lists the networks;
+`sudo build/out/rtw89ctl down` stops the radio.
 
 Per-file compiler output is kept in `build/log/`.
 

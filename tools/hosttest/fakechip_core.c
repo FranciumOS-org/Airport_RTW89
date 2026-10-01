@@ -12,8 +12,49 @@
  * never reaches.
  */
 #define rtw89_chip_info_setup rtw89_real_chip_info_setup
+#define rtw89_core_start rtw89_real_core_start
+#define rtw89_core_stop rtw89_real_core_stop
 #include "core.c"
 #undef rtw89_chip_info_setup
+#undef rtw89_core_start
+#undef rtw89_core_stop
+
+/*
+ * Starting the radio is hardware from top to bottom (MAC/BB/RF init, firmware
+ * download, calibration). Pretend it worked, so the test can go on to add an
+ * interface, build a scan request and take it all down again; the commands
+ * the driver then sends go into a firmware-command ring nobody drains.
+ */
+int rtw89_core_start(struct rtw89_dev *rtwdev)
+{
+    /* The driver checks these enable bits before touching the MAC. */
+    rtw89_write32_set(rtwdev, R_AX_DMAC_FUNC_EN, B_AX_MAC_FUNC_EN | B_AX_DMAC_FUNC_EN);
+    rtw89_write32_set(rtwdev, R_AX_CMAC_FUNC_EN, B_AX_CMAC_EN);
+
+    set_bit(RTW89_FLAG_POWERON, rtwdev->flags);
+
+    /* As the real start does: the periodic tracking works run while up. */
+    wiphy_delayed_work_queue(rtwdev->hw->wiphy, &rtwdev->track_work,
+                             RTW89_TRACK_WORK_PERIOD);
+    wiphy_delayed_work_queue(rtwdev->hw->wiphy, &rtwdev->track_ps_work,
+                             RTW89_TRACK_PS_WORK_PERIOD);
+
+    set_bit(RTW89_FLAG_RUNNING, rtwdev->flags);
+    return 0;
+}
+
+void rtw89_core_stop(struct rtw89_dev *rtwdev)
+{
+    struct wiphy *wiphy = rtwdev->hw->wiphy;
+
+    if (!test_bit(RTW89_FLAG_RUNNING, rtwdev->flags))
+        return;
+
+    clear_bit(RTW89_FLAG_RUNNING, rtwdev->flags);
+    wiphy_delayed_work_cancel(wiphy, &rtwdev->track_work);
+    wiphy_delayed_work_cancel(wiphy, &rtwdev->track_ps_work);
+    clear_bit(RTW89_FLAG_POWERON, rtwdev->flags);
+}
 
 int rtw89_chip_info_setup(struct rtw89_dev *rtwdev)
 {

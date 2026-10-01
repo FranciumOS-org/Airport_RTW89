@@ -2,6 +2,7 @@
 #include "AirPortRTW89.hpp"
 
 #include <IOKit/IOLib.h>
+#include <IOKit/IOUserClient.h>
 
 #define super IOService
 OSDefineMetaClassAndStructors(AirPort_RTW89, IOService)
@@ -124,6 +125,18 @@ void AirPort_RTW89::interruptOccurred(IOInterruptEventSource *source, int count)
     rtw89_glue_interrupt();
 }
 
+void AirPort_RTW89::irqEnable(void *ctx, bool enable)
+{
+    IOInterruptEventSource *source = static_cast<AirPort_RTW89 *>(ctx)->_interrupt;
+
+    if (!source)
+        return;
+    if (enable)
+        source->enable();
+    else
+        source->disable();
+}
+
 /* ------------------------------------------------------------------ */
 /*  IOService                                                           */
 /* ------------------------------------------------------------------ */
@@ -135,6 +148,10 @@ bool AirPort_RTW89::start(IOService *provider)
     int ret;
 
     if (!super::start(provider))
+        return false;
+
+    _commandLock = IOLockAlloc();
+    if (!_commandLock)
         return false;
 
     _pci = OSDynamicCast(IOPCIDevice, provider);
@@ -201,6 +218,7 @@ bool AirPort_RTW89::start(IOService *provider)
     platform.cfg_write = cfgWrite;
     platform.dma_alloc = dmaAlloc;
     platform.dma_free = dmaFree;
+    platform.irq_enable = irqEnable;
 
     LOG("probing");
     ret = rtw89_glue_probe(&platform, &device);
@@ -213,9 +231,8 @@ bool AirPort_RTW89::start(IOService *provider)
 
     publishInfo();
 
-    /* The interrupt source stays disabled: probe leaves the chip powered down
-     * and nothing brings it up again until there is an interface (M2), which
-     * is when the source gets enabled around the driver's start(). */
+    /* The interrupt source stays disabled: probe leaves the chip powered down.
+     * The glue enables it (irqEnable) when the radio is brought up. */
 
     registerService();
     return true;
@@ -241,19 +258,133 @@ void AirPort_RTW89::publishInfo()
     setProperty("RTW89 Firmware Version", info.fw_version);
 }
 
+/* ------------------------------------------------------------------ */
+/*  Commands from user space                                            */
+/* ------------------------------------------------------------------ */
+
+void AirPort_RTW89::publishScanResults()
+{
+    static const unsigned int kMax = 128;
+    struct rtw89_glue_bss *list;
+    unsigned int n;
+    OSArray *array;
+
+    list = static_cast<struct rtw89_glue_bss *>(IOMalloc(kMax * sizeof(*list)));
+    if (!list)
+        return;
+    n = rtw89_glue_scan_results(list, kMax);
+
+    array = OSArray::withCapacity(n ? n : 1);
+    for (unsigned int i = 0; array && i < n; i++) {
+        OSDictionary *dict = OSDictionary::withCapacity(6);
+        char bssid[18];
+        OSObject *value;
+
+        if (!dict)
+            break;
+        snprintf(bssid, sizeof(bssid), "%02x:%02x:%02x:%02x:%02x:%02x",
+                 list[i].bssid[0], list[i].bssid[1], list[i].bssid[2],
+                 list[i].bssid[3], list[i].bssid[4], list[i].bssid[5]);
+
+        /* SSIDs are arbitrary bytes, so they travel as data, not as a string. */
+        if ((value = OSData::withBytes(list[i].ssid, list[i].ssid_len))) {
+            dict->setObject("ssid", value);
+            value->release();
+        }
+        if ((value = OSString::withCString(bssid))) {
+            dict->setObject("bssid", value);
+            value->release();
+        }
+        if ((value = OSNumber::withNumber(list[i].channel, 32))) {
+            dict->setObject("channel", value);
+            value->release();
+        }
+        if ((value = OSNumber::withNumber(list[i].freq, 32))) {
+            dict->setObject("freq", value);
+            value->release();
+        }
+        if ((value = OSNumber::withNumber((unsigned long long)(long long)list[i].signal, 32))) {
+            dict->setObject("rssi", value);
+            value->release();
+        }
+        if ((value = OSNumber::withNumber(list[i].seen, 32))) {
+            dict->setObject("seen", value);
+            value->release();
+        }
+        array->setObject(dict);
+        dict->release();
+    }
+
+    if (array) {
+        setProperty("RTW89 Scan Results", array);
+        array->release();
+    }
+    setProperty("RTW89 Scanning", rtw89_glue_scanning());
+    setProperty("RTW89 Radio Up", rtw89_glue_is_up());
+    IOFree(list, kMax * sizeof(*list));
+}
+
+IOReturn AirPort_RTW89::setProperties(OSObject *properties)
+{
+    OSDictionary *dict = OSDynamicCast(OSDictionary, properties);
+    OSString *command = dict ? OSDynamicCast(OSString, dict->getObject("RTW89Command")) : nullptr;
+    IOReturn result = kIOReturnSuccess;
+    int ret = 0;
+
+    if (!command)
+        return kIOReturnBadArgument;
+    if (IOUserClient::clientHasPrivilege(current_task(), kIOClientPrivilegeAdministrator) !=
+        kIOReturnSuccess)
+        return kIOReturnNotPrivileged;
+
+    IOLockLock(_commandLock);
+    if (!_probed) {
+        result = kIOReturnNotReady;
+    } else if (command->isEqualTo("up")) {
+        LOG("radio up");
+        ret = rtw89_glue_up();
+    } else if (command->isEqualTo("down")) {
+        LOG("radio down");
+        rtw89_glue_down();
+    } else if (command->isEqualTo("scan")) {
+        ret = rtw89_glue_up();
+        if (!ret)
+            ret = rtw89_glue_scan();
+    } else if (command->isEqualTo("results")) {
+        /* only refreshes the properties below */
+    } else {
+        result = kIOReturnBadArgument;
+    }
+
+    if (ret) {
+        LOG("command \"%s\" failed: %d", command->getCStringNoCopy(), ret);
+        setProperty("RTW89 Last Error", (unsigned long long)(long long)ret, 32);
+        result = kIOReturnError;
+    }
+    if (_probed)
+        publishScanResults();
+    IOLockUnlock(_commandLock);
+
+    return result;
+}
+
 void AirPort_RTW89::teardown()
 {
-    if (_interrupt)
-        _interrupt->disable();
+    if (_commandLock)
+        IOLockLock(_commandLock);
 
     if (_probed) {
         _probed = false;
+        /* Brings the radio down first if it is up. */
         rtw89_glue_remove();
         /* The compat workqueue threads signal that they are done just before
          * they exit; let them get out of this kext's code before it can be
          * unloaded. */
         IOSleep(200);
     }
+
+    if (_interrupt)
+        _interrupt->disable();
 
     if (_interrupt) {
         if (_workLoop)
@@ -278,6 +409,9 @@ void AirPort_RTW89::teardown()
         _pci->release();
         _pci = nullptr;
     }
+
+    if (_commandLock)
+        IOLockUnlock(_commandLock);
 }
 
 void AirPort_RTW89::stop(IOService *provider)
@@ -290,5 +424,9 @@ void AirPort_RTW89::stop(IOService *provider)
 void AirPort_RTW89::free()
 {
     teardown();
+    if (_commandLock) {
+        IOLockFree(_commandLock);
+        _commandLock = nullptr;
+    }
     super::free();
 }
