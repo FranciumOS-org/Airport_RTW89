@@ -63,17 +63,35 @@ drives it through the kext's `setProperties` (administrators only) and prints th
 networks. This exercises interrupts, the RX path, firmware commands and scan
 offload without needing the legacy Wi-Fi stack or any EFI change.
 
-**Towards M3: association (built, not yet run on hardware).**
+**Towards M3: association (works on hardware), WPA2 key handshake (built, not
+yet run on hardware).**
 `src/compat_rtw89/rtw89_mlme.c` is a station MLME for one non-MLO interface,
 following `net/mac80211/mlme.c` call for call: channel context on the AP's
 channel, station entry, open-system authentication, association (802.11n on
 20 MHz, WMM, a WPA2-PSK/CCMP RSN element), `sta_state` transitions,
 `vif_cfg_changed`/`link_info_changed`, EDCA parameters, and the reverse on
 leaving or when the AP deauthenticates. `rtw89ctl join SSID` / `leave` drive it.
-Not there yet: the WPA2 key handshake (EAPOL frames from the AP are only
-counted, so a WPA2 AP drops the association after a few seconds), wider channels
-and VHT/HE, and the data path. Networks that are WPA3-only, enterprise, WEP/WPA1,
-or require management frame protection are refused with a message.
+On the test machine it authenticated and associated with a WPA2 access point on
+5220 MHz (AID 6, 802.11n, WMM) and received the AP's first handshake messages.
+
+The same file is the WPA2-PSK supplicant: 4-way handshake and group key
+handshake (EAPOL-Key descriptor version 2: HMAC-SHA1 MIC, AES key wrap), with
+the CCMP keys given to the driver through `set_key`. The cryptography is in
+`src/compat_rtw89/rtw89_crypto.c` (SHA-1, HMAC, PBKDF2, the 802.11 PRF, AES-128,
+RFC 3394 key wrap), checked against the published vectors in the self-test. It
+follows wpa_supplicant where that matters for security: the key derived from an
+(unauthenticated) message 1 stays provisional until a MIC verifies with it, a
+repeated message 3 does not install the same key again (no packet number reuse),
+the SNonce is kept while the AP retries message 1, and the replay counter must
+advance. `rtw89ctl join` asks for the password at a prompt; the kext turns it
+into the PMK and keeps only that, in memory, until the radio goes down.
+Not checked yet: that the RSN element in message 3 equals the one in the beacon
+(a downgrade check that matters once more than one cipher/AKM is supported).
+
+Not there yet: the data path (so no network interface and no traffic), receive
+packet number checks, wider channels and VHT/HE. Networks that are WPA3-only,
+enterprise, WEP/WPA1, or require management frame protection are refused with a
+message.
 
 The reference for the IOKit side of M2/M3 is `reference/airport_rtw88/`
 (AirPort_RTW88's IO80211 controller and its own MLME, GPL-2.0, not compiled).
@@ -95,9 +113,13 @@ Before any load, `make hosttest` runs the same objects in userspace
   firmware image is parsed, the device is fully registered, the radio is brought
   "up", an interface added, a scan request built, the periodic tracking work run,
   and everything taken down and removed again. In this variant the test also
-  plays an access point: beacon, authentication and association responses, an
-  EAPOL frame, a refusal, silence (three tries then timeout), a deauthentication,
-  leaving while associated, and the radio going down while associated.
+  plays an access point and WPA2 authenticator: beacon, authentication and
+  association responses, the 4-way handshake (verifying the station's MICs with
+  its own copy of the keys), a group key renewal, a repeated and a replayed
+  message 3, a forged message 1, a wrong password, a refusal, silence (three
+  tries then timeout), an AP that never starts the handshake, a
+  deauthentication, leaving while connected, and the radio going down while
+  connected.
 
 That found and fixed, before they could panic the machine: `pcie_capability_*`
 writing to the wrong config-space offset, a failed firmware decompress reported

@@ -4,7 +4,8 @@
  *
  *   sudo rtw89ctl up        start the radio (power on, firmware, calibration)
  *   sudo rtw89ctl scan      start the radio if needed, scan, print the networks
- *   sudo rtw89ctl join SSID associate with a network from the last scan
+ *   sudo rtw89ctl join SSID join a network from the last scan; asks for the
+ *                           password (just press Return for an open network)
  *   sudo rtw89ctl leave     leave the network
  *   sudo rtw89ctl down      stop the radio
  *        rtw89ctl status    print what the kext has published
@@ -23,8 +24,9 @@ static io_service_t find_service(void)
     return IOServiceGetMatchingService(kIOMainPortDefault, IOServiceMatching("AirPort_RTW89"));
 }
 
-/* @ssid: sent along as raw bytes when not NULL (for "join"). */
-static kern_return_t send_command_ssid(io_service_t service, const char *command, const char *ssid)
+/* @ssid, @passphrase: sent along as raw bytes when not NULL (for "join"). */
+static kern_return_t send_command_join(io_service_t service, const char *command,
+                                       const char *ssid, const char *passphrase)
 {
     CFStringRef value = CFStringCreateWithCString(NULL, command, kCFStringEncodingUTF8);
     CFMutableDictionaryRef dict = CFDictionaryCreateMutable(NULL, 2,
@@ -39,6 +41,12 @@ static kern_return_t send_command_ssid(io_service_t service, const char *command
         CFDictionarySetValue(dict, CFSTR("RTW89SSID"), data);
         CFRelease(data);
     }
+    if (passphrase && passphrase[0]) {
+        CFDataRef data = CFDataCreate(NULL, (const UInt8 *)passphrase, (CFIndex)strlen(passphrase));
+
+        CFDictionarySetValue(dict, CFSTR("RTW89Passphrase"), data);
+        CFRelease(data);
+    }
     kr = IORegistryEntrySetCFProperties(service, dict);
 
     CFRelease(dict);
@@ -48,7 +56,7 @@ static kern_return_t send_command_ssid(io_service_t service, const char *command
 
 static kern_return_t send_command(io_service_t service, const char *command)
 {
-    return send_command_ssid(service, command, NULL);
+    return send_command_join(service, command, NULL, NULL);
 }
 
 static long get_long(io_service_t service, CFStringRef key)
@@ -80,10 +88,15 @@ static void print_error(long error)
 {
     if (!error)
         return;
-    if (error <= -2000)
+    if (error == -2015 || error == -2002)
+        printf("%-10s the AP gave up on the key handshake (802.11 reason %ld): "
+               "usually a wrong password\n", "last error", -error - 2000);
+    else if (error <= -2000)
         printf("%-10s the AP ended the connection, 802.11 reason %ld\n", "last error", -error - 2000);
     else if (error <= -1000)
         printf("%-10s the AP refused, 802.11 status %ld\n", "last error", -error - 1000);
+    else if (error == -110)
+        printf("%-10s timed out waiting for the AP\n", "last error");
     else
         printf("%-10s %ld\n", "last error", error);
 }
@@ -215,33 +228,38 @@ int main(int argc, char **argv)
         return 2;
     }
 
-    kr = send_command_ssid(service, command, !strcmp(command, "join") ? argv[2] : NULL);
+    if (!strcmp(command, "join")) {
+        /* Typed at the prompt, not on the command line, so the password does
+         * not end up in the shell history or the process list. */
+        char *pass = getpass("Wi-Fi password (Return for an open network): ");
+
+        kr = send_command_join(service, command, argv[2], pass);
+        memset(pass, 0, strlen(pass));
+    } else {
+        kr = send_command(service, command);
+    }
     if (kr != KERN_SUCCESS) {
         fprintf(stderr, "%s failed: 0x%x%s\n", command, kr,
                 kr == kIOReturnNotPrivileged ? " (run with sudo)" : " (see the kernel log)");
         if (!strcmp(command, "join"))
-            fprintf(stderr, "is the network in the last scan? run: rtw89ctl scan\n");
+            fprintf(stderr, "is the network in the last scan (rtw89ctl scan), and is the "
+                            "password 8 to 63 characters?\n");
         return 1;
     }
 
     if (!strcmp(command, "join")) {
         char state[32] = "";
 
-        /* Authentication and association take well under a second each. */
-        for (i = 0; i < 20; i++) {
+        /* Authentication, association and the key handshake take a second or
+         * two; a wrong password shows as the AP dropping us after a few more. */
+        for (i = 0; i < 48; i++) {
             usleep(250 * 1000);
-            send_command(service, "results");
             get_string(service, CFSTR("RTW89 Link State"), state, sizeof(state));
-            if (strcmp(state, "joining"))
+            if (!strcmp(state, "connected") || (i > 4 && !strcmp(state, "down")))
                 break;
         }
-        /* give the AP a moment to start the key handshake */
-        if (!strcmp(state, "associated")) {
-            sleep(1);
-            send_command(service, "results");
-        }
         print_link(service);
-        return strcmp(state, "associated") && strcmp(state, "connected");
+        return strcmp(state, "connected");
     }
     if (!strcmp(command, "leave")) {
         printf("left the network\n");

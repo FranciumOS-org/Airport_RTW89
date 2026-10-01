@@ -37,6 +37,11 @@ struct rtw89_glue_platform {
 
     /* Let the device's interrupt reach rtw89_glue_interrupt(), or stop it. */
     void (*irq_enable)(void *ctx, bool enable);
+
+    /* Optional: the link state changed (see rtw89_glue_link()). Called from a
+     * driver thread with driver locks held: do not call back into the glue
+     * other than rtw89_glue_link(). */
+    void (*link_changed)(void *ctx);
 };
 
 struct rtw89_glue_device {
@@ -117,12 +122,16 @@ struct rtw89_glue_bss {
 unsigned int rtw89_glue_scan_results(struct rtw89_glue_bss *out, unsigned int max);
 
 /*
- * Join the strongest network heard under @ssid in the last scan. Returns 0 once
- * the attempt has started; it completes in the background (see
- * rtw89_glue_link()). -ENOENT if no such network was heard, -EOPNOTSUPP if its
- * security is not something this driver can do yet.
+ * Join the strongest network heard under @ssid in the last scan. @passphrase
+ * is the WPA2 password (8 to 63 characters, or 64 hex digits for a raw key);
+ * NULL or empty for an open network. Returns 0 once the attempt has started;
+ * it completes in the background (see rtw89_glue_link()). -ENOENT if no such
+ * network was heard, -EACCES if it needs a password and none (or an invalid
+ * one) was given, -EOPNOTSUPP if its security is not something this driver
+ * can do.
  */
-int rtw89_glue_join(const uint8_t *ssid, size_t ssid_len);
+int rtw89_glue_join(const uint8_t *ssid, size_t ssid_len,
+                    const char *passphrase, size_t passphrase_len);
 void rtw89_glue_leave(void);
 
 enum rtw89_glue_link_state {

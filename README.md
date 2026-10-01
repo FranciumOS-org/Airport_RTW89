@@ -40,8 +40,9 @@ make kext             # userspace smoke test, then build/out/AirPort_RTW89.kext
 Loading is manual and at your own risk (a driver bug panics the machine):
 `sudo tools/load.sh`, then `sudo tools/unload.sh`. With the kext loaded,
 `sudo build/out/rtw89ctl scan` starts the radio, scans and lists the networks;
-`sudo build/out/rtw89ctl join SSID` associates with one of them (no key
-handshake or data yet); `sudo build/out/rtw89ctl down` stops the radio.
+`sudo build/out/rtw89ctl join SSID` asks for the password and joins one of them
+(association and WPA2 key handshake; there is no network interface yet, so no
+traffic); `sudo build/out/rtw89ctl down` stops the radio.
 
 Per-file compiler output is kept in `build/log/`.
 

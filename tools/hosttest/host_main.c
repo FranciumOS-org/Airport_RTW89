@@ -17,6 +17,7 @@
 #include <string.h>
 #include <unistd.h>
 
+#include "rtw89_crypto.h"
 #include "rtw89_glue.h"
 
 #define MMIO_LEN (1u << 20)
@@ -30,7 +31,10 @@ int rtw89_selftest(void);
 /* src/compat_rtw89/rtw89_glue.c: where received beacons end up */
 void rtw89_glue_note_bss(const uint8_t *frame, size_t len, uint16_t freq, int8_t signal);
 
-void rtw89_glue_test_rx(const uint8_t *frame, size_t len, uint16_t freq, int8_t signal);
+void rtw89_glue_test_rx(const uint8_t *frame, size_t len, uint16_t freq, int8_t signal,
+                        bool decrypted);
+/* src/compat_rtw89/rtw89_mlme.c: see every frame the station transmits */
+void rtw89_mlme_set_tx_tap(void (*tap)(const uint8_t *frame, size_t len));
 
 /* The access point the smoke test pretends to be, and the card (fakechip_core.c). */
 static const uint8_t ap_mac[6] = { 0x02, 0xaa, 0xbb, 0xcc, 0xdd, 0x01 };
@@ -69,7 +73,7 @@ static void ap_send(uint8_t subtype, const uint8_t *body, size_t body_len)
     memcpy(frame + 16, ap_mac, 6);
     memcpy(frame + len, body, body_len);
     len += body_len;
-    rtw89_glue_test_rx(frame, len, 2437, -40);
+    rtw89_glue_test_rx(frame, len, 2437, -40, false);
 }
 
 static void ap_send_beacon(void)
@@ -104,21 +108,202 @@ static void ap_send_deauth(uint16_t reason)
     ap_send(0xc0, body, sizeof(body));
 }
 
-/* First message of the WPA2 handshake: an unencrypted data frame with EAPOL. */
-static void ap_send_eapol(void)
+/* ---- the authenticator side of WPA2-PSK, to test the supplicant against ---- */
+
+#define AP_PASSWORD "correct horse battery"
+
+static struct {
+    uint8_t pmk[32], kck[16], kek[16], tk[16];
+    uint8_t anonce[32], snonce[32];
+    uint64_t replay;
+    /* the last EAPOL frame the station sent, as seen by the TX tap */
+    uint8_t eapol[256];
+    size_t eapol_len;
+    bool eapol_protected;
+    uint64_t eapol_pn;          /* CCMP packet number, if it was protected */
+    volatile int eapol_count;
+} ap;
+
+static void ap_tx_tap(const uint8_t *frame, size_t len)
 {
-    uint8_t frame[24 + 8 + 99];
+    static const uint8_t llc[8] = { 0xaa, 0xaa, 0x03, 0x00, 0x00, 0x00, 0x88, 0x8e };
+    size_t hdrlen = (frame[0] & 0x80) ? 26 : 24;    /* QoS data has a QoS control field */
+    bool prot = frame[1] & 0x40;
+
+    if ((frame[0] & 0x0c) != 0x08)                  /* not a data frame */
+        return;
+    if (prot) {
+        const uint8_t *c = frame + hdrlen;          /* CCMP header */
+
+        ap.eapol_pn = c[0] | c[1] << 8 | c[4] << 16 | (uint64_t)c[5] << 24 |
+                      (uint64_t)c[6] << 32 | (uint64_t)c[7] << 40;
+        hdrlen += 8;
+    }
+    if (len < hdrlen + 8 || memcmp(frame + hdrlen, llc, 8))
+        return;
+    ap.eapol_len = len - hdrlen - 8;
+    if (ap.eapol_len > sizeof(ap.eapol))
+        return;
+    memcpy(ap.eapol, frame + hdrlen + 8, ap.eapol_len);
+    ap.eapol_protected = prot;
+    ap.eapol_count++;
+}
+
+static int ap_wait_eapol(int count)
+{
+    int i;
+
+    for (i = 0; i < 400 && ap.eapol_count < count; i++)
+        usleep(25 * 1000);
+    return ap.eapol_count >= count;
+}
+
+/* An EAPOL-Key frame from the AP; @kd is the plaintext key data (wrapped here
+ * with the KEK when @key_info says it is encrypted). */
+static void ap_send_key(uint16_t key_info, const uint8_t *kd, size_t kd_len, bool protect)
+{
+    uint8_t frame[24 + 8 + 8 + 4 + 95 + 128 + 8], *e, *k, mic[20];
+    size_t hdr = 24 + (protect ? 8 : 0), wrapped = kd_len, len;
+    int i;
 
     memset(frame, 0, sizeof(frame));
     frame[0] = 0x08;                    /* data */
-    frame[1] = 0x02;                    /* from the distribution system */
+    frame[1] = 0x02 | (protect ? 0x40 : 0);     /* from the DS, protected */
     memcpy(frame + 4, sta_mac, 6);
     memcpy(frame + 10, ap_mac, 6);
     memcpy(frame + 16, ap_mac, 6);
-    memcpy(frame + 24, "\xaa\xaa\x03\x00\x00\x00\x88\x8e", 8);
-    frame[32] = 0x02;                   /* EAPOL version 2, type 3 (key) */
-    frame[33] = 0x03;
-    rtw89_glue_test_rx(frame, sizeof(frame), 2437, -40);
+    memcpy(frame + hdr, "\xaa\xaa\x03\x00\x00\x00\x88\x8e", 8);
+
+    e = frame + hdr + 8;
+    k = e + 4;
+    if (key_info & 0x1000)
+        wrapped = kd_len + 8;
+    e[0] = 2;
+    e[1] = 3;
+    e[2] = (uint8_t)((95 + wrapped) >> 8);
+    e[3] = (uint8_t)(95 + wrapped);
+    k[0] = 2;
+    k[1] = (uint8_t)(key_info >> 8);
+    k[2] = (uint8_t)key_info;
+    k[4] = 16;                          /* key length: CCMP */
+    ap.replay++;
+    for (i = 0; i < 8; i++)
+        k[5 + i] = (uint8_t)(ap.replay >> (56 - 8 * i));
+    if (key_info & 0x0008)
+        memcpy(k + 13, ap.anonce, 32);
+    k[93] = (uint8_t)(wrapped >> 8);
+    k[94] = (uint8_t)wrapped;
+    if (key_info & 0x1000)
+        rtw89_aes_wrap(ap.kek, kd, kd_len, k + 95);
+    else if (kd_len)
+        memcpy(k + 95, kd, kd_len);
+    if (key_info & 0x0100) {
+        rtw89_hmac_sha1(ap.kck, 16, e, 4 + 95 + wrapped, mic);
+        memcpy(k + 77, mic, 16);
+    }
+
+    len = hdr + 8 + 4 + 95 + wrapped + (protect ? 8 : 0);   /* + CCMP MIC */
+    rtw89_glue_test_rx(frame, len, 2437, -40, protect);
+}
+
+/* Check the MIC of the station's last EAPOL-Key frame; returns its key info. */
+static int ap_check_sta_key(void)
+{
+    uint8_t copy[256], mic[20];
+
+    if (ap.eapol_len < 4 + 95)
+        return -1;
+    memcpy(copy, ap.eapol, ap.eapol_len);
+    memset(copy + 4 + 77, 0, 16);
+    rtw89_hmac_sha1(ap.kck, 16, copy, ap.eapol_len, mic);
+    if (memcmp(mic, ap.eapol + 4 + 77, 16))
+        return -1;
+    return ap.eapol[5] << 8 | ap.eapol[6];
+}
+
+/* Message 3: our RSN element and the group key, encrypted with the KEK. */
+static void ap_send_msg3(const uint8_t gtk[16], int gtk_idx)
+{
+    uint8_t kd[64];
+    size_t kd_len;
+
+    memcpy(kd, ap_ies + 31, 22);                    /* the RSN element of the beacon */
+    kd[22] = 0xdd; kd[23] = 22; kd[24] = 0x00; kd[25] = 0x0f; kd[26] = 0xac; kd[27] = 1;
+    kd[28] = (uint8_t)gtk_idx; kd[29] = 0;
+    memcpy(kd + 30, gtk, 16);
+    kd_len = 46;
+    kd[kd_len++] = 0xdd;                            /* pad to a multiple of 8 */
+    while (kd_len % 8)
+        kd[kd_len++] = 0;
+    ap_send_key(0x13ca, kd, kd_len, false);
+}
+
+/* Run the 4-way handshake as the authenticator. Returns 0 if the station did
+ * everything right, 1 if its message 2 does not verify (wrong password). */
+static int ap_handshake(const uint8_t gtk[16], int gtk_idx)
+{
+    uint8_t data[76], ptk[48];
+    int base = ap.eapol_count, info;
+
+    rtw89_pbkdf2_sha1((const uint8_t *)AP_PASSWORD, strlen(AP_PASSWORD),
+                      (const uint8_t *)"testnet", 7, 4096, ap.pmk, 32);
+    memset(ap.anonce, 0x5a, sizeof(ap.anonce));
+    ap.anonce[0] = (uint8_t)ap.replay;              /* fresh per handshake */
+
+    ap_send_key(0x008a, NULL, 0, false);            /* message 1: pairwise, ack */
+    if (!ap_wait_eapol(base + 1) || ap.eapol_len < 4 + 95 + 22)
+        return -1;
+    memcpy(ap.snonce, ap.eapol + 4 + 13, 32);
+    /* our retry of message 1 crosses the answer: the station must stay with
+     * the SNonce it already sent, or message 3 would not verify */
+    ap_send_key(0x008a, NULL, 0, false);
+    if (!ap_wait_eapol(base + 2) || memcmp(ap.snonce, ap.eapol + 4 + 13, 32))
+        return -1;
+
+    /* min/max ordering of addresses and nonces, as the standard prescribes */
+    memcpy(data, memcmp(ap_mac, sta_mac, 6) < 0 ? ap_mac : sta_mac, 6);
+    memcpy(data + 6, memcmp(ap_mac, sta_mac, 6) < 0 ? sta_mac : ap_mac, 6);
+    memcpy(data + 12, memcmp(ap.anonce, ap.snonce, 32) < 0 ? ap.anonce : ap.snonce, 32);
+    memcpy(data + 44, memcmp(ap.anonce, ap.snonce, 32) < 0 ? ap.snonce : ap.anonce, 32);
+    rtw89_sha1_prf(ap.pmk, 32, "Pairwise key expansion", data, sizeof(data), ptk, 48);
+    memcpy(ap.kck, ptk, 16);
+    memcpy(ap.kek, ptk + 16, 16);
+    memcpy(ap.tk, ptk + 32, 16);
+
+    info = ap_check_sta_key();
+    if (info < 0)
+        return 1;                                   /* MIC does not verify */
+    if (info != 0x010a || ap.eapol_protected)
+        return -1;
+    /* message 2 carries the RSN element from the association request */
+    if (ap.eapol[4 + 93] != 0 || ap.eapol[4 + 94] != 22 || ap.eapol[4 + 95] != 0x30)
+        return -1;
+
+    ap_send_msg3(gtk, gtk_idx);
+    if (!ap_wait_eapol(base + 3))
+        return -1;
+    info = ap_check_sta_key();
+    if (info != 0x030a || ap.eapol_protected)       /* message 4: pairwise, mic, secure */
+        return -1;
+    return 0;
+}
+
+/* A new group key, sent encrypted under the pairwise key like any data. */
+static int ap_group_rekey(const uint8_t gtk[16], int gtk_idx)
+{
+    uint8_t kd[32];
+    int base = ap.eapol_count, info;
+
+    kd[0] = 0xdd; kd[1] = 22; kd[2] = 0x00; kd[3] = 0x0f; kd[4] = 0xac; kd[5] = 1;
+    kd[6] = (uint8_t)gtk_idx; kd[7] = 0;
+    memcpy(kd + 8, gtk, 16);
+    ap_send_key(0x1382, kd, 24, true);              /* ack, mic, secure, encrypted */
+
+    if (!ap_wait_eapol(base + 1))
+        return -1;
+    info = ap_check_sta_key();
+    /* the answer is group message 2, and now it must be encrypted */
+    return info == 0x0302 && ap.eapol_protected ? 0 : -1;
 }
 
 static enum rtw89_glue_link_state link_state(void)
@@ -143,9 +328,9 @@ static int wait_link(enum rtw89_glue_link_state state)
 }
 
 /* Authenticate and associate with the pretend AP answering. */
-static int join_testnet(uint16_t assoc_status)
+static int join_testnet(const char *password, uint16_t assoc_status)
 {
-    if (rtw89_glue_join((const uint8_t *)"testnet", 7))
+    if (rtw89_glue_join((const uint8_t *)"testnet", 7, password, strlen(password)))
         return 0;
     ap_send_auth(0);
     /* the association request goes out once the auth answer is processed */
@@ -157,23 +342,62 @@ static int join_testnet(uint16_t assoc_status)
 /* Join the pretend network, playing the AP's side of each exchange. */
 static int test_join(void)
 {
+    static const uint8_t gtk1[16] = { 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16 };
+    static const uint8_t gtk2[16] = { 16, 15, 14, 13, 12, 11, 10, 9, 8, 7, 6, 5, 4, 3, 2, 1 };
     struct rtw89_glue_link link;
     int failures = 0;
 
 #define EXPECT(cond) do { if (!(cond)) { failures++; printf("== FAIL %s\n", #cond); } } while (0)
+    rtw89_mlme_set_tx_tap(ap_tx_tap);
     ap_send_beacon();
-    EXPECT(rtw89_glue_join((const uint8_t *)"nosuchnet", 9) == -2);     /* -ENOENT */
+    EXPECT(rtw89_glue_join((const uint8_t *)"nosuchnet", 9, AP_PASSWORD, strlen(AP_PASSWORD)) == -2);
+    /* a WPA2 network needs a password of 8 to 63 characters */
+    EXPECT(rtw89_glue_join((const uint8_t *)"testnet", 7, NULL, 0) == -13);
+    EXPECT(rtw89_glue_join((const uint8_t *)"testnet", 7, "short", 5) == -13);
 
-    /* the normal case: both answers arrive */
-    EXPECT(join_testnet(0));
+    /* the normal case: associate, then the complete 4-way handshake */
+    EXPECT(join_testnet(AP_PASSWORD, 0));
     EXPECT(wait_link(RTW89_GLUE_LINK_ASSOCIATED));
     rtw89_glue_link(&link);
     EXPECT(link.aid == 5 && link.freq == 2437 && !link.last_error);
-    ap_send_eapol();
-    usleep(300 * 1000);
-    rtw89_glue_link(&link);
-    EXPECT(link.eapol_rx == 1);
-    printf("== associated, AID %u, %u EAPOL frame(s)\n", link.aid, link.eapol_rx);
+    EXPECT(ap_handshake(gtk1, 1) == 0);
+    EXPECT(wait_link(RTW89_GLUE_LINK_CONNECTED));
+    printf("== connected: 4-way handshake verified by the test authenticator\n");
+
+    /* connected: the AP renews the group key, encrypted with the pairwise key */
+    EXPECT(ap_group_rekey(gtk2, 2) == 0);
+    EXPECT(ap.eapol_pn == 1);
+    /* Message 4 got lost and the AP repeats message 3. The station answers
+     * again but must keep counting packet numbers: installing the same key
+     * again would restart them (KRACK). */
+    {
+        int base = ap.eapol_count;
+
+        ap_send_msg3(gtk2, 2);
+        EXPECT(ap_wait_eapol(base + 1));
+        EXPECT(ap_check_sta_key() == 0x030a && ap.eapol_protected && ap.eapol_pn == 2);
+    }
+    /* a replayed message 3 (old replay counter) must be ignored */
+    {
+        int base = ap.eapol_count;
+
+        ap.replay -= 2;
+        ap_send_msg3(gtk1, 1);
+        ap.replay += 1;
+        /* and so must a forged message 1: it is not authenticated, and must
+         * not disturb the keys of the working connection */
+        ap.replay += 100;
+        memset(ap.anonce, 0x77, sizeof(ap.anonce));
+        ap_send_key(0x008a, NULL, 0, false);
+        usleep(300 * 1000);
+        EXPECT(link_state() == RTW89_GLUE_LINK_CONNECTED);
+        /* the forged message 1 got an answer (it could be a real rekey), the
+         * replay did not */
+        EXPECT(ap.eapol_count == base + 1);
+        /* the real AP's next group key still verifies with the real key */
+        EXPECT(ap_group_rekey(gtk1, 1) == 0);
+        EXPECT(ap.eapol_pn == 4);
+    }
 
     /* the AP throws us out */
     ap_send_deauth(7);
@@ -181,26 +405,47 @@ static int test_join(void)
     rtw89_glue_link(&link);
     EXPECT(link.last_error == -2007);
 
+    /* wrong password: the AP cannot verify message 2 and gives up */
+    EXPECT(join_testnet("not the password", 0));
+    EXPECT(wait_link(RTW89_GLUE_LINK_ASSOCIATED));
+    EXPECT(ap_handshake(gtk1, 1) == 1);
+    EXPECT(link_state() == RTW89_GLUE_LINK_ASSOCIATED);
+    ap_send_deauth(15);
+    EXPECT(wait_link(RTW89_GLUE_LINK_DOWN));
+    rtw89_glue_link(&link);
+    EXPECT(link.last_error == -2015);
+
     /* refused association */
-    EXPECT(join_testnet(17));
+    EXPECT(join_testnet(AP_PASSWORD, 17));
     EXPECT(wait_link(RTW89_GLUE_LINK_DOWN));
     rtw89_glue_link(&link);
     EXPECT(link.last_error == -1017);
 
     /* an AP that never answers: three tries, then give up */
-    EXPECT(rtw89_glue_join((const uint8_t *)"testnet", 7) == 0);
+    EXPECT(rtw89_glue_join((const uint8_t *)"testnet", 7, AP_PASSWORD, strlen(AP_PASSWORD)) == 0);
     EXPECT(wait_link(RTW89_GLUE_LINK_DOWN));
     rtw89_glue_link(&link);
     EXPECT(link.last_error == -110);
 
-    /* leave while associated; then the radio goes down while associated */
-    EXPECT(join_testnet(0));
+    /* an AP that associates us and then never starts the handshake */
+    EXPECT(join_testnet(AP_PASSWORD, 0));
     EXPECT(wait_link(RTW89_GLUE_LINK_ASSOCIATED));
+    EXPECT(wait_link(RTW89_GLUE_LINK_DOWN));
+    rtw89_glue_link(&link);
+    EXPECT(link.last_error == -110);
+
+    /* leave while connected; then the radio goes down while connected */
+    EXPECT(join_testnet(AP_PASSWORD, 0));
+    EXPECT(wait_link(RTW89_GLUE_LINK_ASSOCIATED));
+    EXPECT(ap_handshake(gtk1, 1) == 0);
+    EXPECT(wait_link(RTW89_GLUE_LINK_CONNECTED));
     rtw89_glue_leave();
     EXPECT(link_state() == RTW89_GLUE_LINK_DOWN);
 
-    EXPECT(join_testnet(0));
+    EXPECT(join_testnet(AP_PASSWORD, 0));
     EXPECT(wait_link(RTW89_GLUE_LINK_ASSOCIATED));
+    EXPECT(ap_handshake(gtk2, 2) == 0);
+    EXPECT(wait_link(RTW89_GLUE_LINK_CONNECTED));
 #undef EXPECT
     printf("== join test: %d failure(s)\n", failures);
     return failures;

@@ -205,9 +205,13 @@ struct rtw89_mlme_status {
 };
 
 /* All of these are called with the wiphy mutex held, except rtw89_mlme_rx(). */
-void rtw89_mlme_start(struct ieee80211_hw *hw, struct ieee80211_vif *vif);
+/* @notify is called (under the wiphy mutex) whenever the state changes. */
+void rtw89_mlme_start(struct ieee80211_hw *hw, struct ieee80211_vif *vif, void (*notify)(void));
 void rtw89_mlme_stop(void);
-int rtw89_mlme_connect(const struct rtw89_mlme_bss *bss);
+/* @pmk: the 32-byte pairwise master key for a WPA2-PSK network, else NULL. */
+int rtw89_mlme_connect(const struct rtw89_mlme_bss *bss, const u8 *pmk);
+/* For tests: see every frame the MLME transmits. */
+void rtw89_mlme_set_tx_tap(void (*tap)(const u8 *frame, size_t len));
 void rtw89_mlme_disconnect(u16 reason);
 void rtw89_mlme_get_status(struct rtw89_mlme_status *status);
 /* A received frame that is not a beacon or probe response; takes the skb.

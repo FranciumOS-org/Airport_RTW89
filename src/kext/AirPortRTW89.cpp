@@ -219,6 +219,7 @@ bool AirPort_RTW89::start(IOService *provider)
     platform.dma_alloc = dmaAlloc;
     platform.dma_free = dmaFree;
     platform.irq_enable = irqEnable;
+    platform.link_changed = linkChanged;
 
     LOG("probing");
     ret = rtw89_glue_probe(&platform, &device);
@@ -323,7 +324,18 @@ void AirPort_RTW89::publishScanResults()
     setProperty("RTW89 Radio Up", rtw89_glue_is_up());
     IOFree(list, kMax * sizeof(*list));
 
-    /* link state */
+    publishLink();
+}
+
+/* Called from the driver's own thread on every link state change, with driver
+ * locks held: only publish, never take _commandLock or call back in. */
+void AirPort_RTW89::linkChanged(void *ctx)
+{
+    static_cast<AirPort_RTW89 *>(ctx)->publishLink();
+}
+
+void AirPort_RTW89::publishLink()
+{
     static const char *const kStates[] = { "down", "joining", "associated", "connected" };
     struct rtw89_glue_link link;
     char bssid[18];
@@ -368,12 +380,16 @@ IOReturn AirPort_RTW89::setProperties(OSObject *properties)
     } else if (command->isEqualTo("join")) {
         OSData *ssid = OSDynamicCast(OSData, dict->getObject("RTW89SSID"));
 
+        OSData *pass = OSDynamicCast(OSData, dict->getObject("RTW89Passphrase"));
+
         if (!ssid || !ssid->getLength()) {
             result = kIOReturnBadArgument;
         } else {
             LOG("join requested");
             ret = rtw89_glue_join(static_cast<const uint8_t *>(ssid->getBytesNoCopy()),
-                                  ssid->getLength());
+                                  ssid->getLength(),
+                                  pass ? static_cast<const char *>(pass->getBytesNoCopy()) : nullptr,
+                                  pass ? pass->getLength() : 0);
         }
     } else if (command->isEqualTo("leave")) {
         rtw89_glue_leave();
