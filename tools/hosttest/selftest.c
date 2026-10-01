@@ -398,6 +398,9 @@ static void test_stack(void)
         return;
     wiphy = hw->wiphy;
     CHECK(wiphy_to_ieee80211_hw(wiphy) == hw);
+    /* cfg80211's defaults: thresholds off, standard retry limits */
+    CHECK(wiphy->rts_threshold == (u32)-1 && wiphy->frag_threshold == (u32)-1);
+    CHECK(wiphy->retry_short == 7 && wiphy->retry_long == 4);
     CHECK(((uintptr_t)hw->priv & (NETDEV_ALIGN - 1)) == 0);
     memset(hw->priv, 0xa5, 128);        /* the driver area is really ours */
 
