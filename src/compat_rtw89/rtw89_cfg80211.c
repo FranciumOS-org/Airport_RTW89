@@ -233,9 +233,66 @@ static void rtw89_cfg80211_reg_work(struct work_struct *work)
  * on that: its notifier is what initialises rtwdev->regulatory.regd, which the
  * rest of probe then dereferences.
  */
+/*
+ * The world regulatory domain ("00" in the Linux regulatory database), which
+ * is what applies until a country is known: 2.4 GHz channels 1-11 as usual,
+ * 12-14 and all of 5/6 GHz listen-only (NO_IR: no probe requests, no
+ * beaconing), radar detection required on 5250-5730 MHz, and nothing above
+ * 5835 MHz. The driver decides active vs passive scanning per channel from
+ * these flags.
+ */
+static void rtw89_cfg80211_apply_world_regdom(struct wiphy *wiphy)
+{
+    struct ieee80211_supported_band *sband;
+    struct ieee80211_channel *chan;
+    int band, i;
+
+    for (band = 0; band < NUM_NL80211_BANDS; band++) {
+        sband = wiphy->bands[band];
+        if (!sband)
+            continue;
+
+        for (i = 0; i < sband->n_channels; i++) {
+            u32 freq, flags = 0;
+
+            chan = &sband->channels[i];
+            freq = chan->center_freq;
+            chan->orig_flags = chan->flags;
+
+            switch (band) {
+            case NL80211_BAND_2GHZ:
+                if (freq == 2484)
+                    flags = IEEE80211_CHAN_NO_IR | IEEE80211_CHAN_NO_OFDM;
+                else if (freq > 2462)
+                    flags = IEEE80211_CHAN_NO_IR;
+                break;
+            case NL80211_BAND_5GHZ:
+                if (freq > 5825) {
+                    flags = IEEE80211_CHAN_DISABLED;
+                    break;
+                }
+                flags = IEEE80211_CHAN_NO_IR;
+                if (freq >= 5260 && freq <= 5720)
+                    flags |= IEEE80211_CHAN_RADAR;
+                break;
+            default:
+                flags = IEEE80211_CHAN_NO_IR;
+                break;
+            }
+
+            chan->flags |= flags;
+            chan->max_reg_power = 20;
+            if (!chan->max_power || chan->max_power > chan->max_reg_power)
+                chan->max_power = chan->max_reg_power;
+        }
+    }
+}
+
 int wiphy_register(struct wiphy *wiphy)
 {
     struct rtw89_cfg80211_rdev *rdev = wiphy_to_rdev(wiphy);
+
+    rtw89_cfg80211_apply_world_regdom(wiphy);
 
     memset(&rdev->reg_request, 0, sizeof(rdev->reg_request));
     rdev->reg_request.initiator = NL80211_REGDOM_SET_BY_CORE;

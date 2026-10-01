@@ -49,21 +49,42 @@ available (interrupt index 1); and `log show` does not contain the lines a kext
 prints while it is being unloaded, `dmesg` does (which is why `unload.sh` reads
 that).
 
+**Towards M2: radio up and scan at the driver level (built, not yet run on
+hardware).** Before any IO80211 work, the glue can do what mac80211 does when an
+interface is opened and a scan requested: `rtw89_glue_up()` (driver `start()`,
+one station interface, interrupts on), `rtw89_glue_scan()` (firmware scan
+offload over all enabled channels) and `rtw89_glue_down()`. Received beacons and
+probe responses are collected in a table. `build/out/rtw89ctl up|scan|down|status`
+drives it through the kext's `setProperties` (administrators only) and prints the
+networks. This exercises interrupts, the RX path, firmware commands and scan
+offload without needing the legacy Wi-Fi stack or any EFI change.
+
+Regulatory: with no country known, `wiphy_register()` applies the world domain
+(channels 12-14 and all of 5 GHz listen-only, radar flags on 5250-5730 MHz,
+nothing above 5835 MHz), so the scan only sends probe requests on 2.4 GHz
+channels 1-11. `hw->conf.flags` never has `IEEE80211_CONF_IDLE` yet, so the chip
+stays powered between `up` and `down` instead of using rtw89's idle power-off.
+
 Before any load, `make hosttest` runs the same objects in userspace
 (`tools/hosttest/`): pthread stand-ins for the 50 kernel imports, then
 
 - a self-test of the compat helpers and the cfg80211/mac80211 stand-in,
 - `probe()`/`remove()` twice against a PCI device that never answers (the
   power-on timeout and every error unwind),
-- the same with only the hardware steps of `rtw89_chip_info_setup()` replaced
-  (`fakechip_core.c`), so the real firmware image is parsed, the device is fully
-  registered, and a fully probed device is removed.
+- the same with only the hardware steps replaced (`fakechip_core.c`:
+  `rtw89_chip_info_setup()` and `rtw89_core_start()`/`stop()`), so the real
+  firmware image is parsed, the device is fully registered, the radio is brought
+  "up", an interface added, a scan request built, the periodic tracking work run,
+  and everything taken down and removed again.
 
 That found and fixed, before they could panic the machine: `pcie_capability_*`
 writing to the wrong config-space offset, a failed firmware decompress reported
 as success, `dma_free_coherent(NULL)` not accepted, and a NULL dereference in
 `rtw89_regd_init_hint()` because registration did not report the initial
-regulatory domain the way Linux does. All three runs are also clean under Guard
+regulatory domain the way Linux does. Reading the driver's scan path against the
+shims also turned up `skb_copy()` dropping tailroom (a heap overflow when the
+driver appends probe-request IEs) and a station interface whose `bss_conf.bssid`
+was NULL. All three runs are also clean under Guard
 Malloc. What it cannot cover is anything that needs the chip to answer: power-on,
 firmware download, efuse.
 
@@ -211,3 +232,4 @@ to boot-args so panics show symbolized backtraces.
 - `tools/hosttest/` — `make hosttest`, see Status.
 - `tools/check_kpi.py` — `make kext`: every import of the built kext must come from a declared KPI.
 - `tools/load.sh`, `tools/unload.sh` — run by a person with sudo, never automatically.
+- `tools/rtw89ctl.c` — built by `make kext` as `build/out/rtw89ctl`: `up`, `scan`, `down`, `status` for a loaded kext.

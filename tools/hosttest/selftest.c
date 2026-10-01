@@ -371,6 +371,8 @@ static void test_stack(void)
     /* interfaces and stations */
     vif = rtw89_m80211_vif_alloc(hw, NL80211_IFTYPE_STATION, own);
     CHECK(vif && vif->txq && vif->link_conf[0] == &vif->bss_conf);
+    CHECK(vif && vif->bss_conf.bssid && is_zero_ether_addr(vif->bss_conf.bssid));
+    CHECK(vif && ether_addr_equal(vif->bss_conf.addr, own));
     if (!vif)
         goto out_hw;
     CHECK(!ieee80211_vif_is_mld(vif));

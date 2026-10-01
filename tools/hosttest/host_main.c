@@ -27,6 +27,55 @@ extern uintptr_t rtw88_kfree_min_addr;
 /* tools/hosttest/selftest.c */
 int rtw89_selftest(void);
 
+/* src/compat_rtw89/rtw89_glue.c: where received beacons end up */
+void rtw89_glue_note_bss(const uint8_t *frame, size_t len, uint16_t freq, int8_t signal);
+
+/* A probed device: scan bookkeeping, and bringing the radio up, which must
+ * fail cleanly here because nothing answers the power-on sequence. */
+static int test_probed_device(void)
+{
+    static const uint8_t beacon[] = {
+        0x80, 0x00, 0x00, 0x00,                             /* beacon */
+        0xff, 0xff, 0xff, 0xff, 0xff, 0xff,                 /* DA */
+        0x02, 0x00, 0x00, 0x00, 0x00, 0x01,                 /* SA */
+        0x02, 0x00, 0x00, 0x00, 0x00, 0x01,                 /* BSSID */
+        0x00, 0x00,
+        0, 0, 0, 0, 0, 0, 0, 0, 0x64, 0x00, 0x11, 0x04,     /* timestamp, interval, capab */
+        0x00, 0x04, 't', 'e', 's', 't',                     /* SSID */
+        0x03, 0x01, 0x06,                                   /* DS: channel 6 */
+    };
+    struct rtw89_glue_bss bss[4];
+    int failures = 0, ret;
+
+#define EXPECT(cond) do { if (!(cond)) { failures++; printf("== FAIL %s\n", #cond); } } while (0)
+    rtw89_glue_note_bss(beacon, sizeof(beacon), 2437, -60);
+    rtw89_glue_note_bss(beacon, sizeof(beacon), 2437, -55);
+    rtw89_glue_note_bss(beacon, 10, 2437, -40);             /* truncated: ignored */
+    EXPECT(rtw89_glue_scan_results(bss, 4) == 1);
+    EXPECT(!strcmp(bss[0].ssid, "test") && bss[0].ssid_len == 4);
+    EXPECT(bss[0].channel == 6 && bss[0].signal == -55 && bss[0].seen == 2);
+    EXPECT(bss[0].capability == 0x0411);
+
+    EXPECT(rtw89_glue_scan() != 0);                         /* radio is down */
+
+    /* fakechip_core.c stubs the hardware start, so up() gets as far as adding
+     * the interface; whether that and the scan succeed depends on commands
+     * no firmware answers. What matters is that nothing crashes or leaks. */
+    ret = rtw89_glue_up();
+    printf("== radio up returned %d\n", ret);
+    if (!ret) {
+        ret = rtw89_glue_scan();
+        printf("== scan returned %d\n", ret);
+        /* Long enough for the driver's 2 s tracking work to run twice. */
+        usleep(4500 * 1000);
+        rtw89_glue_down();
+        EXPECT(!rtw89_glue_is_up() && !rtw89_glue_scanning());
+        printf("== radio down\n");
+    }
+#undef EXPECT
+    return failures;
+}
+
 static uint8_t cfg[4096];
 static unsigned long dma_live, dma_total;
 
@@ -120,6 +169,8 @@ int main(int argc, char **argv)
                    info.mac[4], info.mac[5], info.fw_version, 'A' + info.chip_cut,
                    info.tx_streams, info.rx_streams);
         if (expect_ok && ret)
+            failed = 1;
+        if (!ret && test_probed_device())
             failed = 1;
 
         /* Give queued works (regulatory hint, firmware load) time to run. */

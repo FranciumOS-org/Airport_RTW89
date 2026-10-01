@@ -114,6 +114,15 @@ int ieee80211_register_hw(struct ieee80211_hw *hw)
     if (!local->dflt_chandef.chan)
         return -EINVAL;
 
+    /* Defaults from ieee80211_register_hw(). conf.flags stays 0 rather than
+     * IEEE80211_CONF_IDLE: nothing here tracks idleness yet, and with IDLE set
+     * rtw89 powers the chip off between uses (IPS). */
+    if (!hw->max_listen_interval)
+        hw->max_listen_interval = 5;
+    hw->conf.listen_interval = hw->max_listen_interval;
+    if (!hw->weight_multiplier)
+        hw->weight_multiplier = 1;
+
     local->registered = true;
     return wiphy_register(hw->wiphy);
 }
@@ -447,6 +456,8 @@ struct ieee80211_vif *rtw89_m80211_vif_alloc(struct ieee80211_hw *hw,
     if (!mvif)
         return NULL;
 
+    int i;
+
     mvif->local = local;
     mvif->vif.type = type;
     ether_addr_copy(mvif->vif.addr, addr);
@@ -456,6 +467,16 @@ struct ieee80211_vif *rtw89_m80211_vif_alloc(struct ieee80211_hw *hw,
     mvif->vif.bss_conf.link_id = 0;
     ether_addr_copy(mvif->vif.bss_conf.addr, addr);
     mvif->vif.link_conf[0] = &mvif->vif.bss_conf;
+
+    /* The rest of what mac80211 sets up for a new interface (iface.c:
+     * ieee80211_setup_sdata, ieee80211_set_default_queues, link.c). Drivers
+     * read these without checking; bss_conf.bssid in particular is never NULL. */
+    mvif->vif.bss_conf.bssid = type == NL80211_IFTYPE_STATION ? mvif->bssid : mvif->vif.addr;
+    mvif->vif.bss_conf.txpower = INT_MIN;       /* unset */
+    mvif->vif.cfg.idle = true;
+    for (i = 0; i < IEEE80211_NUM_ACS; i++)
+        mvif->vif.hw_queue[i] = local->hw.queues >= IEEE80211_NUM_ACS ? i : 0;
+    mvif->vif.cab_queue = IEEE80211_INVAL_HW_QUEUE;
 
     mvif->vif.txq = rtw89_m80211_txq_alloc(local, &mvif->vif, NULL, 0);
     if (!mvif->vif.txq) {
