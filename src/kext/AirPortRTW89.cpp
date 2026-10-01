@@ -205,6 +205,14 @@ bool AirPort_RTW89::configureInterface(IONetworkInterface *netif)
     if (!super::configureInterface(netif))
         return false;
 
+    /* The stack keeps the output queue (with its own scheduling and TCP
+     * back-pressure) and outputStart() pulls from it as the driver has room. */
+    if (netif->configureOutputPullModel(256, 0, 0,
+            IONetworkInterface::kOutputPacketSchedulingModelNormal) != kIOReturnSuccess) {
+        LOG("could not set up the output queue");
+        return false;
+    }
+
     data = netif->getParameter(kIONetworkStatsKey);
     if (!data)
         return false;
@@ -222,28 +230,28 @@ bool AirPort_RTW89::configureInterface(IONetworkInterface *netif)
 IOReturn AirPort_RTW89::enable(IONetworkInterface *netif)
 {
     _netifEnabled = true;
+    netif->startOutputThread();
     return kIOReturnSuccess;
 }
 
 IOReturn AirPort_RTW89::disable(IONetworkInterface *netif)
 {
     _netifEnabled = false;
+    /* returns once no thread is inside outputStart() */
+    netif->stopOutputThread();
+    netif->flushOutputQueue();
     return kIOReturnSuccess;
 }
 
-/*
- * One Ethernet frame from the stack. There is no output queue, so this runs
- * on whichever thread is sending, several at a time; the Linux side orders
- * them. The frame is copied into the driver's own buffer and the mbuf freed.
- */
-UInt32 AirPort_RTW89::outputPacket(mbuf_t m, void *param)
+/* One Ethernet frame from the stack: copied into the driver's own buffer and
+ * the mbuf freed. False if the frame was dropped. */
+bool AirPort_RTW89::transmit(mbuf_t m)
 {
     size_t len = mbuf_pkthdr_len(m);
     uint8_t *frame = nullptr;
     void *handle;
     int ret = -1;
 
-    OSIncrementAtomic(&_txBusy);
     if (_dataReady && (handle = rtw89_glue_tx_alloc(len, &frame))) {
         if (mbuf_copydata(m, 0, len, frame) == 0) {
             ret = rtw89_glue_tx(handle);
@@ -251,7 +259,6 @@ UInt32 AirPort_RTW89::outputPacket(mbuf_t m, void *param)
             rtw89_glue_tx_cancel(handle);
         }
     }
-    OSDecrementAtomic(&_txBusy);
 
     freePacket(m);
     if (_netStats) {
@@ -260,7 +267,59 @@ UInt32 AirPort_RTW89::outputPacket(mbuf_t m, void *param)
         else
             _netStats->outputPackets++;
     }
-    return ret ? kIOReturnOutputDropped : kIOReturnOutputSuccess;
+    return ret == 0;
+}
+
+/*
+ * The stack's output thread: frames are waiting in the interface's queue. Take
+ * as many as the driver has room for. kIOReturnNoResources leaves the rest
+ * queued until txWake() says there is room again.
+ */
+IOReturn AirPort_RTW89::outputStart(IONetworkInterface *netif, IOOptionBits options)
+{
+    IOReturn result = kIOReturnSuccess;
+
+    OSIncrementAtomic(&_txBusy);
+    for (;;) {
+        unsigned int room = _dataReady ? rtw89_glue_tx_room() : 16;
+        mbuf_t m = nullptr;
+
+        if (!room) {
+            result = kIOReturnNoResources;
+            break;
+        }
+        if (netif->dequeueOutputPackets(room < 16 ? room : 16, &m) != kIOReturnSuccess)
+            break;                      /* the queue is empty */
+        while (m) {
+            mbuf_t next = mbuf_nextpkt(m);
+
+            mbuf_setnextpkt(m, nullptr);
+            transmit(m);
+            m = next;
+        }
+    }
+    OSDecrementAtomic(&_txBusy);
+    return result;
+}
+
+/* Not used with the pull model; kept for callers of the old entry point. */
+UInt32 AirPort_RTW89::outputPacket(mbuf_t m, void *param)
+{
+    bool sent;
+
+    OSIncrementAtomic(&_txBusy);
+    sent = transmit(m);
+    OSDecrementAtomic(&_txBusy);
+    return sent ? kIOReturnOutputSuccess : kIOReturnOutputDropped;
+}
+
+/* The driver has room for frames again. A driver thread. */
+void AirPort_RTW89::txWake(void *ctx)
+{
+    AirPort_RTW89 *me = static_cast<AirPort_RTW89 *>(ctx);
+
+    if (me->_dataReady && me->_netifEnabled)
+        me->_netif->signalOutputThread();
 }
 
 /* One received Ethernet frame, on the driver's receive thread. */
@@ -396,6 +455,7 @@ bool AirPort_RTW89::start(IOService *provider)
     platform.irq_enable = irqEnable;
     platform.link_changed = linkChanged;
     platform.rx_frame = rxFrame;
+    platform.tx_wake = txWake;
 
     LOG("probing");
     ret = rtw89_glue_probe(&platform, &device);
@@ -537,6 +597,8 @@ void AirPort_RTW89::publishLink()
     setProperty("RTW89 RX Dropped", link.rx_dropped, 32);
     setProperty("RTW89 RX Undecrypted", link.rx_undecrypted, 32);
     setProperty("RTW89 RX Replayed", link.rx_replay, 32);
+    setProperty("RTW89 RX Duplicates", link.rx_dup, 32);
+    setProperty("RTW89 RX Reorder Timeouts", link.rx_reorder_timeout, 32);
     setProperty("RTW89 TX Aggregation", link.tx_ba, 32);
     setProperty("RTW89 RX Aggregation", link.rx_ba, 32);
 
@@ -560,7 +622,9 @@ IOReturn AirPort_RTW89::setProperties(OSObject *properties)
 
     if (!command)
         return kIOReturnBadArgument;
-    if (IOUserClient::clientHasPrivilege(current_task(), kIOClientPrivilegeAdministrator) !=
+    /* anyone may ask for the published state to be refreshed */
+    if (!command->isEqualTo("results") &&
+        IOUserClient::clientHasPrivilege(current_task(), kIOClientPrivilegeAdministrator) !=
         kIOReturnSuccess)
         return kIOReturnNotPrivileged;
 

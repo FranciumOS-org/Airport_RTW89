@@ -64,6 +64,8 @@ struct rtw89_m80211_glue_ops {
     /* A transmitted frame is done; IEEE80211_SKB_CB(skb)->flags has TX_STAT_ACK. */
     void (*tx_status)(void *ctx, struct sk_buff *skb);
     void (*scan_done)(void *ctx, bool aborted);
+    /* The driver took a frame off @txq (ieee80211_tx_dequeue()). */
+    void (*tx_dequeued)(void *ctx, struct ieee80211_txq *txq);
     /* The driver stopped (true) or woke (false) all TX queues. */
     void (*queues_stopped)(void *ctx, bool stopped);
     void (*link_event)(void *ctx, struct ieee80211_vif *vif,
@@ -257,10 +259,13 @@ struct rtw89_data_stats {
     u32 rx_undecrypted;         /* protected, but not decrypted by the hardware */
     u32 rx_unprotected;         /* in the clear on an encrypted network */
     u32 rx_fragments;           /* fragmented frames, not supported */
+    u32 rx_reorder_timeout;     /* frames released because one before them never came */
 };
 
-/* @deliver gets each received Ethernet frame; called from the receive thread. */
-void rtw89_data_init(struct ieee80211_hw *hw, void (*deliver)(const u8 *frame, size_t len));
+/* @deliver gets each received Ethernet frame; called from the receive thread.
+ * @tx_wake is called when rtw89_data_tx_room() is no longer zero. */
+void rtw89_data_init(struct ieee80211_hw *hw, void (*deliver)(const u8 *frame, size_t len),
+                     void (*tx_wake)(void));
 void rtw89_data_exit(void);
 
 /* For the MLME, with the wiphy mutex held. Between attach and detach, frames
@@ -282,6 +287,8 @@ void rtw89_data_tx_ba_resume(u8 tid);
 /* Transmit an Ethernet frame: allocate, fill skb->data, send. Any thread. */
 struct sk_buff *rtw89_data_tx_alloc(size_t len);
 int rtw89_data_tx(struct sk_buff *skb);
+unsigned int rtw89_data_tx_room(void);
+void rtw89_data_tx_dequeued(struct ieee80211_txq *txq);
 /* A received 802.11 data frame (FCS on); takes the skb. */
 void rtw89_data_rx(struct sk_buff *skb);
 /* A received BlockAck request (FCS on); takes the skb. */

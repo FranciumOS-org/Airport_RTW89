@@ -44,6 +44,7 @@ public:
     IOReturn enable(IONetworkInterface *netif) override;
     IOReturn disable(IONetworkInterface *netif) override;
     UInt32 outputPacket(mbuf_t m, void *param) override;
+    IOReturn outputStart(IONetworkInterface *netif, IOOptionBits options) override;
     const OSString *newVendorString() const override;
     const OSString *newModelString() const override;
 
@@ -77,6 +78,8 @@ private:
     static void irqEnable(void *ctx, bool enable);
     static void linkChanged(void *ctx);
     static void rxFrame(void *ctx, const uint8_t *frame, size_t len);
+    static void txWake(void *ctx);
+    bool transmit(mbuf_t m);
 
     IOPCIDevice *_pci = nullptr;
     IOMemoryMap *_mmio = nullptr;

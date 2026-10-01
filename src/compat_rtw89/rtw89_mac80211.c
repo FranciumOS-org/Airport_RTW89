@@ -374,6 +374,8 @@ struct sk_buff *ieee80211_tx_dequeue(struct ieee80211_hw *hw,
     }
     spin_unlock_bh(&mtxq->frames.lock);
 
+    if (skb && local->glue && local->glue->tx_dequeued)
+        local->glue->tx_dequeued(local->glue_ctx, txq);
     return skb;
 }
 

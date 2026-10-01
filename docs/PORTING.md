@@ -120,7 +120,18 @@ Objects the driver's threads may still be using when they are removed
 (stations, their TXQs, keys) are unlinked at once and freed two seconds later
 or when the driver stops: a stand-in for the RCU grace period Linux relies on.
 
-**Aggregation (built, not yet run on hardware).** BlockAck sessions in both
+**Aggregation works on hardware.** On the test machine (802.11n, 20 MHz, two
+streams, signal around -23 dBm) downloads through the card ran at about
+92 Mb/s, measured with three 50 MB transfers and confirmed by the driver's own
+packet counters; the AP opened receive sessions on TIDs 0-7 and accepted ours.
+An upload reached about 33 Mb/s, with 343 frames dropped by the transmit queue
+(tail drop at its limit) over two 20 MB uploads, which TCP answers by slowing
+down. Since then the kext uses the pull model for output
+(`configureOutputPullModel`, `outputStart`): the network stack keeps the queue,
+is told to stop when 256 frames are waiting on the driver's TXQs and is woken
+when they have drained to 64. That part has not run on hardware yet.
+
+The sessions are BlockAck agreements in both
 directions, following agg-rx.c, agg-tx.c and the reorder code in rx.c. The AP's
 ADDBA requests are accepted (up to 64 frames, A-MSDU allowed) and its frames go
 through a per-TID reorder buffer: in order they pass straight through, behind a

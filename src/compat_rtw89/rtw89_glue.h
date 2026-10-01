@@ -47,6 +47,10 @@ struct rtw89_glue_platform {
      * payload) for the network stack. Called from the driver's receive
      * thread, may sleep; @frame is only valid during the call. */
     void (*rx_frame)(void *ctx, const uint8_t *frame, size_t len);
+
+    /* Optional: rtw89_glue_tx_room() returned zero earlier and there is room
+     * again. Called from a driver thread; may call rtw89_glue_tx*(). */
+    void (*tx_wake)(void *ctx);
 };
 
 struct rtw89_glue_device {
@@ -162,6 +166,8 @@ struct rtw89_glue_link {
     uint32_t rx_dropped;            /* all reasons, including the ones below */
     uint32_t rx_undecrypted;        /* encrypted frames the chip did not decrypt */
     uint32_t rx_replay;             /* frames with a packet number already used */
+    uint32_t rx_dup;                /* retransmissions of frames already received */
+    uint32_t rx_reorder_timeout;    /* frames passed on after waiting in vain for an earlier one */
 
     /* aggregation (BlockAck sessions): one bit per TID, in each direction */
     uint16_t tx_ba;
@@ -181,6 +187,13 @@ void rtw89_glue_link(struct rtw89_glue_link *link);
 void *rtw89_glue_tx_alloc(size_t len, uint8_t **frame);
 int rtw89_glue_tx(void *handle);
 void rtw89_glue_tx_cancel(void *handle);
+
+/*
+ * How many more frames may be handed to rtw89_glue_tx() right now. When this
+ * returns zero, stop sending until the platform's tx_wake() is called. While
+ * no network is joined there is always room (and the frames are dropped).
+ */
+unsigned int rtw89_glue_tx_room(void);
 
 #ifdef __cplusplus
 }
