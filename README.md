@@ -4,9 +4,9 @@ Work-in-progress port of the Linux **rtw89** driver to macOS for the
 **Realtek RTL8852BE** (`10EC:B852`, Wi-Fi 6 PCIe), following the approach of
 AirPort_RTW88 in [Realtek-AirPort-Family](https://github.com/xnoah222/Realtek-AirPort-Family).
 
-**Status: M0 done; the M1 kext (probe the chip, download firmware, read the MAC)
-builds and passes its userspace smoke test but has not been loaded on hardware yet.
-Do not put this in an EFI.**
+**Status: M0 and M1 done. The kext loads on the TUF A15 (macOS 15.8.1), powers the
+RTL8852BE on, downloads firmware 0.29.29.18, reads the MAC address from the efuse and
+unloads cleanly. There is no network interface yet (M2). Do not put this in an EFI.**
 
 See [docs/PORTING.md](docs/PORTING.md) for the plan and milestones.
 
