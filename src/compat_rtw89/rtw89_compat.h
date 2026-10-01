@@ -621,9 +621,6 @@ static inline int skb_network_offset(const struct sk_buff *skb)
     return (int)(skb_network_header(skb) - skb->data);
 }
 
-/* Headroom Linux reserves in front of received frames (max(32, L1_CACHE_BYTES)). */
-#define NET_SKB_PAD 64
-
 /* Lockless sk_buff_head helpers. The inherited sk_buff_head keeps a list_head
  * plus qlen; its spinlock is only touched by the locked variants. */
 static inline void __skb_queue_head_init(struct sk_buff_head *list)

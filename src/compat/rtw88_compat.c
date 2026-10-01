@@ -85,6 +85,13 @@ void rtw88_dev_printk(int level, struct device *dev, const char *fmt, ...)
      * errors compound by holding locks. */
 }
 
+void rtw88_skb_panic(const struct sk_buff *skb, u32 len, const char *what)
+{
+    IOLog("[" RTW_LOG_TAG " BUG] %s: %u bytes do not fit (len %u, headroom %ld, tailroom %ld)\n",
+          what, len, skb->len, (long)(skb->data - skb->head), (long)(skb->end - skb->tail));
+    __builtin_trap();
+}
+
 void rtw88_hex_dump(const char *prefix, const void *buf, size_t len)
 {
     const u8 *p = (const u8 *)buf;
