@@ -1,0 +1,6 @@
+build/
+firmware/*.bin
+__pycache__/
+*.o
+*.d
+.DS_Store
