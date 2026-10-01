@@ -19,9 +19,16 @@
  */
 #include <CoreFoundation/CoreFoundation.h>
 #include <IOKit/IOKitLib.h>
+#include <net/if.h>
+#include <spawn.h>
 #include <stdio.h>
 #include <string.h>
+#include <sys/ioctl.h>
+#include <sys/socket.h>
+#include <sys/wait.h>
 #include <unistd.h>
+
+extern char **environ;
 
 static io_service_t find_service(void)
 {
@@ -106,17 +113,80 @@ static void print_error(long error)
 }
 
 /* The BSD name (en7, ...) of the kext's network interface, once it has one. */
-static void print_interface(io_service_t service)
+static int get_interface(io_service_t service, char *name, size_t len)
 {
     CFTypeRef v = IORegistryEntrySearchCFProperty(service, kIOServicePlane, CFSTR("BSD Name"),
                                                   NULL, kIORegistryIterateRecursively);
-    char name[32];
+    int ok = v && CFGetTypeID(v) == CFStringGetTypeID() &&
+             CFStringGetCString(v, name, (CFIndex)len, kCFStringEncodingUTF8);
 
-    if (v && CFGetTypeID(v) == CFStringGetTypeID() &&
-        CFStringGetCString(v, name, sizeof(name), kCFStringEncodingUTF8))
-        printf("%-10s %s\n", "interface", name);
     if (v)
         CFRelease(v);
+    return ok;
+}
+
+static void print_interface(io_service_t service)
+{
+    char name[32];
+
+    if (get_interface(service, name, sizeof(name)))
+        printf("%-10s %s\n", "interface", name);
+}
+
+/* "0, 5" for the bits set in @tids. */
+static const char *tid_list(long tids, char *buf, size_t len)
+{
+    size_t out = 0;
+    int tid;
+
+    buf[0] = 0;
+    for (tid = 0; tid < 16 && out + 4 < len; tid++)
+        if (tids & (1L << tid))
+            out += (size_t)snprintf(buf + out, len - out, "%s%d", out ? ", " : "", tid);
+    return out ? buf : "none";
+}
+
+static int run(const char *path, const char *a1, const char *a2, const char *a3)
+{
+    char *argv[] = { (char *)path, (char *)a1, (char *)a2, (char *)a3, NULL };
+    int status = -1;
+    pid_t pid;
+
+    if (posix_spawn(&pid, path, NULL, NULL, argv, environ))
+        return -1;
+    waitpid(pid, &status, 0);
+    return status;
+}
+
+/*
+ * macOS only configures interfaces that belong to a network service, and it
+ * does not create one for a port it has not seen before. If nothing has
+ * brought the interface up, do what a service would: up, and DHCP. Once the
+ * port has been added in System Settings this finds it up and leaves it alone.
+ */
+static void configure_interface(io_service_t service)
+{
+    struct ifreq ifr;
+    char name[32];
+    int fd, up = 1;
+
+    if (geteuid() || !get_interface(service, name, sizeof(name)))
+        return;
+
+    memset(&ifr, 0, sizeof(ifr));
+    strlcpy(ifr.ifr_name, name, sizeof(ifr.ifr_name));
+    fd = socket(AF_INET, SOCK_DGRAM, 0);
+    if (fd >= 0) {
+        if (!ioctl(fd, SIOCGIFFLAGS, &ifr))
+            up = ifr.ifr_flags & IFF_UP;
+        close(fd);
+    }
+    if (up)
+        return;
+
+    printf("%-10s bringing %s up with DHCP (no network service uses it)\n", "interface", name);
+    run("/sbin/ifconfig", name, "up", NULL);
+    run("/usr/sbin/ipconfig", "set", name, "DHCP");
 }
 
 static void print_link(io_service_t service)
@@ -142,6 +212,13 @@ static void print_link(io_service_t service)
            get_long(service, CFSTR("RTW89 RX Frames")), get_long(service, CFSTR("RTW89 RX Dropped")),
            get_long(service, CFSTR("RTW89 RX Undecrypted")),
            get_long(service, CFSTR("RTW89 RX Replayed")));
+    if (strcmp(state, "down")) {
+        char tx[64], rx[64];
+
+        printf("%-10s sending on TIDs: %s; receiving on TIDs: %s\n", "aggregation",
+               tid_list(get_long(service, CFSTR("RTW89 TX Aggregation")), tx, sizeof(tx)),
+               tid_list(get_long(service, CFSTR("RTW89 RX Aggregation")), rx, sizeof(rx)));
+    }
     print_error(get_long(service, CFSTR("RTW89 Link Error")));
 }
 
@@ -286,6 +363,8 @@ int main(int argc, char **argv)
                 break;
         }
         print_link(service);
+        if (!strcmp(state, "connected"))
+            configure_interface(service);
         return strcmp(state, "connected");
     }
     if (!strcmp(command, "leave")) {

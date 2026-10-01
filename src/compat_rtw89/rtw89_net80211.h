@@ -79,6 +79,7 @@ struct rtw89_m80211_txq {
     struct list_head schedule_entry;    /* on local->active_txqs[ac] while scheduled */
     u16 schedule_round;
     bool dead;                          /* being freed: takes no more frames */
+    bool stopped;                       /* hands out no frames (BlockAck setup) */
     struct sk_buff_head frames;
     unsigned long byte_cnt;
     struct ieee80211_txq txq;           /* must be last: drv_priv[] follows */
@@ -171,6 +172,11 @@ void rtw89_m80211_sta_set_uploaded(struct ieee80211_sta *sta, bool uploaded);
 /* Drop the frames queued for @sta. */
 void rtw89_m80211_sta_purge_txqs(struct ieee80211_sta *sta);
 
+/* Keep @txq from handing frames to the driver; returns how many are waiting on
+ * it. rtw89_m80211_txq_start() lets them go again. */
+unsigned int rtw89_m80211_txq_stop(struct ieee80211_txq *txq);
+void rtw89_m80211_txq_start(struct ieee80211_hw *hw, struct ieee80211_txq *txq);
+
 /* kfree() @ptr once no driver thread can still be using it; see rtw89_mac80211.c.
  * rtw89_m80211_reap(hw, true) frees everything now: only with the driver stopped. */
 void rtw89_m80211_free_later(struct ieee80211_hw *hw, void *ptr, void (*release)(void *ptr));
@@ -212,6 +218,7 @@ struct rtw89_mlme_status {
     u16 aid;
     int last_error;             /* errno, or -(802.11 status/reason code) - 1000 */
     u32 eapol_rx;               /* EAPOL frames received from the AP */
+    u16 tx_ba, rx_ba;           /* TID bits: BlockAck sessions in each direction */
 };
 
 /* All of these are called with the wiphy mutex held, except rtw89_mlme_rx(). */
@@ -231,6 +238,10 @@ void rtw89_mlme_rx(struct sk_buff *skb);
 void rtw89_mlme_rx_eapol(const u8 *eapol, size_t len);
 /* The driver reports that the AP is gone. Any context. */
 void rtw89_mlme_connection_lost(void);
+/* The driver wants to start or stop sending aggregates to @sta on @tid. Any
+ * context; 0 if the request was taken, else what
+ * ieee80211_start_tx_ba_session() would return. */
+int rtw89_mlme_tx_ba_request(struct ieee80211_sta *sta, u16 tid, bool start);
 
 /* ------------------------------------------------------------------ */
 /*  Data path (rtw89_data.c)                                            */
@@ -261,12 +272,20 @@ void rtw89_data_detach(void);
 void rtw89_data_authorize(void);
 void rtw89_data_set_tx_key(struct ieee80211_key_conf *key);
 void rtw89_data_set_rx_key(int keyidx, bool valid, u64 rsc);
+/* BlockAck sessions. Receive: reorder what arrives on @tid. Transmit: hold the
+ * TID's frames while the session is negotiated, see rtw89_data.c. */
+int rtw89_data_rx_ba_start(u8 tid, u16 ssn, u16 buf_size);
+void rtw89_data_rx_ba_stop(u8 tid);
+int rtw89_data_tx_ba_prepare(u8 tid, u16 *ssn);
+void rtw89_data_tx_ba_resume(u8 tid);
 
 /* Transmit an Ethernet frame: allocate, fill skb->data, send. Any thread. */
 struct sk_buff *rtw89_data_tx_alloc(size_t len);
 int rtw89_data_tx(struct sk_buff *skb);
 /* A received 802.11 data frame (FCS on); takes the skb. */
 void rtw89_data_rx(struct sk_buff *skb);
+/* A received BlockAck request (FCS on); takes the skb. */
+void rtw89_data_rx_bar(struct sk_buff *skb);
 void rtw89_data_get_stats(struct rtw89_data_stats *stats);
 /* For tests: see every data frame as it is queued for the driver. */
 void rtw89_data_set_tx_tap(void (*tap)(const u8 *frame, size_t len));

@@ -326,7 +326,33 @@ void rtw89_m80211_tx(struct ieee80211_hw *hw, struct ieee80211_txq *txq,
     mtxq->byte_cnt += skb->len;
     spin_unlock_bh(&mtxq->frames.lock);
 
-    if (!local->queues_stopped)
+    if (!local->queues_stopped && !mtxq->stopped)
+        local->ops->wake_tx_queue(hw, txq);
+}
+
+unsigned int rtw89_m80211_txq_stop(struct ieee80211_txq *txq)
+{
+    struct rtw89_m80211_txq *mtxq = to_mtxq(txq);
+    unsigned int waiting;
+
+    /* under the lock a dequeue takes: once this returns none is in progress */
+    spin_lock_bh(&mtxq->frames.lock);
+    mtxq->stopped = true;
+    waiting = skb_queue_len(&mtxq->frames);
+    spin_unlock_bh(&mtxq->frames.lock);
+    return waiting;
+}
+
+void rtw89_m80211_txq_start(struct ieee80211_hw *hw, struct ieee80211_txq *txq)
+{
+    struct rtw89_m80211_local *local = hw_to_local(hw);
+    struct rtw89_m80211_txq *mtxq = to_mtxq(txq);
+
+    spin_lock_bh(&mtxq->frames.lock);
+    mtxq->stopped = false;
+    spin_unlock_bh(&mtxq->frames.lock);
+
+    if (!local->queues_stopped && !mtxq->dead && !skb_queue_empty(&mtxq->frames))
         local->ops->wake_tx_queue(hw, txq);
 }
 
@@ -341,7 +367,7 @@ struct sk_buff *ieee80211_tx_dequeue(struct ieee80211_hw *hw,
         return NULL;
 
     spin_lock_bh(&mtxq->frames.lock);
-    if (!skb_queue_empty(&mtxq->frames)) {
+    if (!mtxq->stopped && !skb_queue_empty(&mtxq->frames)) {
         skb = skb_peek(&mtxq->frames);
         __skb_unlink(skb, &mtxq->frames);
         mtxq->byte_cnt -= skb->len;
@@ -356,10 +382,11 @@ void ieee80211_txq_get_depth(struct ieee80211_txq *txq,
 {
     struct rtw89_m80211_txq *mtxq = to_mtxq(txq);
 
+    /* a stopped TXQ has nothing for the driver, whatever is waiting on it */
     if (frame_cnt)
-        *frame_cnt = skb_queue_len(&mtxq->frames);
+        *frame_cnt = mtxq->stopped ? 0 : skb_queue_len(&mtxq->frames);
     if (byte_cnt)
-        *byte_cnt = mtxq->byte_cnt;
+        *byte_cnt = mtxq->stopped ? 0 : mtxq->byte_cnt;
 }
 
 /*
@@ -406,7 +433,7 @@ void __ieee80211_schedule_txq(struct ieee80211_hw *hw, struct ieee80211_txq *txq
     struct rtw89_m80211_txq *mtxq = to_mtxq(txq);
 
     spin_lock_bh(&local->active_txq_lock[txq->ac]);
-    if (!mtxq->dead && list_empty(&mtxq->schedule_entry) &&
+    if (!mtxq->dead && !mtxq->stopped && list_empty(&mtxq->schedule_entry) &&
         (force || !skb_queue_empty(&mtxq->frames)))
         list_add_tail(&mtxq->schedule_entry, &local->active_txqs[txq->ac]);
     spin_unlock_bh(&local->active_txq_lock[txq->ac]);
@@ -419,7 +446,7 @@ void __ieee80211_schedule_txq(struct ieee80211_hw *hw, struct ieee80211_txq *txq
 static void rtw89_m80211_wake_txq(struct rtw89_m80211_local *local,
                                   struct ieee80211_txq *txq)
 {
-    if (txq && !skb_queue_empty(&to_mtxq(txq)->frames))
+    if (txq && !to_mtxq(txq)->stopped && !skb_queue_empty(&to_mtxq(txq)->frames))
         local->ops->wake_tx_queue(&local->hw, txq);
 }
 

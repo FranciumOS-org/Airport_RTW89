@@ -120,12 +120,20 @@ Objects the driver's threads may still be using when they are removed
 (stations, their TXQs, keys) are unlinked at once and freed two seconds later
 or when the driver stops: a stand-in for the RCU grace period Linux relies on.
 
+**Aggregation (built, not yet run on hardware).** BlockAck sessions in both
+directions, following agg-rx.c, agg-tx.c and the reorder code in rx.c. The AP's
+ADDBA requests are accepted (up to 64 frames, A-MSDU allowed) and its frames go
+through a per-TID reorder buffer: in order they pass straight through, behind a
+gap they wait up to 100 ms, a BlockAck request or a frame beyond the window
+moves it on. In the other direction the driver asks for a session once it has
+traffic on a TID; the MLME holds that TID's TXQ, sends the ADDBA request with
+the sequence number of the first frame held back, and lets the frames go when
+the AP has answered (or after a second without an answer). DELBA from either
+side ends a session, and all of them are torn down before the station goes.
+
 Not there yet:
-- BlockAck in either direction. The AP's ADDBA requests are declined and none
-  are sent, so every frame travels alone: correct, but far below the speeds
-  802.11n aggregation gives. Needs a reorder buffer (RX) and the ADDBA exchange
-  (TX).
-- Channels wider than 20 MHz, VHT and HE.
+- Channels wider than 20 MHz, VHT and HE: the link is 802.11n on 20 MHz with
+  two streams, 144 Mb/s at best.
 - Fragmented frames (dropped), software decryption of frames the chip did not
   decrypt (dropped and counted), power save, roaming, and beacon-loss detection
   beyond what the firmware reports.
@@ -159,7 +167,12 @@ Before any load, `make hosttest` runs the same objects in userspace
   connected. Once connected it sends and receives data frames and checks the
   conversion byte for byte, along with replayed, duplicated, unencrypted,
   undecrypted, misaddressed and A-MSDU frames, group keys by id, and that
-  nothing passes before the handshake or after leaving.
+  nothing passes before the handshake or after leaving. Then BlockAck
+  sessions: frames arriving out of order, twice, never, or far ahead; a
+  BlockAck request; the driver's own ADDBA request answered with yes, no and
+  silence; and that a TID's frames wait while its session is negotiated. The
+  pretend device consumes firmware commands so that the command ring does not
+  fill up over the many joins.
 
 That found and fixed, before they could panic the machine: `pcie_capability_*`
 writing to the wrong config-space offset, a failed firmware decompress reported

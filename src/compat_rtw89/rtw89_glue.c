@@ -552,7 +552,16 @@ static void glue_rx(void *ctx, struct ieee80211_sta *sta, struct sk_buff *skb)
     const struct ieee80211_hdr *hdr = (const void *)skb->data;
     size_t len = skb->len;
 
-    if ((status->flag & (RX_FLAG_FAILED_FCS_CRC | RX_FLAG_NO_PSDU)) ||
+    if ((status->flag & (RX_FLAG_FAILED_FCS_CRC | RX_FLAG_NO_PSDU)) || len < 2 + FCS_LEN) {
+        kfree_skb(skb);
+        return;
+    }
+    /* the one control frame that matters: it moves a reorder window */
+    if (ieee80211_is_back_req(hdr->frame_control)) {
+        rtw89_data_rx_bar(skb);
+        return;
+    }
+    if (ieee80211_is_ctl(hdr->frame_control) ||
         len < sizeof(struct ieee80211_hdr_3addr) + FCS_LEN) {
         kfree_skb(skb);
         return;
@@ -635,11 +644,23 @@ static void glue_link_notify(void)
         glue.plat.link_changed(glue.plat.ctx);
 }
 
+static int glue_start_tx_ba(void *ctx, struct ieee80211_sta *sta, u16 tid, u16 timeout)
+{
+    return rtw89_mlme_tx_ba_request(sta, tid, true);
+}
+
+static int glue_stop_tx_ba(void *ctx, struct ieee80211_sta *sta, u16 tid)
+{
+    return rtw89_mlme_tx_ba_request(sta, tid, false);
+}
+
 static const struct rtw89_m80211_glue_ops glue_m80211_ops = {
     .rx = glue_rx,
     .tx_status = glue_tx_status,
     .scan_done = glue_scan_done,
     .link_event = glue_link_event,
+    .start_tx_ba = glue_start_tx_ba,
+    .stop_tx_ba = glue_stop_tx_ba,
 };
 
 /* ------------------------------------------------------------------ */
@@ -991,6 +1012,8 @@ void rtw89_glue_link(struct rtw89_glue_link *link)
     link->aid = st.aid;
     link->last_error = st.last_error;
     link->eapol_rx = st.eapol_rx;
+    link->tx_ba = st.tx_ba;
+    link->rx_ba = st.rx_ba;
 }
 
 /* ------------------------------------------------------------------ */

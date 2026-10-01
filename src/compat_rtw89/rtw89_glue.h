@@ -162,6 +162,10 @@ struct rtw89_glue_link {
     uint32_t rx_dropped;            /* all reasons, including the ones below */
     uint32_t rx_undecrypted;        /* encrypted frames the chip did not decrypt */
     uint32_t rx_replay;             /* frames with a packet number already used */
+
+    /* aggregation (BlockAck sessions): one bit per TID, in each direction */
+    uint16_t tx_ba;
+    uint16_t rx_ba;
 };
 
 void rtw89_glue_link(struct rtw89_glue_link *link);
