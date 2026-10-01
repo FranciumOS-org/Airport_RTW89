@@ -36,6 +36,8 @@ done
 
 fetch net/wireless/util.c third_party/linux-reference/net/wireless/util.c
 # mac80211 internals the stand-in in src/compat_rtw89/rtw89_mac80211.c follows
-for f in iface.c link.c main.c sta_info.c scan.c util.c; do
+for f in iface.c link.c main.c sta_info.c scan.c util.c mlme.c tx.c rx.c wpa.c key.c \
+         chan.c ht.c vht.c he.c wme.c agg-rx.c agg-tx.c driver-ops.h driver-ops.c \
+         ieee80211_i.h sta_info.h; do
     fetch net/mac80211/$f third_party/linux-reference/net/mac80211/$f
 done
