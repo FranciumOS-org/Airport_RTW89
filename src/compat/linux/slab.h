@@ -52,12 +52,15 @@ static inline void *kmalloc_array(size_t n, size_t size, gfp_t flags)
 #define __kmalloc_obj_chooser(_1, _2, NAME, ...) NAME
 #define kmalloc_obj(...) __kmalloc_obj_chooser(__VA_ARGS__, __kmalloc_obj_2, __kmalloc_obj_1)(__VA_ARGS__)
 
+/* Lowest address kfree() accepts. Kernel pointers on x86-64 macOS have the high
+ * bits set; the userspace smoke test (tools/hosttest) lowers this to 0. */
+extern uintptr_t rtw88_kfree_min_addr;
+
 static inline void kfree(const void *ptr)
 {
     if (!ptr) return;
-    /* Kernel pointers on x86-64 macOS have the high bit set.
-     * A low address means something corrupted this pointer — log and skip. */
-    if ((uintptr_t)ptr < 0xffff000000000000ULL) {
+    /* A low address means something corrupted this pointer — log and skip. */
+    if ((uintptr_t)ptr < rtw88_kfree_min_addr) {
         IOLog("rtw88: kfree: bad pointer %p — skipping (corruption?)\n", ptr);
         return;
     }

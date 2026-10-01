@@ -18,3 +18,8 @@
 | `linux/skbuff.h` | `skb_put` / `skb_push` / `skb_pull` return `void *` like Linux, not `u8 *`; rtw89 assigns the result to struct pointers without a cast. C callers are unaffected, C++ callers need a cast. | ⬆ |
 | `rtw88_firmware.c` | Decompression buffer sized from the image size recorded in the blob table instead of 4× the compressed size, which fails for images that compress better than 4:1. | ⬆ |
 | `fw_blobs.h` | Re-added; `struct rtw88_fw_blob` has `uncompressed_size`. `fw_blobs.c` is generated into `build/gen/` by `tools/gen_fw_blobs.py`. | — |
+| `linux/pci.h` | `pcie_capability_set_word` / `clear_word` wrote to config offset `0x100 + pos` (the first *extended* capability) and `pcie_capability_read_word` read raw offset `pos`. All three now locate the PCI Express capability (ID 0x10) and add `pos` to it, as Linux does. | ⬆ |
+| `rtw88_firmware.c` | A decompress that did not reach `Z_STREAM_END` returned zlib's code, which can be `Z_OK` (0), so the caller took a half-filled buffer for a loaded image. Now always an error. | ⬆ |
+| `rtw88_compat.c` | Timers: every `thread_call` a timer allocates is tracked, and `rtw88_compat_exit()` cancels and frees the ones never deleted with `del_timer_sync()`, so none can fire into an unloaded kext. | ⬆ |
+| `rtw88_compat.c` | Log prefix is `rtw89` under `RTW89_MACOS`. | — |
+| `linux/slab.h`, `rtw88_compat.c` | `kfree()`'s "not a kernel pointer" threshold is the variable `rtw88_kfree_min_addr` (same default) so the userspace smoke test can lower it. | — |

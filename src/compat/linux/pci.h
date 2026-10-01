@@ -126,28 +126,34 @@ static inline int pci_write_config_dword(struct pci_dev *dev, int where, u32 val
     return -1;
 }
 
-static inline int pcie_capability_set_word(struct pci_dev *pdev, int where, u16 set)
-{
-    u16 val;
-    int ret;
-    ret = pci_read_config_word(pdev, 0x100 + where, &val);
-    if (ret) return ret;
-    return pci_write_config_word(pdev, 0x100 + where, val | set);
-}
-
-static inline int pcie_capability_clear_word(struct pci_dev *pdev, int where, u16 clear)
-{
-    u16 val;
-    int ret;
-    ret = pci_read_config_word(pdev, 0x100 + where, &val);
-    if (ret) return ret;
-    return pci_write_config_word(pdev, 0x100 + where, val & ~clear);
-}
-
 static inline int pci_find_capability(struct pci_dev *dev, int cap)
 {
     if (rtw88_pci_io_ops) return rtw88_pci_io_ops->pci_find_capability(dev, cap);
     return 0;
+}
+
+/* pcie_capability_*: @where is an offset inside the PCI Express capability
+ * structure (capability ID 0x10), wherever that sits in config space. */
+static inline int pcie_capability_set_word(struct pci_dev *pdev, int where, u16 set)
+{
+    int cap = pci_find_capability(pdev, 0x10);
+    u16 val;
+    int ret;
+    if (!cap) return -EINVAL;
+    ret = pci_read_config_word(pdev, cap + where, &val);
+    if (ret) return ret;
+    return pci_write_config_word(pdev, cap + where, val | set);
+}
+
+static inline int pcie_capability_clear_word(struct pci_dev *pdev, int where, u16 clear)
+{
+    int cap = pci_find_capability(pdev, 0x10);
+    u16 val;
+    int ret;
+    if (!cap) return -EINVAL;
+    ret = pci_read_config_word(pdev, cap + where, &val);
+    if (ret) return ret;
+    return pci_write_config_word(pdev, cap + where, val & ~clear);
 }
 
 static inline void *pci_ioremap_bar(struct pci_dev *dev, int bar)
@@ -316,7 +322,9 @@ static inline struct pci_dev *pci_upstream_bridge(struct pci_dev *dev)
 /* pcie_capability_read_word — read a PCIe capability register word */
 static inline int pcie_capability_read_word(struct pci_dev *dev, int pos, u16 *val)
 {
-    return pci_read_config_word(dev, pos, val);
+    int cap = pci_find_capability(dev, 0x10);
+    if (!cap) { *val = 0; return -EINVAL; }
+    return pci_read_config_word(dev, cap + pos, val);
 }
 
 /* to_pci_dev — cast a struct device * to struct pci_dev * */

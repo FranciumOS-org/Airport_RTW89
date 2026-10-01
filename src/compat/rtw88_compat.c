@@ -12,7 +12,15 @@
 
 int rtw88_log_level = KERN_DEBUG;
 
+#ifdef RTW89_MACOS
+#define RTW_LOG_TAG "rtw89"
+#else
+#define RTW_LOG_TAG "rtw88"
+#endif
+
 struct task_struct *__rtw88_current_task = NULL;
+
+uintptr_t rtw88_kfree_min_addr = 0xffff000000000000ULL;
 
 static IOSimpleLock *rtw88_log_lock = NULL;
 static char rtw88_log_ring[8192];
@@ -45,10 +53,10 @@ void rtw88_printk(int level, const char *fmt, ...)
     va_start(ap, fmt);
     vsnprintf(buf, sizeof(buf), fmt, ap);
     va_end(ap);
-    IOLog("[rtw88 %s] %s", ls, buf);
+    IOLog("[" RTW_LOG_TAG " %s] %s", ls, buf);
     
     char ring_msg[512];
-    snprintf(ring_msg, sizeof(ring_msg), "[rtw88 %s] %s", ls, buf);
+    snprintf(ring_msg, sizeof(ring_msg), "[" RTW_LOG_TAG " %s] %s", ls, buf);
     rtw88_log_append(ring_msg);
 }
 
@@ -65,10 +73,10 @@ void rtw88_dev_printk(int level, struct device *dev, const char *fmt, ...)
     va_start(ap, fmt);
     vsnprintf(buf, sizeof(buf), fmt, ap);
     va_end(ap);
-    IOLog("[rtw88 %s %s] %s", ls, name, buf);
+    IOLog("[" RTW_LOG_TAG " %s %s] %s", ls, name, buf);
     
     char ring_msg[512];
-    snprintf(ring_msg, sizeof(ring_msg), "[rtw88 %s %s] %s", ls, name, buf);
+    snprintf(ring_msg, sizeof(ring_msg), "[" RTW_LOG_TAG " %s %s] %s", ls, name, buf);
     rtw88_log_append(ring_msg);
     
     /* Do NOT sleep here — IOSleep in a hot error path (e.g. "failed to write
@@ -80,7 +88,7 @@ void rtw88_dev_printk(int level, struct device *dev, const char *fmt, ...)
 void rtw88_hex_dump(const char *prefix, const void *buf, size_t len)
 {
     const u8 *p = (const u8 *)buf;
-    IOLog("[rtw88] %s (%zu bytes):\n", prefix, len);
+    IOLog("[" RTW_LOG_TAG "] %s (%zu bytes):\n", prefix, len);
     for (size_t i = 0; i < len; i += 16) {
         char line[80];
         int pos = 0;
@@ -341,6 +349,74 @@ void flush_scheduled_work(void)
 /*  Timer implementation (thread_call)                                  */
 /* ------------------------------------------------------------------ */
 
+/*
+ * Every thread_call a timer has allocated. A call that is still allocated when
+ * the kext unloads would fire into unmapped code, so rtw88_compat_exit() stops
+ * and frees whatever the driver did not delete with del_timer_sync().
+ */
+struct timer_call_node {
+    thread_call_t call;
+    struct timer_call_node *next;
+};
+static struct timer_call_node *timer_calls;
+static IOLock *timer_calls_lock;
+
+static void timer_call_track(thread_call_t call)
+{
+    struct timer_call_node *node = (struct timer_call_node *)IOMalloc(sizeof(*node));
+
+    if (!node || !timer_calls_lock)
+        return;
+    node->call = call;
+    IOLockLock(timer_calls_lock);
+    node->next = timer_calls;
+    timer_calls = node;
+    IOLockUnlock(timer_calls_lock);
+}
+
+static void timer_call_untrack(thread_call_t call)
+{
+    struct timer_call_node **pp, *node = NULL;
+
+    if (!timer_calls_lock)
+        return;
+    IOLockLock(timer_calls_lock);
+    for (pp = &timer_calls; *pp; pp = &(*pp)->next) {
+        if ((*pp)->call == call) {
+            node = *pp;
+            *pp = node->next;
+            break;
+        }
+    }
+    IOLockUnlock(timer_calls_lock);
+    if (node)
+        IOFree(node, sizeof(*node));
+}
+
+static void timer_calls_reap(void)
+{
+    struct timer_call_node *node;
+    unsigned int n = 0;
+
+    if (!timer_calls_lock)
+        return;
+    for (;;) {
+        IOLockLock(timer_calls_lock);
+        node = timer_calls;
+        if (node)
+            timer_calls = node->next;
+        IOLockUnlock(timer_calls_lock);
+        if (!node)
+            break;
+        thread_call_cancel_wait(node->call);
+        thread_call_free(node->call);
+        IOFree(node, sizeof(*node));
+        n++;
+    }
+    if (n)
+        IOLog("[" RTW_LOG_TAG "] stopped %u timer(s) left armed or undeleted at exit\n", n);
+}
+
 static void timer_call_fn(thread_call_param_t p0, thread_call_param_t p1)
 {
     struct timer_list *timer = (struct timer_list *)p0;
@@ -366,9 +442,12 @@ int mod_timer(struct timer_list *timer, unsigned long expires)
 {
     int was_active = timer->active;
 
-    if (!timer->call)
+    if (!timer->call) {
         timer->call = thread_call_allocate(timer_call_fn,
                                             (thread_call_param_t)timer);
+        if (timer->call)
+            timer_call_track(timer->call);
+    }
 
     if (!timer->call) return was_active;
 
@@ -396,6 +475,7 @@ int del_timer_sync(struct timer_list *timer)
     timer->active = 0;
     if (timer->call) {
         thread_call_cancel_wait(timer->call);
+        timer_call_untrack(timer->call);
         thread_call_free(timer->call);
         timer->call = NULL;
     }
@@ -1005,6 +1085,7 @@ int rtw88_compat_init(void)
 
     work_state_lock = IOLockAlloc();
     if (!work_state_lock) return -ENOMEM;
+    timer_calls_lock = IOLockAlloc();
     rtw88_log_lock = IOSimpleLockAlloc();
     system_wq      = alloc_workqueue("rtw88_system_wq", 0, 0);
     system_long_wq = alloc_workqueue("rtw88_long_wq",   0, 0);
@@ -1031,6 +1112,9 @@ void rtw88_compat_exit(void)
 {
     if (g_irq_work_initialized)
         cancel_work_sync(&g_irq_work);
+    /* Before the workqueues go: a late timer may still try to queue work. */
+    timer_calls_reap();
+    if (timer_calls_lock) { IOLockFree(timer_calls_lock); timer_calls_lock = NULL; }
     destroy_workqueue(g_datapath_wq);
     g_datapath_wq = NULL;
     destroy_workqueue(system_wq);

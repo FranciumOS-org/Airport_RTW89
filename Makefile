@@ -80,6 +80,7 @@ COMPAT89_SRCS := $(COMPAT89_DIR)/rtw89_compat.c \
                  $(COMPAT89_DIR)/rtw89_cfg80211.c \
                  $(COMPAT89_DIR)/rtw89_cfg80211_bitrate.c \
                  $(COMPAT89_DIR)/rtw89_mac80211.c \
+                 $(COMPAT89_DIR)/rtw89_glue.c \
                  $(COMPAT89_DIR)/rtw89_debug_shim.c
 
 DRIVER_OBJS   := $(patsubst %,$(BUILD_DIR)/rtw89/%.o,$(CORE_SRCS) $(CHIP_SRCS))
@@ -101,7 +102,7 @@ ALL_OBJS      := $(DRIVER_OBJS) $(COMPAT_OBJS) $(COMPAT89_OBJS) $(FW_OBJS)
 # Targets                                                              #
 # ------------------------------------------------------------------ #
 
-.PHONY: all compile errors link fetch-firmware clean
+.PHONY: all compile errors link hosttest fetch-firmware clean
 
 all: compile
 
@@ -149,11 +150,31 @@ link: compile
 	@ld -r $(ARCH) -o $(LINKED_OBJ) $(ALL_OBJS)
 	@python3 tools/check_imports.py $(LINKED_OBJ) docs/kernel-imports.md
 
-FW_URL := https://git.kernel.org/pub/scm/linux/kernel/git/firmware/linux-firmware.git/plain/rtw89/rtw8852b_fw-1.bin
+# rtw89 asks for the highest firmware format it knows first (RTW8852B_FW_FORMAT_MAX
+# = 2 -> rtw8852b_fw-2.bin) and only then falls back to older ones.
+# Userspace smoke test: the same linked object as the kext, with pthread-based
+# stand-ins for its kernel imports and a PCI device that does not answer. Run it
+# before every kext load; a crash here would have been a panic there.
+HOSTTEST := $(BUILD_DIR)/out/hosttest
+hosttest: link
+	@cc -c -O1 -g -Wall -o $(BUILD_DIR)/out/host_kernel.o tools/hosttest/host_kernel.c
+	@cc -c -O1 -g -Wall -I$(COMPAT89_DIR) -o $(BUILD_DIR)/out/host_main.o tools/hosttest/host_main.c
+	@$(CC) $(DRIVER_CFLAGS) -MF /dev/null -c tools/hosttest/selftest.c -o $(BUILD_DIR)/out/selftest.o 2> $(BUILD_DIR)/log/hosttest_selftest.log \
+	    || { grep -E 'error' $(BUILD_DIR)/log/hosttest_selftest.log >&2; exit 1; }
+	@cc $(ARCH) -o $(HOSTTEST) $(BUILD_DIR)/out/host_main.o $(BUILD_DIR)/out/host_kernel.o \
+	    $(BUILD_DIR)/out/selftest.o $(LINKED_OBJ) -lz
+	@echo "  RUN  $(HOSTTEST)"
+	@perl -e 'alarm 300; exec @ARGV' $(HOSTTEST) > $(BUILD_DIR)/log/hosttest.log 2>&1; \
+	    rc=$$?; grep -E '^==|WARN|BUG|HOST:' $(BUILD_DIR)/log/hosttest.log; \
+	    [ $$rc -eq 0 ] || { echo "  hosttest FAILED (exit $$rc), see $(BUILD_DIR)/log/hosttest.log"; exit 1; }
+
+FW_NAME := rtw8852b_fw-2.bin
+FW_URL  := https://git.kernel.org/pub/scm/linux/kernel/git/firmware/linux-firmware.git/plain/rtw89/$(FW_NAME)
 fetch-firmware:
 	@mkdir -p $(FIRMWARE_DIR)
-	curl -fL --output $(FIRMWARE_DIR)/rtw8852b_fw-1.bin $(FW_URL)
-	@shasum -a 256 $(FIRMWARE_DIR)/rtw8852b_fw-1.bin
+	curl -fL --output $(FIRMWARE_DIR)/$(FW_NAME) $(FW_URL)
+	@cd $(FIRMWARE_DIR) && if [ -f SHA256SUMS ]; then shasum -a 256 -c SHA256SUMS; \
+	    else shasum -a 256 $(FW_NAME) | tee SHA256SUMS; fi
 
 clean:
 	rm -rf $(BUILD_DIR)
