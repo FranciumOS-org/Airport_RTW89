@@ -63,8 +63,7 @@ drives it through the kext's `setProperties` (administrators only) and prints th
 networks. This exercises interrupts, the RX path, firmware commands and scan
 offload without needing the legacy Wi-Fi stack or any EFI change.
 
-**Towards M3: association (works on hardware), WPA2 key handshake (built, not
-yet run on hardware).**
+**Towards M3: association and the WPA2 key handshake work on hardware.**
 `src/compat_rtw89/rtw89_mlme.c` is a station MLME for one non-MLO interface,
 following `net/mac80211/mlme.c` call for call: channel context on the AP's
 channel, station entry, open-system authentication, association (802.11n on
@@ -85,6 +84,9 @@ repeated message 3 does not install the same key again (no packet number reuse),
 the SNonce is kept while the AP retries message 1, and the replay counter must
 advance. `rtw89ctl join` asks for the password at a prompt; the kext turns it
 into the PMK and keeps only that, in memory, until the radio goes down.
+On the test machine the handshake with a WPA2 access point completed about 5 ms
+after the AP's first message: both keys accepted by the chip, link "connected",
+clean unload afterwards.
 Not checked yet: that the RSN element in message 3 equals the one in the beacon
 (a downgrade check that matters once more than one cipher/AKM is supported).
 
