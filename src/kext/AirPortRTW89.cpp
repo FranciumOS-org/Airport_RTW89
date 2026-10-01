@@ -599,6 +599,11 @@ void AirPort_RTW89::publishLink()
     setProperty("RTW89 RX Replayed", link.rx_replay, 32);
     setProperty("RTW89 RX Duplicates", link.rx_dup, 32);
     setProperty("RTW89 RX Reorder Timeouts", link.rx_reorder_timeout, 32);
+    setProperty("RTW89 RX Late", link.rx_late, 32);
+    setProperty("RTW89 RX Late With Interrupt", link.rx_late_irq, 32);
+    setProperty("RTW89 RX Late Max", link.rx_late_max_ms, 32);
+    setProperty("RTW89 RX Status Flushed", link.rx_ppdu_flushed, 32);
+    setProperty("RTW89 RX Status Flush", link.ppdu_flush);
     setProperty("RTW89 TX Aggregation", link.tx_ba, 32);
     setProperty("RTW89 RX Aggregation", link.rx_ba, 32);
 
@@ -655,6 +660,8 @@ IOReturn AirPort_RTW89::setProperties(OSObject *properties)
                                   pass ? static_cast<const char *>(pass->getBytesNoCopy()) : nullptr,
                                   pass ? pass->getLength() : 0);
         }
+    } else if (command->isEqualTo("flush-on") || command->isEqualTo("flush-off")) {
+        rtw89_glue_set_ppdu_flush(command->isEqualTo("flush-on"));
     } else if (command->isEqualTo("leave")) {
         rtw89_glue_leave();
     } else if (command->isEqualTo("results")) {

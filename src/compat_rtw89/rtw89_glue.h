@@ -169,12 +169,28 @@ struct rtw89_glue_link {
     uint32_t rx_dup;                /* retransmissions of frames already received */
     uint32_t rx_reorder_timeout;    /* frames passed on after waiting in vain for an earlier one */
 
+    /* receive timing, by the chip's own timestamps */
+    uint32_t rx_late;               /* frames handed over more than 5 ms after arriving */
+    uint32_t rx_late_irq;           /* ... although the chip interrupted when they arrived */
+    uint32_t rx_late_max_ms;
+    uint32_t rx_ppdu_flushed;       /* frames passed on without their PPDU status report */
+    bool     ppdu_flush;            /* see rtw89_glue_set_ppdu_flush() */
+
     /* aggregation (BlockAck sessions): one bit per TID, in each direction */
     uint16_t tx_ba;
     uint16_t rx_ba;
 };
 
 void rtw89_glue_link(struct rtw89_glue_link *link);
+
+/*
+ * The driver holds each received data frame until the chip's status report
+ * for the same transmission arrives. When the report does not come, the frame
+ * would wait for the next reception (often the next beacon, 100 ms later);
+ * with this on (the default) it is passed on after 2 ms instead. Off is for
+ * comparing.
+ */
+void rtw89_glue_set_ppdu_flush(bool on);
 
 /*
  * Transmit one Ethernet frame (destination, source, type, payload; no FCS) of

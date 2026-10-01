@@ -9,6 +9,8 @@
  *   sudo rtw89ctl leave     leave the network
  *   sudo rtw89ctl down      stop the radio
  *        rtw89ctl status    print what the kext has published
+ *   sudo rtw89ctl flush on|off   pass on received frames whose status report
+ *                           from the chip is missing after 2 ms (default on)
  *
  * Once a network is joined, traffic flows through the Ethernet-style
  * interface the kext publishes (the "interface" line of status, e.g. en7):
@@ -189,6 +191,8 @@ static void configure_interface(io_service_t service)
     run("/usr/sbin/ipconfig", "set", name, "DHCP");
 }
 
+static int get_bool(io_service_t service, CFStringRef key);
+
 static void print_link(io_service_t service)
 {
     char state[32], bssid[32];
@@ -213,6 +217,13 @@ static void print_link(io_service_t service)
            get_long(service, CFSTR("RTW89 RX Undecrypted")),
            get_long(service, CFSTR("RTW89 RX Replayed")),
            get_long(service, CFSTR("RTW89 RX Duplicates")));
+    printf("%-10s %ld frame(s) reached the driver more than 5 ms after the chip received them "
+           "(worst %ld ms; %ld although the chip interrupted on arrival); %ld passed on "
+           "without a status report (%s)\n", "timing",
+           get_long(service, CFSTR("RTW89 RX Late")), get_long(service, CFSTR("RTW89 RX Late Max")),
+           get_long(service, CFSTR("RTW89 RX Late With Interrupt")),
+           get_long(service, CFSTR("RTW89 RX Status Flushed")),
+           get_bool(service, CFSTR("RTW89 RX Status Flush")) ? "flush on" : "flush off");
     if (strcmp(state, "down")) {
         char tx[64], rx[64];
 
@@ -328,10 +339,22 @@ int main(int argc, char **argv)
         return 0;
     }
 
+    if (!strcmp(command, "flush") && argc >= 3 &&
+        (!strcmp(argv[2], "on") || !strcmp(argv[2], "off"))) {
+        kr = send_command(service, !strcmp(argv[2], "on") ? "flush-on" : "flush-off");
+        if (kr != KERN_SUCCESS) {
+            fprintf(stderr, "flush failed: 0x%x%s\n", kr,
+                    kr == kIOReturnNotPrivileged ? " (run with sudo)" : "");
+            return 1;
+        }
+        printf("flush %s\n", argv[2]);
+        return 0;
+    }
+
     if ((strcmp(command, "up") && strcmp(command, "down") && strcmp(command, "scan") &&
          strcmp(command, "join") && strcmp(command, "leave")) ||
         (!strcmp(command, "join") && argc < 3)) {
-        fprintf(stderr, "usage: rtw89ctl up|down|scan|join SSID|leave|status\n");
+        fprintf(stderr, "usage: rtw89ctl up|down|scan|join SSID|leave|status|flush on|off\n");
         return 2;
     }
 

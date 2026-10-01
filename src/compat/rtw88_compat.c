@@ -595,6 +595,16 @@ void rtw88_synchronize_irq(void)
         flush_work(&g_irq_work);
 }
 
+/* rtw89: called on the datapath thread after every NAPI poll. */
+void (*rtw88_napi_post_poll)(int done);
+
+/* rtw89: queue work on the thread that runs the interrupt thread function and
+ * the NAPI poll, so it is serialised with the receive path. */
+bool rtw88_queue_datapath_delayed_work(struct delayed_work *dwork, unsigned long delay)
+{
+    return g_datapath_wq ? queue_delayed_work(g_datapath_wq, dwork, delay) : false;
+}
+
 static void rtw88_napi_work_fn(struct work_struct *work)
 {
     struct napi_struct *napi = container_of(work, struct napi_struct, work);
@@ -602,6 +612,8 @@ static void rtw88_napi_work_fn(struct work_struct *work)
         return;
 
     int done = napi->poll(napi, napi->weight);
+    if (rtw88_napi_post_poll)
+        rtw88_napi_post_poll(done);
 
     /* A full budget means Linux would leave NAPI scheduled. Requeue the same
      * work item; the ordered queue guarantees the polls never overlap. */

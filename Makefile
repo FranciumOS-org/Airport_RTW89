@@ -71,7 +71,9 @@ DRIVER_CFLAGS := \
 
 # rtw89_core + rtw89_pci (wow.c excluded until sleep/wake; debug.c replaced
 # by src/compat_rtw89/rtw89_debug_shim.c)
-CORE_SRCS := core mac80211 mac mac_be phy phy_be fw cam efuse efuse_be \
+# core.c is compiled through src/compat_rtw89/rtw89_core_wrap.c, which includes
+# it unchanged and adds one function that needs its static helpers.
+CORE_SRCS := mac80211 mac mac_be phy phy_be fw cam efuse efuse_be \
              regd sar coex ps chan ser acpi util pci pci_be
 
 # RTL8852B chip + RTL8852BE PCIe frontend
@@ -91,6 +93,7 @@ COMPAT89_SRCS := $(COMPAT89_DIR)/rtw89_compat.c \
                  $(COMPAT89_DIR)/rtw89_mlme.c \
                  $(COMPAT89_DIR)/rtw89_data.c \
                  $(COMPAT89_DIR)/rtw89_glue.c \
+                 $(COMPAT89_DIR)/rtw89_core_wrap.c \
                  $(COMPAT89_DIR)/rtw89_debug_shim.c
 
 DRIVER_OBJS   := $(patsubst %,$(BUILD_DIR)/rtw89/%.o,$(CORE_SRCS) $(CHIP_SRCS))
@@ -191,7 +194,7 @@ hosttest: link
 	    || { grep -E 'error' $(BUILD_DIR)/log/hosttest_fakechip_core.log >&2; exit 1; }
 	@cc $(ARCH) -o $(HOSTTEST) $(HOST_OBJS) $(LINKED_OBJ) -lz
 	@cc $(ARCH) -o $(HOSTTEST)_fakechip $(HOST_OBJS) $(BUILD_DIR)/out/fakechip_core.o \
-	    $(filter-out $(BUILD_DIR)/rtw89/core.o,$(ALL_OBJS)) -lz
+	    $(filter-out $(BUILD_DIR)/compat_rtw89/rtw89_core_wrap.o,$(ALL_OBJS)) -lz
 	$(call hostrun,$(HOSTTEST),00,hosttest_00)
 	$(call hostrun,$(HOSTTEST),ff,hosttest_ff)
 	$(call hostrun,$(HOSTTEST)_fakechip,00 ok,hosttest_fakechip)
