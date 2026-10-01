@@ -59,7 +59,11 @@
 #include "linux/leds.h"
 #include "linux/devcoredump.h"
 #include "linux/seq_file.h"
+#ifndef RTW89_MACOS
+/* rtw89 builds against the unmodified upstream net/mac80211.h instead, which
+ * rtw89_compat.h includes once the extra kernel shims it needs are defined. */
 #include "net/mac80211.h"
+#endif
 
 /* ------------------------------------------------------------------ */
 /*  Missing RTW88 driver bits that mac80211.h references               */
@@ -96,6 +100,7 @@ static inline int srcu_read_lock(struct srcu_struct *s) { return 0; }
 static inline void srcu_read_unlock(struct srcu_struct *s, int idx) {}
 static inline void synchronize_srcu(struct srcu_struct *s) {}
 
+#ifndef RTW89_MACOS /* rtw89: these come from the upstream linux/ieee80211.h and rtw89_compat.h */
 /* refcount */
 typedef atomic_t refcount_t;
 #define refcount_set(r, v)  atomic_set(r, v)
@@ -141,6 +146,7 @@ typedef atomic_t refcount_t;
 #define WLAN_ACTION_ADDBA_REQ        0
 #define WLAN_ACTION_ADDBA_RESP       1
 #define WLAN_ACTION_DELBA            2
+#endif /* !RTW89_MACOS */
 
 /* ------------------------------------------------------------------ */
 /*  Compat global state init/exit                                       */

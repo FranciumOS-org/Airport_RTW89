@@ -100,8 +100,8 @@ static struct firmware *load_fw_from_blob(const char *base)
 
         const struct rtw88_fw_blob *b = &rtw88_fw_blobs[i];
 
-        /* 4× compressed size — same generous bound as itlwm */
-        size_t alloc = b->compressed_size * 4;
+        /* The generator records the exact image size. */
+        size_t alloc = b->uncompressed_size;
         uint32_t out_len = (uint32_t)alloc;
         uint8_t *buf = (uint8_t *)IOMalloc(alloc);
         if (!buf) {

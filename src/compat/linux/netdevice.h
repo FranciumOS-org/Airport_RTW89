@@ -12,6 +12,7 @@ struct net_device {
     u8   dev_addr[ETH_ALEN];
     unsigned int mtu;
     void *ml_priv;
+    struct wireless_dev *ieee80211_ptr; /* rtw89: read by the upstream net/cfg80211.h */
 };
 
 #define CHECKSUM_NONE       0

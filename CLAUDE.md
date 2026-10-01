@@ -30,10 +30,20 @@ IOSkywalkFamily block, AMFIPass) is only needed from M2.
 ## Workflow
 
 - Build: `make -k compile && make errors` → read docs/compile-status.md, fix shims in
-  batches grouped by category, repeat.
-- Never edit `third_party/rtw89/` (vendored upstream, see UPSTREAM.md). Fix things in
-  `src/compat_rtw89/` (new) or `src/compat/` (inherited; log every change in
-  docs/COMPAT-CHANGES.md).
+  batches grouped by category, repeat. Then `make link`: it must report 0 unresolved.
+- Never edit `third_party/rtw89/` or `third_party/linux-include/` (vendored upstream,
+  see their UPSTREAM.md). Fix things in `src/compat_rtw89/` (new) or `src/compat/`
+  (inherited; log every change in docs/COMPAT-CHANGES.md).
+- rtw89 builds against the real `net/cfg80211.h` / `net/mac80211.h`. When the driver
+  needs a mac80211/cfg80211 function, implement it in `src/compat_rtw89/rtw89_mac80211.c`
+  or `rtw89_cfg80211.c` following the Linux behaviour; don't add struct shims.
+  `src/compat/net/mac80211.h` (the rtw88 shim) is not used.
+- Upstream files: the user has approved downloading further files from the pinned
+  Linux commit when needed, as long as each fetched file is named to them. Use the
+  GitHub contents API (`tools/fetch_linux.sh`); raw.githubusercontent.com is blocked
+  on this connection. Add new files to that script.
+- Some files have CRLF line endings (`git ls-files --eol`). Keep each file's endings
+  when editing.
 - Refresh the static gap report with `python3 tools/api_gap.py` after large shim changes.
 
 ## Loading kexts — rules

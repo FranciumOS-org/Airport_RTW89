@@ -406,6 +406,7 @@ int del_timer_sync(struct timer_list *timer)
 /*  mac80211 callbacks                                                  */
 /* ------------------------------------------------------------------ */
 
+#ifndef RTW89_MACOS /* rtw88 kext glue */
 struct rtw88_hw_callbacks {
     void (*rx_frame)(void *kext_hw, struct sk_buff *skb);
     void (*tx_status)(void *kext_hw, struct sk_buff *skb);
@@ -417,6 +418,7 @@ static void *g_kext_hw = NULL;
 
 /* Forward declaration — defined later in ieee80211_alloc_hw section */
 static struct ieee80211_hw *g_rtw88_hw;
+#endif /* !RTW89_MACOS */
 
 irq_handler_t g_irq_handler = NULL;
 irq_handler_t g_irq_thread_fn = NULL;
@@ -428,6 +430,7 @@ void *g_irq_dev_id = NULL;
 static struct work_struct g_irq_work;
 static bool g_irq_work_initialized = false;
 
+#ifndef RTW89_MACOS /* rtw88 kext glue */
 /* Single active VIF — registered by the kext after add_interface so that
  * ieee80211_iterate_active_interfaces_atomic can deliver the iterator to
  * rtw88's internal callbacks (e.g. rtw_build_rsvd_page_iter). */
@@ -435,6 +438,7 @@ static struct ieee80211_vif *g_rtw88_vif = NULL;
 
 void rtw88_register_vif(struct ieee80211_vif *vif)   { g_rtw88_vif = vif; }
 void rtw88_unregister_vif(void)                       { g_rtw88_vif = NULL; }
+#endif /* !RTW89_MACOS */
 
 /* Kext hook fired after TX ISR has reclaimed descriptors. It runs on the
  * ordered datapath worker, outside the Realtek IRQ handler itself. */
@@ -453,6 +457,7 @@ static void rtw88_irq_work_fn(struct work_struct *work)
         g_tx_resume_cb();
 }
 
+#ifndef RTW89_MACOS /* rtw88 driver internals */
 /* BE-ring free-slot count for kext flow control. */
 extern u32 rtw88_be_ring_avail(struct rtw_dev *rtwdev);
 u32 rtw88_be_tx_avail(void)
@@ -460,6 +465,7 @@ u32 rtw88_be_tx_avail(void)
     if (!g_irq_dev_id) return 0;
     return rtw88_be_ring_avail((struct rtw_dev *)g_irq_dev_id);
 }
+#endif /* !RTW89_MACOS */
 
 int rtw88_devm_request_threaded_irq(struct device *dev, unsigned int irq,
         irq_handler_t handler, irq_handler_t thread_fn,
@@ -559,6 +565,7 @@ void rtw88_napi_schedule(struct napi_struct *napi)
         queue_work(g_datapath_wq, &napi->work);
 }
 
+#ifndef RTW89_MACOS /* rtw88 mini-mac80211; rtw89 has its own in src/compat_rtw89 */
 void rtw88_set_hw_callbacks(struct rtw88_hw_callbacks *cbs, void *kext_hw)
 {
     g_hw_cbs  = cbs;
@@ -800,6 +807,7 @@ int ieee80211_channel_to_frequency(int chan, enum nl80211_band band)
         return 2407 + chan * 5;
     return 5000 + chan * 5;
 }
+#endif /* !RTW89_MACOS */
 
 /* ------------------------------------------------------------------ */
 /*  Workqueue extras                                                    */
@@ -810,6 +818,7 @@ struct workqueue_struct *create_singlethread_workqueue(const char *name)
     return alloc_ordered_workqueue(name, 0);
 }
 
+#ifndef RTW89_MACOS /* rtw88 mini-mac80211 */
 void ieee80211_queue_work(struct ieee80211_hw *hw, struct work_struct *work)
 {
     if (hw && hw->priv) {
@@ -917,6 +926,7 @@ bool cfg80211_ssid_eq(struct cfg80211_ssid *a, struct cfg80211_ssid *b)
 
 int regulatory_hint(struct wiphy *wiphy, const char *alpha2)
 { (void)wiphy; (void)alpha2; return 0; }
+#endif /* !RTW89_MACOS */
 
 /* sdio_align_size stub — not needed for PCIe-only build */
 unsigned int sdio_align_size(struct sdio_func *func, unsigned int size)
@@ -957,6 +967,7 @@ struct net_device *alloc_netdev_dummy(int sizeof_priv)
 /*  Misc kernel helpers                                                  */
 /* ------------------------------------------------------------------ */
 
+#ifndef RTW89_MACOS /* static inline in the upstream net/cfg80211.h */
 void get_random_mask_addr(u8 *buf, const u8 *addr, const u8 *mask)
 {
     u8 rand[6];
@@ -964,6 +975,7 @@ void get_random_mask_addr(u8 *buf, const u8 *addr, const u8 *mask)
     for (int i = 0; i < 6; i++)
         buf[i] = (addr[i] & ~mask[i]) | (rand[i] & mask[i]);
 }
+#endif /* !RTW89_MACOS */
 
 int atomic_dec_if_positive(atomic_t *v)
 {
@@ -1030,15 +1042,18 @@ void rtw88_compat_exit(void)
     g_irq_dev_id    = NULL;
     g_irq_work_initialized = false;
     g_tx_resume_cb  = NULL;
+#ifndef RTW89_MACOS
     g_hw_cbs        = NULL;
     g_kext_hw       = NULL;
     g_rtw88_vif     = NULL;
+#endif
     if (rtw88_log_lock) {
         IOSimpleLockFree(rtw88_log_lock);
         rtw88_log_lock = NULL;
     }
 }
 
+#ifndef RTW89_MACOS /* everything below reaches into struct rtw_dev (rtw88) */
 /* ------------------------------------------------------------------ */
 /*  Driver Info Helpers                                                 */
 /* ------------------------------------------------------------------ */
@@ -1482,3 +1497,4 @@ uint32_t rtw88_read_log(char *out_buf, uint32_t max_len)
     IOSimpleLockUnlock(rtw88_log_lock);
     return read;
 }
+#endif /* !RTW89_MACOS */

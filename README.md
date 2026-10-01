@@ -4,7 +4,8 @@ Work-in-progress port of the Linux **rtw89** driver to macOS for the
 **Realtek RTL8852BE** (`10EC:B852`, Wi-Fi 6 PCIe), following the approach of
 AirPort_RTW88 in [Realtek-AirPort-Family](https://github.com/xnoah222/Realtek-AirPort-Family).
 
-**Status: M0 (getting it to compile). Nothing loads yet. Do not put this in an EFI.**
+**Status: M0 done (everything compiles and links, `make link`); M1 (talk to the
+chip) is next. There is no kext bundle yet and nothing loads. Do not put this in an EFI.**
 
 See [docs/PORTING.md](docs/PORTING.md) for the plan and milestones.
 
@@ -13,27 +14,28 @@ See [docs/PORTING.md](docs/PORTING.md) for the plan and milestones.
 | Path | What |
 |---|---|
 | `third_party/rtw89/` | Vendored Linux rtw89 subset, **unmodified** ([UPSTREAM.md](third_party/rtw89/UPSTREAM.md)) |
+| `third_party/linux-include/` | Linux 802.11 headers (`ieee80211*.h`, `nl80211.h`, `cfg80211.h`, `mac80211.h`, …), **unmodified** ([UPSTREAM.md](third_party/linux-include/UPSTREAM.md)) |
+| `third_party/linux-reference/` | Upstream source that code is copied from, not compiled |
 | `third_party/MacKernelSDK/` | From AirPort_RTW88 |
 | `src/compat/` | Linux-API shims inherited from AirPort_RTW88 ([changes](docs/COMPAT-CHANGES.md)) |
-| `src/compat_rtw89/` | rtw89-specific additions: missing headers, helpers, `wiphy_work`, debug log |
+| `src/compat_rtw89/` | rtw89 additions: kernel API the upstream headers and driver need (`rtw89_compat.h`), the code behind cfg80211/mac80211 (`rtw89_cfg80211.c`, `rtw89_mac80211.c`), debug log |
 | `reference/rtw88_kext/` | AirPort_RTW88's standalone PCI kext glue — starting point for M1 |
 | `tools/api_gap.py` | Static Linux-API gap report → [docs/api-gap.md](docs/api-gap.md) |
 | `tools/errsum.py` | Groups compiler errors → `docs/compile-status.md` |
+| `tools/check_imports.py` | `make link`: what is left for the kernel → `docs/kernel-imports.md` |
 
-## Build loop (macOS VM with Xcode)
+## Build loop
 
-Share the Windows folder `E:\mac development` into the VM (VMware → VM Settings →
-Options → Shared Folders), then in the VM's Terminal:
+On the machine itself (macOS with the Command Line Tools), from the repo root:
 
 ```bash
-cd "/Volumes/VMware Shared Folders/mac development/AirPort_RTW89"
 make fetch-firmware   # once
 make -k compile       # -k: keep going so every file's errors get recorded
 make errors           # writes docs/compile-status.md
+make link             # joins all objects, checks the leftover kernel imports
 ```
 
-Per-file compiler output is kept in `build/log/`. Because the folder is shared,
-the logs and `docs/compile-status.md` are readable from Windows right away.
+Per-file compiler output is kept in `build/log/`.
 
 ## Debug logging
 
