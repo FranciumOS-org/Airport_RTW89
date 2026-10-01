@@ -4,8 +4,9 @@ Work-in-progress port of the Linux **rtw89** driver to macOS for the
 **Realtek RTL8852BE** (`10EC:B852`, Wi-Fi 6 PCIe), following the approach of
 AirPort_RTW88 in [Realtek-AirPort-Family](https://github.com/xnoah222/Realtek-AirPort-Family).
 
-**Status: M0 done (everything compiles and links, `make link`); M1 (talk to the
-chip) is next. There is no kext bundle yet and nothing loads. Do not put this in an EFI.**
+**Status: M0 done; the M1 kext (probe the chip, download firmware, read the MAC)
+builds and passes its userspace smoke test but has not been loaded on hardware yet.
+Do not put this in an EFI.**
 
 See [docs/PORTING.md](docs/PORTING.md) for the plan and milestones.
 
@@ -33,7 +34,11 @@ make fetch-firmware   # once
 make -k compile       # -k: keep going so every file's errors get recorded
 make errors           # writes docs/compile-status.md
 make link             # joins all objects, checks the leftover kernel imports
+make kext             # userspace smoke test, then build/out/AirPort_RTW89.kext
 ```
+
+Loading is manual and at your own risk (a driver bug panics the machine):
+`sudo tools/load.sh`, then `sudo tools/unload.sh`.
 
 Per-file compiler output is kept in `build/log/`.
 

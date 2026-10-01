@@ -115,7 +115,7 @@ int ieee80211_register_hw(struct ieee80211_hw *hw)
         return -EINVAL;
 
     local->registered = true;
-    return 0;
+    return wiphy_register(hw->wiphy);
 }
 
 void ieee80211_unregister_hw(struct ieee80211_hw *hw)
@@ -124,6 +124,7 @@ void ieee80211_unregister_hw(struct ieee80211_hw *hw)
 
     local->registered = false;
     cancel_work_sync(&local->wake_txqs_work);
+    wiphy_unregister(hw->wiphy);
 }
 
 void rtw89_m80211_set_glue(struct ieee80211_hw *hw,
