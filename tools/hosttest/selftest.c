@@ -5,6 +5,7 @@
  * only into the userspace smoke test, never into the kext.
  */
 #include "rtw89_net80211.h"
+#include "rtw89_crypto.h"
 
 static int failures;
 
@@ -125,6 +126,96 @@ static void test_helpers(void)
     CHECK(skb->head != before);
     CHECK(skb_headroom(skb) == NET_SKB_PAD + 40 && skb->len == 4 && !memcmp(skb->data, "abcd", 4));
     kfree_skb(skb);
+}
+
+/* ---- WPA2 cryptography against published test vectors ---- */
+
+static bool hex_is(const u8 *got, const char *hex, size_t len)
+{
+    size_t i;
+
+    for (i = 0; i < len; i++) {
+        char c[3] = { hex[2 * i], hex[2 * i + 1], 0 };
+        u8 v = 0;
+        int j;
+
+        for (j = 0; j < 2; j++)
+            v = (u8)(v << 4 | (c[j] <= '9' ? c[j] - '0' : c[j] - 'a' + 10));
+        if (got[i] != v)
+            return false;
+    }
+    return true;
+}
+
+static void test_crypto(void)
+{
+    static const u8 aa[6] = { 0xa0, 0xa1, 0xa1, 0xa3, 0xa4, 0xa5 };
+    static const u8 spa[6] = { 0xb0, 0xb1, 0xb2, 0xb3, 0xb4, 0xb5 };
+    u8 out[64], key[20], in[16], wrapped[24], data[76];
+    int i;
+
+    rtw89_sha1((const u8 *)"abc", 3, out);                      /* FIPS 180 */
+    CHECK(hex_is(out, "a9993e364706816aba3e25717850c26c9cd0d89d", 20));
+
+    rtw89_hmac_sha1((const u8 *)"Jefe", 4,                      /* RFC 2202 */
+                    (const u8 *)"what do ya want for nothing?", 28, out);
+    CHECK(hex_is(out, "effcdf6ae5eb2fa2d27416d5f184df9c259a7c79", 20));
+
+    /* IEEE 802.11 J.4.2: passphrase to PSK */
+    rtw89_pbkdf2_sha1((const u8 *)"password", 8, (const u8 *)"IEEE", 4, 4096, out, 32);
+    CHECK(hex_is(out, "f42c6fc52df0ebef9ebb4b90b38a5f902e83fe1b135a70e23aed762e9710a12e", 32));
+
+    /* IEEE 802.11 J.3.2: PRF */
+    memset(key, 0x0b, sizeof(key));
+    rtw89_sha1_prf(key, 20, "prefix", (const u8 *)"Hi There", 8, out, 24);
+    CHECK(hex_is(out, "bcd4c650b30b9684951829e0d75f9d54b862175ed9f00606", 24));
+
+    /* IEEE 802.11 J.7.1: pairwise key derivation (KCK, KEK, TK) */
+    rtw89_pbkdf2_sha1((const u8 *)"ThisIsAPassword", 15, (const u8 *)"ThisIsASSID", 11,
+                      4096, out, 32);
+    CHECK(hex_is(out, "0dc0d6eb90555ed6419756b9a15ec3e3209b63df707dd508d14581f8982721af", 32));
+    memcpy(data, aa, 6);
+    memcpy(data + 6, spa, 6);
+    for (i = 0; i < 32; i++) {
+        /* SNonce c0..e5 sorts before ANonce e0..05, both in the vector's odd numbering */
+        static const u8 snonce[32] = {
+            0xc0, 0xc1, 0xc2, 0xc3, 0xc4, 0xc5, 0xc6, 0xc7, 0xc8, 0xc9, 0xd0, 0xd1, 0xd2,
+            0xd3, 0xd4, 0xd5, 0xd6, 0xd7, 0xd8, 0xd9, 0xda, 0xdb, 0xdc, 0xdd, 0xde, 0xdf,
+            0xe0, 0xe1, 0xe2, 0xe3, 0xe4, 0xe5,
+        };
+        static const u8 anonce[32] = {
+            0xe0, 0xe1, 0xe2, 0xe3, 0xe4, 0xe5, 0xe6, 0xe7, 0xe8, 0xe9, 0xf0, 0xf1, 0xf2,
+            0xf3, 0xf4, 0xf5, 0xf6, 0xf7, 0xf8, 0xf9, 0xfa, 0xfb, 0xfc, 0xfd, 0xfe, 0xff,
+            0x00, 0x01, 0x02, 0x03, 0x04, 0x05,
+        };
+
+        data[12 + i] = snonce[i];
+        data[44 + i] = anonce[i];
+    }
+    {
+        u8 pmk[32];
+
+        memcpy(pmk, out, 32);
+        rtw89_sha1_prf(pmk, 32, "Pairwise key expansion", data, sizeof(data), out, 48);
+    }
+    CHECK(hex_is(out, "379f9852d0199236b94e407ce4c00ec8"
+                      "47c9edc01c2c6e5b4910caddfb3e51a7"
+                      "b2360c79e9710fdd58bea93deaf06599", 48));
+
+    /* FIPS 197 appendix C.1, and RFC 3394 4.1 */
+    for (i = 0; i < 16; i++) {
+        key[i] = (u8)i;
+        in[i] = (u8)(i * 0x11);
+    }
+    rtw89_aes128_encrypt(key, in, out);
+    CHECK(hex_is(out, "69c4e0d86a7b0430d8cdb78070b4c55a", 16));
+    rtw89_aes128_decrypt(key, out, out + 16);
+    CHECK(!memcmp(out + 16, in, 16));
+    rtw89_aes_wrap(key, in, 16, wrapped);
+    CHECK(hex_is(wrapped, "1fa68b0a8112b447aef34bd8fb5a7b829d3e862371d2cfe5", 24));
+    CHECK(rtw89_aes_unwrap(key, wrapped, 24, out) && !memcmp(out, in, 16));
+    wrapped[5] ^= 0x01;
+    CHECK(!rtw89_aes_unwrap(key, wrapped, 24, out));
 }
 
 /* ---- cfg80211 helpers ---- */
@@ -516,6 +607,7 @@ int rtw89_selftest(void)
         return ret;
 
     test_helpers();
+    test_crypto();
     test_cfg80211_helpers();
     test_stack();
 

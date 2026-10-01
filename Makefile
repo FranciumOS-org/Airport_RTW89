@@ -101,7 +101,8 @@ COMPAT89_OBJS := $(patsubst $(COMPAT89_DIR)/%.c,$(BUILD_DIR)/compat_rtw89/%.o,$(
 GEN_DIR       := $(BUILD_DIR)/gen
 FW_BLOBS_C    := $(GEN_DIR)/fw_blobs.c
 FW_BINS       := $(wildcard $(FIRMWARE_DIR)/*.bin)
-FW_OBJS       := $(BUILD_DIR)/fw/rtw88_firmware.o $(BUILD_DIR)/fw/fw_blobs.o
+FW_OBJS       := $(BUILD_DIR)/fw/rtw88_firmware.o $(BUILD_DIR)/fw/fw_blobs.o \
+                 $(BUILD_DIR)/fw/rtw89_crypto.o
 # Plain kernel C: rtw88_firmware.c is written against IOKit, not the Linux shims.
 FW_CFLAGS     := $(KEXT_FLAGS) -std=gnu11 -DKERNEL -I$(COMPAT_DIR)
 
@@ -142,6 +143,12 @@ $(BUILD_DIR)/fw/rtw88_firmware.o: $(COMPAT_DIR)/rtw88_firmware.c
 	@mkdir -p $(dir $@) $(BUILD_DIR)/log
 	@echo "  CC   compat/rtw88_firmware.c"
 	@$(CC) $(FW_CFLAGS) -c $< -o $@ 2> $(BUILD_DIR)/log/fw_rtw88_firmware.log || { cat $(BUILD_DIR)/log/fw_rtw88_firmware.log >&2; exit 1; }
+
+# Self-contained C (no Linux shims), shared with the userspace smoke test.
+$(BUILD_DIR)/fw/rtw89_crypto.o: $(COMPAT89_DIR)/rtw89_crypto.c
+	@mkdir -p $(dir $@) $(BUILD_DIR)/log
+	@echo "  CC   compat_rtw89/rtw89_crypto.c"
+	@$(CC) $(FW_CFLAGS) -Wall -c $< -o $@ 2> $(BUILD_DIR)/log/fw_rtw89_crypto.log || { cat $(BUILD_DIR)/log/fw_rtw89_crypto.log >&2; exit 1; }
 
 $(BUILD_DIR)/fw/fw_blobs.o: $(FW_BLOBS_C)
 	@mkdir -p $(dir $@) $(BUILD_DIR)/log

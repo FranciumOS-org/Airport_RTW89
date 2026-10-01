@@ -27,7 +27,8 @@ public:
     void free() override;
 
     /* { "RTW89Command" = "up" | "down" | "scan" | "results" | "leave" }, or
-     * { "RTW89Command" = "join", "RTW89SSID" = <data> }. Administrators only. */
+     * { "RTW89Command" = "join", "RTW89SSID" = <data> [, "RTW89Passphrase" = <data>] }.
+     * Administrators only. */
     IOReturn setProperties(OSObject *properties) override;
 
 private:
@@ -35,6 +36,7 @@ private:
     void interruptOccurred(IOInterruptEventSource *source, int count);
     void publishInfo();
     void publishScanResults();
+    void publishLink();
     void teardown();
 
     /* rtw89_glue_platform callbacks; ctx is the AirPort_RTW89 instance. */
@@ -44,6 +46,7 @@ private:
     static void *dmaAlloc(void *ctx, size_t size, uint64_t *busAddr, void **cookie);
     static void dmaFree(void *ctx, void *cookie);
     static void irqEnable(void *ctx, bool enable);
+    static void linkChanged(void *ctx);
 
     IOPCIDevice *_pci = nullptr;
     IOMemoryMap *_mmio = nullptr;

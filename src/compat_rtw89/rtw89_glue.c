@@ -6,6 +6,7 @@
  */
 #include "rtw89_net80211.h"
 #include "rtw89_glue.h"
+#include "rtw89_crypto.h"
 #include "core.h"
 
 void rtw88_trigger_interrupt(void);
@@ -568,8 +569,8 @@ static void glue_rx(void *ctx, struct ieee80211_sta *sta, struct sk_buff *skb)
  * Feed one received 802.11 frame (without FCS) through the same path the
  * driver uses. For the userspace smoke test, which plays the access point.
  */
-void rtw89_glue_test_rx(const u8 *frame, size_t len, u16 freq, s8 signal);
-void rtw89_glue_test_rx(const u8 *frame, size_t len, u16 freq, s8 signal)
+void rtw89_glue_test_rx(const u8 *frame, size_t len, u16 freq, s8 signal, bool decrypted);
+void rtw89_glue_test_rx(const u8 *frame, size_t len, u16 freq, s8 signal, bool decrypted)
 {
     struct ieee80211_rx_status *status;
     struct sk_buff *skb;
@@ -585,6 +586,8 @@ void rtw89_glue_test_rx(const u8 *frame, size_t len, u16 freq, s8 signal)
     memset(status, 0, sizeof(*status));
     status->freq = freq;
     status->signal = signal;
+    if (decrypted)
+        status->flag |= RX_FLAG_DECRYPTED;
     ieee80211_rx_napi(glue_hw(), NULL, skb, NULL);
 }
 
@@ -598,6 +601,12 @@ static void glue_scan_done(void *ctx, bool aborted)
     glue.scanning = false;
     IOLog("[rtw89] scan %s: %u network(s) heard\n", aborted ? "aborted" : "finished",
           glue.n_bss);
+}
+
+static void glue_link_notify(void)
+{
+    if (glue.plat.link_changed)
+        glue.plat.link_changed(glue.plat.ctx);
 }
 
 static const struct rtw89_m80211_glue_ops glue_m80211_ops = {
@@ -652,7 +661,7 @@ int rtw89_glue_up(void)
     }
     rtw89_m80211_vif_set_in_driver(glue.vif, true);
     local->ops->configure_filter(hw, 0, &filter, 0);
-    rtw89_mlme_start(hw, glue.vif);
+    rtw89_mlme_start(hw, glue.vif, glue_link_notify);
     wiphy_unlock(hw->wiphy);
 
     glue.up = true;
@@ -813,19 +822,59 @@ unsigned int rtw89_glue_scan_results(struct rtw89_glue_bss *out, unsigned int ma
 /*  Join / leave                                                        */
 /* ------------------------------------------------------------------ */
 
-int rtw89_glue_join(const uint8_t *ssid, size_t ssid_len)
+/* WPA2-PSK: the pairwise master key from a passphrase (IEEE 802.11 J.4.1), or
+ * given directly as 64 hex digits. */
+static int glue_derive_pmk(const u8 *ssid, size_t ssid_len,
+                           const char *passphrase, size_t len, u8 pmk[32])
+{
+    size_t i;
+
+    if (len == 64) {
+        for (i = 0; i < 64; i++) {
+            char c = passphrase[i];
+            u8 v;
+
+            if (c >= '0' && c <= '9')
+                v = c - '0';
+            else if (c >= 'a' && c <= 'f')
+                v = c - 'a' + 10;
+            else if (c >= 'A' && c <= 'F')
+                v = c - 'A' + 10;
+            else
+                return -EACCES;
+            pmk[i / 2] = (i & 1) ? (pmk[i / 2] | v) : (u8)(v << 4);
+        }
+        return 0;
+    }
+    if (len < 8 || len > 63)
+        return -EACCES;
+
+    rtw89_pbkdf2_sha1((const u8 *)passphrase, len, ssid, ssid_len, 4096, pmk, 32);
+    return 0;
+}
+
+int rtw89_glue_join(const uint8_t *ssid, size_t ssid_len,
+                    const char *passphrase, size_t passphrase_len)
 {
     static u8 ies[RTW89_GLUE_MAX_IES];  /* calls are serialised by the caller */
     struct rtw89_glue_bss_entry *best = NULL;
     struct rtw89_mlme_bss bss = {};
     struct ieee80211_hw *hw;
+    bool have_pmk = false;
     unsigned int i;
+    u8 pmk[32];
     int ret;
 
     if (!glue.up)
         return -ENETDOWN;
     if (!ssid_len || ssid_len > IEEE80211_MAX_SSID_LEN)
         return -EINVAL;
+    if (passphrase && passphrase_len) {
+        ret = glue_derive_pmk(ssid, ssid_len, passphrase, passphrase_len, pmk);
+        if (ret)
+            return ret;
+        have_pmk = true;
+    }
 
     spin_lock(&glue.bss_lock);
     for (i = 0; i < glue.n_bss; i++) {
@@ -854,8 +903,9 @@ int rtw89_glue_join(const uint8_t *ssid, size_t ssid_len)
 
     hw = glue_hw();
     wiphy_lock(hw->wiphy);
-    ret = rtw89_mlme_connect(&bss);
+    ret = rtw89_mlme_connect(&bss, have_pmk ? pmk : NULL);
     wiphy_unlock(hw->wiphy);
+    memset(pmk, 0, sizeof(pmk));
     return ret;
 }
 
