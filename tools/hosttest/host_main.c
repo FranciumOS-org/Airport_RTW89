@@ -30,6 +30,182 @@ int rtw89_selftest(void);
 /* src/compat_rtw89/rtw89_glue.c: where received beacons end up */
 void rtw89_glue_note_bss(const uint8_t *frame, size_t len, uint16_t freq, int8_t signal);
 
+void rtw89_glue_test_rx(const uint8_t *frame, size_t len, uint16_t freq, int8_t signal);
+
+/* The access point the smoke test pretends to be, and the card (fakechip_core.c). */
+static const uint8_t ap_mac[6] = { 0x02, 0xaa, 0xbb, 0xcc, 0xdd, 0x01 };
+static const uint8_t sta_mac[6] = { 0x00, 0xe0, 0x4c, 0x88, 0x52, 0xbe };
+
+static const uint8_t ap_ies[] = {
+    0x00, 0x07, 't', 'e', 's', 't', 'n', 'e', 't',                   /* SSID */
+    0x01, 0x08, 0x82, 0x84, 0x8b, 0x96, 0x0c, 0x12, 0x18, 0x24,      /* rates */
+    0x03, 0x01, 0x06,                                                /* channel 6 */
+    0x05, 0x04, 0x00, 0x02, 0x00, 0x00,                              /* TIM, DTIM period 2 */
+    0x2a, 0x01, 0x00,                                                /* ERP */
+    0x30, 0x14, 0x01, 0x00, 0x00, 0x0f, 0xac, 0x04, 0x01, 0x00,      /* RSN: CCMP/PSK */
+    0x00, 0x0f, 0xac, 0x04, 0x01, 0x00, 0x00, 0x0f, 0xac, 0x02, 0x00, 0x00,
+    0x32, 0x04, 0x30, 0x48, 0x60, 0x6c,                              /* extended rates */
+    0x2d, 0x1a, 0x2c, 0x00, 0x03, 0xff, 0xff, 0x00, 0x00, 0x00,      /* HT capabilities */
+    0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+    0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+    0x3d, 0x16, 0x06, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,      /* HT operation */
+    0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+    0x00, 0x00, 0x00, 0x00,
+    0xdd, 0x18, 0x00, 0x50, 0xf2, 0x02, 0x01, 0x01, 0x00, 0x00,      /* WMM parameters */
+    0x03, 0xa4, 0x00, 0x00, 0x27, 0xa4, 0x00, 0x00,
+    0x42, 0x43, 0x5e, 0x00, 0x62, 0x32, 0x2f, 0x00,
+};
+
+/* Build a management frame from the AP to the card and deliver it. */
+static void ap_send(uint8_t subtype, const uint8_t *body, size_t body_len)
+{
+    uint8_t frame[600];
+    size_t len = 24;
+
+    memset(frame, 0, sizeof(frame));
+    frame[0] = subtype;
+    memcpy(frame + 4, subtype == 0x80 ? (const uint8_t *)"\xff\xff\xff\xff\xff\xff" : sta_mac, 6);
+    memcpy(frame + 10, ap_mac, 6);
+    memcpy(frame + 16, ap_mac, 6);
+    memcpy(frame + len, body, body_len);
+    len += body_len;
+    rtw89_glue_test_rx(frame, len, 2437, -40);
+}
+
+static void ap_send_beacon(void)
+{
+    uint8_t body[12 + sizeof(ap_ies)] = { 0, 0, 0, 0, 0, 0, 0, 0, 0x64, 0x00, 0x11, 0x04 };
+
+    memcpy(body + 12, ap_ies, sizeof(ap_ies));
+    ap_send(0x80, body, sizeof(body));
+}
+
+static void ap_send_auth(uint16_t status)
+{
+    uint8_t body[6] = { 0x00, 0x00, 0x02, 0x00, (uint8_t)status, (uint8_t)(status >> 8) };
+
+    ap_send(0xb0, body, sizeof(body));
+}
+
+static void ap_send_assoc_resp(uint16_t status)
+{
+    uint8_t body[6 + sizeof(ap_ies)] = { 0x11, 0x04, (uint8_t)status, (uint8_t)(status >> 8),
+                                         0x05, 0xc0 };
+
+    /* an association response carries the same elements minus the SSID */
+    memcpy(body + 6, ap_ies + 9, sizeof(ap_ies) - 9);
+    ap_send(0x10, body, 6 + sizeof(ap_ies) - 9);
+}
+
+static void ap_send_deauth(uint16_t reason)
+{
+    uint8_t body[2] = { (uint8_t)reason, (uint8_t)(reason >> 8) };
+
+    ap_send(0xc0, body, sizeof(body));
+}
+
+/* First message of the WPA2 handshake: an unencrypted data frame with EAPOL. */
+static void ap_send_eapol(void)
+{
+    uint8_t frame[24 + 8 + 99];
+
+    memset(frame, 0, sizeof(frame));
+    frame[0] = 0x08;                    /* data */
+    frame[1] = 0x02;                    /* from the distribution system */
+    memcpy(frame + 4, sta_mac, 6);
+    memcpy(frame + 10, ap_mac, 6);
+    memcpy(frame + 16, ap_mac, 6);
+    memcpy(frame + 24, "\xaa\xaa\x03\x00\x00\x00\x88\x8e", 8);
+    frame[32] = 0x02;                   /* EAPOL version 2, type 3 (key) */
+    frame[33] = 0x03;
+    rtw89_glue_test_rx(frame, sizeof(frame), 2437, -40);
+}
+
+static enum rtw89_glue_link_state link_state(void)
+{
+    struct rtw89_glue_link link;
+
+    rtw89_glue_link(&link);
+    return link.state;
+}
+
+/*
+ * Wait for the link to reach @state. Generous: against hardware that never
+ * answers, every driver call the join makes runs into its own timeouts.
+ */
+static int wait_link(enum rtw89_glue_link_state state)
+{
+    int i;
+
+    for (i = 0; i < 600 && link_state() != state; i++)
+        usleep(50 * 1000);
+    return link_state() == state;
+}
+
+/* Authenticate and associate with the pretend AP answering. */
+static int join_testnet(uint16_t assoc_status)
+{
+    if (rtw89_glue_join((const uint8_t *)"testnet", 7))
+        return 0;
+    ap_send_auth(0);
+    /* the association request goes out once the auth answer is processed */
+    usleep(300 * 1000);
+    ap_send_assoc_resp(assoc_status);
+    return 1;
+}
+
+/* Join the pretend network, playing the AP's side of each exchange. */
+static int test_join(void)
+{
+    struct rtw89_glue_link link;
+    int failures = 0;
+
+#define EXPECT(cond) do { if (!(cond)) { failures++; printf("== FAIL %s\n", #cond); } } while (0)
+    ap_send_beacon();
+    EXPECT(rtw89_glue_join((const uint8_t *)"nosuchnet", 9) == -2);     /* -ENOENT */
+
+    /* the normal case: both answers arrive */
+    EXPECT(join_testnet(0));
+    EXPECT(wait_link(RTW89_GLUE_LINK_ASSOCIATED));
+    rtw89_glue_link(&link);
+    EXPECT(link.aid == 5 && link.freq == 2437 && !link.last_error);
+    ap_send_eapol();
+    usleep(300 * 1000);
+    rtw89_glue_link(&link);
+    EXPECT(link.eapol_rx == 1);
+    printf("== associated, AID %u, %u EAPOL frame(s)\n", link.aid, link.eapol_rx);
+
+    /* the AP throws us out */
+    ap_send_deauth(7);
+    EXPECT(wait_link(RTW89_GLUE_LINK_DOWN));
+    rtw89_glue_link(&link);
+    EXPECT(link.last_error == -2007);
+
+    /* refused association */
+    EXPECT(join_testnet(17));
+    EXPECT(wait_link(RTW89_GLUE_LINK_DOWN));
+    rtw89_glue_link(&link);
+    EXPECT(link.last_error == -1017);
+
+    /* an AP that never answers: three tries, then give up */
+    EXPECT(rtw89_glue_join((const uint8_t *)"testnet", 7) == 0);
+    EXPECT(wait_link(RTW89_GLUE_LINK_DOWN));
+    rtw89_glue_link(&link);
+    EXPECT(link.last_error == -110);
+
+    /* leave while associated; then the radio goes down while associated */
+    EXPECT(join_testnet(0));
+    EXPECT(wait_link(RTW89_GLUE_LINK_ASSOCIATED));
+    rtw89_glue_leave();
+    EXPECT(link_state() == RTW89_GLUE_LINK_DOWN);
+
+    EXPECT(join_testnet(0));
+    EXPECT(wait_link(RTW89_GLUE_LINK_ASSOCIATED));
+#undef EXPECT
+    printf("== join test: %d failure(s)\n", failures);
+    return failures;
+}
+
 /* A probed device: scan bookkeeping, and bringing the radio up, which must
  * fail cleanly here because nothing answers the power-on sequence. */
 static int test_probed_device(void)
@@ -66,8 +242,9 @@ static int test_probed_device(void)
     if (!ret) {
         ret = rtw89_glue_scan();
         printf("== scan returned %d\n", ret);
-        /* Long enough for the driver's 2 s tracking work to run twice. */
-        usleep(4500 * 1000);
+        failures += test_join();
+        /* Long enough for the driver's 2 s tracking work to run, associated. */
+        usleep(2500 * 1000);
         rtw89_glue_down();
         EXPECT(!rtw89_glue_is_up() && !rtw89_glue_scanning());
         printf("== radio down\n");

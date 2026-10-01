@@ -26,7 +26,8 @@ public:
     void stop(IOService *provider) override;
     void free() override;
 
-    /* { "RTW89Command" = "up" | "down" | "scan" | "results" }, administrators only. */
+    /* { "RTW89Command" = "up" | "down" | "scan" | "results" | "leave" }, or
+     * { "RTW89Command" = "join", "RTW89SSID" = <data> }. Administrators only. */
     IOReturn setProperties(OSObject *properties) override;
 
 private:

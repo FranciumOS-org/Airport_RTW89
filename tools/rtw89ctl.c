@@ -4,6 +4,8 @@
  *
  *   sudo rtw89ctl up        start the radio (power on, firmware, calibration)
  *   sudo rtw89ctl scan      start the radio if needed, scan, print the networks
+ *   sudo rtw89ctl join SSID associate with a network from the last scan
+ *   sudo rtw89ctl leave     leave the network
  *   sudo rtw89ctl down      stop the radio
  *        rtw89ctl status    print what the kext has published
  *
@@ -21,18 +23,88 @@ static io_service_t find_service(void)
     return IOServiceGetMatchingService(kIOMainPortDefault, IOServiceMatching("AirPort_RTW89"));
 }
 
-static kern_return_t send_command(io_service_t service, const char *command)
+/* @ssid: sent along as raw bytes when not NULL (for "join"). */
+static kern_return_t send_command_ssid(io_service_t service, const char *command, const char *ssid)
 {
     CFStringRef value = CFStringCreateWithCString(NULL, command, kCFStringEncodingUTF8);
-    CFStringRef key = CFSTR("RTW89Command");
-    CFDictionaryRef dict = CFDictionaryCreate(NULL, (const void **)&key, (const void **)&value, 1,
-                                              &kCFTypeDictionaryKeyCallBacks,
-                                              &kCFTypeDictionaryValueCallBacks);
-    kern_return_t kr = IORegistryEntrySetCFProperties(service, dict);
+    CFMutableDictionaryRef dict = CFDictionaryCreateMutable(NULL, 2,
+                                                            &kCFTypeDictionaryKeyCallBacks,
+                                                            &kCFTypeDictionaryValueCallBacks);
+    kern_return_t kr;
+
+    CFDictionarySetValue(dict, CFSTR("RTW89Command"), value);
+    if (ssid) {
+        CFDataRef data = CFDataCreate(NULL, (const UInt8 *)ssid, (CFIndex)strlen(ssid));
+
+        CFDictionarySetValue(dict, CFSTR("RTW89SSID"), data);
+        CFRelease(data);
+    }
+    kr = IORegistryEntrySetCFProperties(service, dict);
 
     CFRelease(dict);
     CFRelease(value);
     return kr;
+}
+
+static kern_return_t send_command(io_service_t service, const char *command)
+{
+    return send_command_ssid(service, command, NULL);
+}
+
+static long get_long(io_service_t service, CFStringRef key)
+{
+    CFTypeRef v = IORegistryEntryCreateCFProperty(service, key, NULL, 0);
+    int value = 0;
+
+    if (v && CFGetTypeID(v) == CFNumberGetTypeID())
+        CFNumberGetValue(v, kCFNumberSInt32Type, &value);
+    if (v)
+        CFRelease(v);
+    return value;
+}
+
+static int get_string(io_service_t service, CFStringRef key, char *buf, size_t len)
+{
+    CFTypeRef v = IORegistryEntryCreateCFProperty(service, key, NULL, 0);
+    int ok = v && CFGetTypeID(v) == CFStringGetTypeID() &&
+             CFStringGetCString(v, buf, (CFIndex)len, kCFStringEncodingUTF8);
+
+    if (v)
+        CFRelease(v);
+    if (!ok)
+        buf[0] = 0;
+    return ok;
+}
+
+static void print_error(long error)
+{
+    if (!error)
+        return;
+    if (error <= -2000)
+        printf("%-10s the AP ended the connection, 802.11 reason %ld\n", "last error", -error - 2000);
+    else if (error <= -1000)
+        printf("%-10s the AP refused, 802.11 status %ld\n", "last error", -error - 1000);
+    else
+        printf("%-10s %ld\n", "last error", error);
+}
+
+static void print_link(io_service_t service)
+{
+    char state[32], bssid[32];
+
+    get_string(service, CFSTR("RTW89 Link State"), state, sizeof(state));
+    get_string(service, CFSTR("RTW89 Link BSSID"), bssid, sizeof(bssid));
+    if (!state[0])
+        return;
+    printf("%-10s %s\n", "link", state);
+    if (strcmp(state, "down")) {
+        printf("%-10s %s, %ld MHz, AID %ld\n", "network", bssid,
+               get_long(service, CFSTR("RTW89 Link Frequency")),
+               get_long(service, CFSTR("RTW89 Link AID")));
+        printf("%-10s %ld EAPOL frame(s) from the AP\n", "handshake",
+               get_long(service, CFSTR("RTW89 Link EAPOL Frames")));
+    }
+    print_error(get_long(service, CFSTR("RTW89 Link Error")));
 }
 
 static int get_bool(io_service_t service, CFStringRef key)
@@ -131,20 +203,49 @@ int main(int argc, char **argv)
         print_string(service, CFSTR("RTW89 MAC Address"), "MAC");
         print_string(service, CFSTR("RTW89 Firmware Version"), "firmware");
         printf("%-10s %s\n", "radio", get_bool(service, CFSTR("RTW89 Radio Up")) ? "up" : "down");
+        print_link(service);
         print_results(service);
         return 0;
     }
 
-    if (strcmp(command, "up") && strcmp(command, "down") && strcmp(command, "scan")) {
-        fprintf(stderr, "usage: rtw89ctl up|down|scan|status\n");
+    if ((strcmp(command, "up") && strcmp(command, "down") && strcmp(command, "scan") &&
+         strcmp(command, "join") && strcmp(command, "leave")) ||
+        (!strcmp(command, "join") && argc < 3)) {
+        fprintf(stderr, "usage: rtw89ctl up|down|scan|join SSID|leave|status\n");
         return 2;
     }
 
-    kr = send_command(service, command);
+    kr = send_command_ssid(service, command, !strcmp(command, "join") ? argv[2] : NULL);
     if (kr != KERN_SUCCESS) {
         fprintf(stderr, "%s failed: 0x%x%s\n", command, kr,
                 kr == kIOReturnNotPrivileged ? " (run with sudo)" : " (see the kernel log)");
+        if (!strcmp(command, "join"))
+            fprintf(stderr, "is the network in the last scan? run: rtw89ctl scan\n");
         return 1;
+    }
+
+    if (!strcmp(command, "join")) {
+        char state[32] = "";
+
+        /* Authentication and association take well under a second each. */
+        for (i = 0; i < 20; i++) {
+            usleep(250 * 1000);
+            send_command(service, "results");
+            get_string(service, CFSTR("RTW89 Link State"), state, sizeof(state));
+            if (strcmp(state, "joining"))
+                break;
+        }
+        /* give the AP a moment to start the key handshake */
+        if (!strcmp(state, "associated")) {
+            sleep(1);
+            send_command(service, "results");
+        }
+        print_link(service);
+        return strcmp(state, "associated") && strcmp(state, "connected");
+    }
+    if (!strcmp(command, "leave")) {
+        printf("left the network\n");
+        return 0;
     }
 
     if (!strcmp(command, "scan")) {

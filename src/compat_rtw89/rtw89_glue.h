@@ -116,6 +116,34 @@ struct rtw89_glue_bss {
  * responses). Returns how many were copied to @out. */
 unsigned int rtw89_glue_scan_results(struct rtw89_glue_bss *out, unsigned int max);
 
+/*
+ * Join the strongest network heard under @ssid in the last scan. Returns 0 once
+ * the attempt has started; it completes in the background (see
+ * rtw89_glue_link()). -ENOENT if no such network was heard, -EOPNOTSUPP if its
+ * security is not something this driver can do yet.
+ */
+int rtw89_glue_join(const uint8_t *ssid, size_t ssid_len);
+void rtw89_glue_leave(void);
+
+enum rtw89_glue_link_state {
+    RTW89_GLUE_LINK_DOWN,           /* not trying to be on a network */
+    RTW89_GLUE_LINK_JOINING,        /* authenticating or associating */
+    RTW89_GLUE_LINK_ASSOCIATED,     /* associated, keys not installed yet */
+    RTW89_GLUE_LINK_CONNECTED,      /* associated and able to pass data */
+};
+
+struct rtw89_glue_link {
+    enum rtw89_glue_link_state state;
+    uint8_t  bssid[6];
+    char     ssid[33];
+    uint16_t freq;
+    uint16_t aid;
+    int      last_error;            /* 0, -errno, -1000-status or -2000-reason */
+    uint32_t eapol_rx;
+};
+
+void rtw89_glue_link(struct rtw89_glue_link *link);
+
 #ifdef __cplusplus
 }
 #endif

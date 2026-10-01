@@ -170,6 +170,50 @@ int rtw89_m80211_key_add(struct ieee80211_hw *hw, struct ieee80211_vif *vif,
                          struct ieee80211_sta *sta, struct ieee80211_key_conf *conf);
 void rtw89_m80211_key_del(struct ieee80211_hw *hw, struct ieee80211_key_conf *conf);
 
+/* ------------------------------------------------------------------ */
+/*  Station MLME (rtw89_mlme.c)                                         */
+/* ------------------------------------------------------------------ */
+
+/* A network to join, as heard in a beacon or probe response. */
+struct rtw89_mlme_bss {
+    u8 bssid[ETH_ALEN];
+    u8 ssid[IEEE80211_MAX_SSID_LEN];
+    u8 ssid_len;
+    u16 freq;                   /* MHz */
+    u16 capability;
+    u16 beacon_int;
+    const u8 *ies;
+    size_t ies_len;
+};
+
+enum rtw89_mlme_state {
+    RTW89_MLME_IDLE,
+    RTW89_MLME_AUTHENTICATING,
+    RTW89_MLME_ASSOCIATING,
+    RTW89_MLME_ASSOCIATED,      /* associated; keys not installed yet (RSN) */
+    RTW89_MLME_CONNECTED,       /* associated and authorised to pass data */
+};
+
+struct rtw89_mlme_status {
+    enum rtw89_mlme_state state;
+    u8 bssid[ETH_ALEN];
+    u8 ssid[IEEE80211_MAX_SSID_LEN + 1];
+    u16 freq;
+    u16 aid;
+    int last_error;             /* errno, or -(802.11 status/reason code) - 1000 */
+    u32 eapol_rx;               /* EAPOL frames received from the AP */
+};
+
+/* All of these are called with the wiphy mutex held, except rtw89_mlme_rx(). */
+void rtw89_mlme_start(struct ieee80211_hw *hw, struct ieee80211_vif *vif);
+void rtw89_mlme_stop(void);
+int rtw89_mlme_connect(const struct rtw89_mlme_bss *bss);
+void rtw89_mlme_disconnect(u16 reason);
+void rtw89_mlme_get_status(struct rtw89_mlme_status *status);
+/* A received frame that is not a beacon or probe response; takes the skb.
+ * Any context: the frame is queued and handled under the wiphy mutex. */
+void rtw89_mlme_rx(struct sk_buff *skb);
+
 /*
  * Queue a frame on @txq and wake the driver. The caller has filled
  * IEEE80211_SKB_CB(skb) (control.vif, flags, band) and skb->priority.
