@@ -131,7 +131,26 @@ down. Since then the kext uses the pull model for output
 is told to stop when 256 frames are waiting on the driver's TXQs and is woken
 when they have drained to 64. That part has not run on hardware yet.
 
-The sessions are BlockAck agreements in both
+With that, uploads ran at 85-96 Mb/s with no drops and downloads at about
+80 Mb/s (three runs each).
+
+**Latency of larger received frames (fix built, not yet run on hardware).**
+Small pings took 2 ms, but replies of 150 bytes and more took anything from 1
+to 98 ms, evenly spread: they were handed to the stack when the *next* frame
+was received, usually the AP's beacon (102 ms interval). Transmit was fine at
+every size (measured one way, between the card and the wired port of the same
+machine). `rtw89_core_rx()` parks each data frame until the chip's PPDU status
+report for the same transmission arrives and otherwise flushes on the next
+reception; the working theory is that the report often does not come for
+these frames. `src/compat_rtw89/rtw89_core_wrap.c` compiles the driver's
+core.c unchanged and adds a flush the glue runs 2 ms after a poll that left
+frames parked (`rtw89ctl flush off` disables it, for comparison). Timing
+counters in `rtw89ctl status`, based on the chip's receive timestamps, show
+how many frames reached the driver late and whether the chip had interrupted
+when they arrived. Also fixed on the way: the stand-in left the RTS threshold
+at 0 instead of "off".
+
+The aggregation sessions are BlockAck agreements in both
 directions, following agg-rx.c, agg-tx.c and the reorder code in rx.c. The AP's
 ADDBA requests are accepted (up to 64 frames, A-MSDU allowed) and its frames go
 through a per-TID reorder buffer: in order they pass straight through, behind a

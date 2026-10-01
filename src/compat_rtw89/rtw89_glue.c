@@ -11,6 +11,11 @@
 
 void rtw88_trigger_interrupt(void);
 void rtw89_compat_debug_init(void);
+/* src/compat/rtw88_compat.c */
+extern void (*rtw88_napi_post_poll)(int done);
+bool rtw88_queue_datapath_delayed_work(struct delayed_work *dwork, unsigned long delay);
+/* rtw89_core_wrap.c */
+unsigned int rtw89_compat_flush_ppdu_rx(struct rtw89_dev *rtwdev);
 
 /* ------------------------------------------------------------------ */
 /*  State                                                               */
@@ -65,7 +70,27 @@ static struct {
     spinlock_t bss_lock;
     struct rtw89_glue_bss_entry bss[RTW89_GLUE_MAX_BSS];
     unsigned int n_bss;
+
+    /* frames the driver holds for a PPDU status report, see rtw89_core_wrap.c */
+    bool ppdu_flush;                    /* pass them on after a short wait */
+    struct delayed_work ppdu_flush_work;
+    u32 ppdu_flushed;
+
+    /* How long frames take from the chip's receive timestamp to here. The
+     * chip's clock and ours are compared through the smallest difference seen
+     * lately (two windows, so drift between the clocks cannot build up). */
+    u32 rx_base, rx_base_prev;
+    bool rx_base_valid, rx_base_prev_valid;
+    u64 rx_base_since;
+    u32 rx_late;                        /* frames more than 5 ms late */
+    u32 rx_late_irq;                    /* ... of which an interrupt came when they arrived */
+    u32 rx_late_max;                    /* ms */
+    u64 irq_time[16];                   /* our clock, us, of the last interrupts */
+    unsigned int irq_next;
 } glue;
+
+#define RTW89_GLUE_PPDU_WAIT    2       /* ms a frame may wait for its status report */
+#define RTW89_GLUE_LATE_US      5000
 
 static struct ieee80211_hw *glue_hw(void);
 static void glue_deliver(const u8 *frame, size_t len);
@@ -446,10 +471,83 @@ void rtw89_glue_remove(void)
     glue_teardown();
 }
 
+static u64 glue_now_us(void)
+{
+    return ktime_get_boottime_ns() / 1000;
+}
+
 void rtw89_glue_interrupt(void)
 {
-    if (glue.probed)
-        rtw88_trigger_interrupt();
+    if (!glue.probed)
+        return;
+    glue.irq_time[glue.irq_next++ % ARRAY_SIZE(glue.irq_time)] = glue_now_us();
+    rtw88_trigger_interrupt();
+}
+
+/* The datapath thread, RTW89_GLUE_PPDU_WAIT after a poll left frames parked. */
+static void glue_ppdu_flush_work(struct work_struct *work)
+{
+    if (glue.up && glue.ppdu_flush)
+        glue.ppdu_flushed += rtw89_compat_flush_ppdu_rx(glue_hw()->priv);
+}
+
+/* The datapath thread, after every NAPI poll. */
+static void glue_napi_post_poll(int done)
+{
+    struct rtw89_dev *rtwdev;
+
+    if (!glue.up || !glue.ppdu_flush)
+        return;
+    rtwdev = glue_hw()->priv;
+    if (!skb_queue_empty(&rtwdev->ppdu_sts.rx_queue[RTW89_PHY_0]))
+        rtw88_queue_datapath_delayed_work(&glue.ppdu_flush_work, RTW89_GLUE_PPDU_WAIT);
+}
+
+void rtw89_glue_set_ppdu_flush(bool on)
+{
+    glue.ppdu_flush = on;
+}
+
+/* Measure how late a frame is, by the chip's own receive timestamp. */
+static void glue_rx_timing(const struct ieee80211_rx_status *status)
+{
+    u64 now = glue_now_us();
+    u32 offset = (u32)now - (u32)status->mactime;
+    u32 base;
+    s32 late;
+
+    /* a new window every five seconds */
+    if (now - glue.rx_base_since > 5000000) {
+        glue.rx_base_prev = glue.rx_base;
+        glue.rx_base_prev_valid = glue.rx_base_valid;
+        glue.rx_base_valid = false;
+        glue.rx_base_since = now;
+    }
+    if (!glue.rx_base_valid || (s32)(offset - glue.rx_base) < 0) {
+        glue.rx_base = offset;
+        glue.rx_base_valid = true;
+    }
+    base = glue.rx_base;
+    if (glue.rx_base_prev_valid && (s32)(glue.rx_base_prev - base) < 0)
+        base = glue.rx_base_prev;
+
+    late = (s32)(offset - base);
+    if (late > RTW89_GLUE_LATE_US) {
+        u64 arrived = now - (u32)late;
+        unsigned int i;
+
+        glue.rx_late++;
+        if ((u32)late / 1000 > glue.rx_late_max)
+            glue.rx_late_max = (u32)late / 1000;
+        /* did the chip interrupt us when it arrived? then it was read from
+         * the ring at once and waited inside the driver */
+        for (i = 0; i < ARRAY_SIZE(glue.irq_time); i++) {
+            if (glue.irq_time[i] + 1000 >= arrived && glue.irq_time[i] <= arrived + 3000) {
+                glue.rx_late_irq++;
+                break;
+            }
+        }
+    }
 }
 
 bool rtw89_glue_get_info(struct rtw89_glue_info *info)
@@ -568,6 +666,9 @@ static void glue_rx(void *ctx, struct ieee80211_sta *sta, struct sk_buff *skb)
         return;
     }
 
+    if (status->flag & RX_FLAG_MACTIME_START)
+        glue_rx_timing(status);
+
     if (ieee80211_is_beacon(hdr->frame_control) ||
         ieee80211_is_probe_resp(hdr->frame_control)) {
         /* The driver leaves the FCS on (RX_INCLUDES_FCS). */
@@ -616,17 +717,17 @@ static void glue_link_event(void *ctx, struct ieee80211_vif *vif,
  * Feed one received 802.11 frame (without FCS) through the same path the
  * driver uses. For the userspace smoke test, which plays the access point.
  */
-void rtw89_glue_test_rx(const u8 *frame, size_t len, u16 freq, s8 signal, bool decrypted);
-void rtw89_glue_test_rx(const u8 *frame, size_t len, u16 freq, s8 signal, bool decrypted)
+static struct sk_buff *glue_test_skb(const u8 *frame, size_t len, u16 freq, s8 signal,
+                                     bool decrypted)
 {
     struct ieee80211_rx_status *status;
     struct sk_buff *skb;
 
     if (!glue.probed)
-        return;
+        return NULL;
     skb = dev_alloc_skb(len + FCS_LEN);
     if (!skb)
-        return;
+        return NULL;
     skb_put_data(skb, frame, len);
     skb_put_zero(skb, FCS_LEN);
     status = IEEE80211_SKB_RXCB(skb);
@@ -635,7 +736,35 @@ void rtw89_glue_test_rx(const u8 *frame, size_t len, u16 freq, s8 signal, bool d
     status->signal = signal;
     if (decrypted)
         status->flag |= RX_FLAG_DECRYPTED;
-    ieee80211_rx_napi(glue_hw(), NULL, skb, NULL);
+    return skb;
+}
+
+void rtw89_glue_test_rx(const u8 *frame, size_t len, u16 freq, s8 signal, bool decrypted);
+void rtw89_glue_test_rx(const u8 *frame, size_t len, u16 freq, s8 signal, bool decrypted)
+{
+    struct sk_buff *skb = glue_test_skb(frame, len, freq, signal, decrypted);
+
+    if (skb)
+        ieee80211_rx_napi(glue_hw(), NULL, skb, NULL);
+}
+
+/*
+ * The same, but the frame is left where rtw89_core_rx() leaves a data frame
+ * whose PPDU status report has not arrived, followed by the end of a poll.
+ */
+void rtw89_glue_test_rx_parked(const u8 *frame, size_t len, u16 freq, s8 signal,
+                               bool decrypted);
+void rtw89_glue_test_rx_parked(const u8 *frame, size_t len, u16 freq, s8 signal,
+                               bool decrypted)
+{
+    struct sk_buff *skb = glue_test_skb(frame, len, freq, signal, decrypted);
+    struct rtw89_dev *rtwdev;
+
+    if (!skb)
+        return;
+    rtwdev = glue_hw()->priv;
+    skb_queue_tail(&rtwdev->ppdu_sts.rx_queue[RTW89_PHY_0], skb);
+    glue_napi_post_poll(0);
 }
 
 static void glue_tx_status(void *ctx, struct sk_buff *skb)
@@ -725,7 +854,10 @@ int rtw89_glue_up(void)
     rtw89_mlme_start(hw, glue.vif, glue_link_notify);
     wiphy_unlock(hw->wiphy);
 
+    INIT_DELAYED_WORK(&glue.ppdu_flush_work, glue_ppdu_flush_work);
+    glue.ppdu_flush = true;
     glue.up = true;
+    rtw88_napi_post_poll = glue_napi_post_poll;
     return 0;
 
 err_unlock:
@@ -745,6 +877,8 @@ void rtw89_glue_down(void)
     if (!glue.up)
         return;
     glue.up = false;
+    rtw88_napi_post_poll = NULL;
+    cancel_delayed_work_sync(&glue.ppdu_flush_work);
 
     hw = glue_hw();
     local = hw_to_local(hw);
@@ -1002,6 +1136,11 @@ void rtw89_glue_link(struct rtw89_glue_link *link)
     link->rx_replay = stats.rx_replay;
     link->rx_dup = stats.rx_dup;
     link->rx_reorder_timeout = stats.rx_reorder_timeout;
+    link->rx_late = glue.rx_late;
+    link->rx_late_irq = glue.rx_late_irq;
+    link->rx_late_max_ms = glue.rx_late_max;
+    link->rx_ppdu_flushed = glue.ppdu_flushed;
+    link->ppdu_flush = glue.ppdu_flush;
     if (!glue.up)
         return;
 

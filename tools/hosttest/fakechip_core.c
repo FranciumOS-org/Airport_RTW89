@@ -1,6 +1,6 @@
 // SPDX-License-Identifier: GPL-2.0
 /*
- * core.c with rtw89_chip_info_setup() replaced, for the second smoke-test
+ * core.c (through its wrapper) with rtw89_chip_info_setup() replaced, for the second smoke-test
  * binary (hosttest_fakechip).
  *
  * The real function powers the chip on, downloads firmware and reads the
@@ -14,7 +14,7 @@
 #define rtw89_chip_info_setup rtw89_real_chip_info_setup
 #define rtw89_core_start rtw89_real_core_start
 #define rtw89_core_stop rtw89_real_core_stop
-#include "core.c"
+#include "rtw89_core_wrap.c"
 #undef rtw89_chip_info_setup
 #undef rtw89_core_start
 #undef rtw89_core_stop

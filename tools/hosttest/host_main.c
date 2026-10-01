@@ -34,6 +34,9 @@ void rtw89_glue_note_bss(const uint8_t *frame, size_t len, uint16_t freq, int8_t
 
 void rtw89_glue_test_rx(const uint8_t *frame, size_t len, uint16_t freq, int8_t signal,
                         bool decrypted);
+/* ... left waiting for the chip's status report, as the driver leaves data frames */
+void rtw89_glue_test_rx_parked(const uint8_t *frame, size_t len, uint16_t freq, int8_t signal,
+                               bool decrypted);
 /* src/compat_rtw89/rtw89_mlme.c and rtw89_data.c: see every management and
  * data frame the station transmits */
 void rtw89_mlme_set_tx_tap(void (*tap)(const uint8_t *frame, size_t len));
@@ -581,6 +584,30 @@ static int test_data(void)
     rtw89_glue_link(&link);
     EXPECT(link.tx_frames >= 3 && link.rx_frames >= 7 && link.rx_replay >= 2 &&
            link.rx_undecrypted >= 1);
+
+    /* A frame the driver is holding for a status report that never comes is
+     * passed on after a couple of milliseconds, not at the next reception. */
+    {
+        uint8_t frame[26 + 8 + sizeof(body) + 8];
+
+        memset(frame, 0, sizeof(frame));
+        frame[0] = 0x88; frame[1] = 0x42;
+        memcpy(frame + 4, sta_mac, 6);
+        memcpy(frame + 10, ap_mac, 6);
+        memcpy(frame + 16, peer_mac, 6);
+        frame[22] = 0x10; frame[23] = 0x07;                 /* sequence number 113 */
+        frame[24] = 0x01;                                   /* TID 1 */
+        frame[26] = (uint8_t)(pn + 50); frame[27] = (uint8_t)((pn + 50) >> 8);
+        frame[29] = 0x20; frame[30] = (uint8_t)((pn + 50) >> 16);
+        memcpy(frame + 34, body, sizeof(body));
+        n = sta_rx.count;
+        rtw89_glue_test_rx_parked(frame, sizeof(frame), 2437, -40, true);
+        EXPECT(sta_rx.count == n);
+        usleep(100 * 1000);
+        EXPECT(sta_rx.count == n + 1 && sta_rx.len == 14 + sizeof(test_ip));
+        rtw89_glue_link(&link);
+        EXPECT(link.rx_ppdu_flushed == 1 && link.ppdu_flush);
+    }
 
 #undef EXPECT
     printf("== data path test: %d failure(s)\n", failures);

@@ -26,3 +26,4 @@
 | `linux/skbuff.h` | `skb_copy` allocated only `len + headroom` (+64 bytes of slack), so the copy lost the original's tailroom; rtw89 appends probe-request IEs to such a copy (`rtw89_append_probe_req_ie`) and would have written past the buffer. It now keeps head- and tailroom and the metadata fields, like Linux. | ⬆ |
 | `linux/skbuff.h`, `rtw88_compat.c` | `skb_put` / `skb_push` check the room and stop (`rtw88_skb_panic`) instead of silently corrupting the heap, as Linux's `skb_over_panic` does. | ⬆ |
 | `linux/skbuff.h` | `dev_alloc_skb` / `netdev_alloc_skb` reserve `NET_SKB_PAD` (64) bytes of headroom like Linux. | — |
+| `rtw88_compat.c` | New hook `rtw88_napi_post_poll` (called on the datapath thread after every NAPI poll) and `rtw88_queue_datapath_delayed_work()` (queue work on that thread). rtw89 uses them to pass on received frames the driver is holding for a PPDU status report that does not come; see `src/compat_rtw89/rtw89_core_wrap.c`. | — |

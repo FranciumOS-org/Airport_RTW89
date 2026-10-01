@@ -37,7 +37,9 @@ IOSkywalkFamily block, AMFIPass) is only needed from M2.
   that would have been panics; add to `tools/hosttest/` when adding compat code, and
   never load a kext whose hosttest fails.
 - Never edit `third_party/rtw89/` or `third_party/linux-include/` (vendored upstream,
-  see their UPSTREAM.md). Fix things in `src/compat_rtw89/` (new) or `src/compat/`
+  see their UPSTREAM.md). `third_party/rtw89/core.c` is compiled through
+  `src/compat_rtw89/rtw89_core_wrap.c`, which includes it unchanged and adds code that
+  needs its static functions; put such code there. Fix things in `src/compat_rtw89/` (new) or `src/compat/`
   (inherited; log every change in docs/COMPAT-CHANGES.md).
 - rtw89 builds against the real `net/cfg80211.h` / `net/mac80211.h`. When the driver
   needs a mac80211/cfg80211 function, implement it in `src/compat_rtw89/rtw89_mac80211.c`
