@@ -1,0 +1,109 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+	<key>CFBundleDevelopmentRegion</key>
+	<string>English</string>
+	<key>CFBundleExecutable</key>
+	<string>AirPort_RTW88</string>
+	<key>CFBundleIdentifier</key>
+	<string>com.rtw88.airport</string>
+	<key>CFBundleInfoDictionaryVersion</key>
+	<string>6.0</string>
+	<key>CFBundleName</key>
+	<string>AirPort_RTW88</string>
+	<key>CFBundleDisplayName</key>
+	<string>AirPort_RTW88 for RTL88xx</string>
+	<key>CFBundleGetInfoString</key>
+	<string>AirPort_RTW88 2.0.0 — hibernation-safe power-management build</string>
+	<key>CFBundlePackageType</key>
+	<string>KEXT</string>
+	<key>CFBundleShortVersionString</key>
+	<string>2.0.0</string>
+	<key>CFBundleVersion</key>
+	<string>2.0.0</string>
+	<key>CFBundleSupportedPlatforms</key>
+	<array>
+		<string>MacOSX</string>
+	</array>
+	<key>LSMinimumSystemVersion</key>
+	<string>13.0</string>
+	<key>CFBundleSignature</key>
+	<string>????</string>
+	<key>NSHumanReadableCopyright</key>
+	<string>GPL-2.0 OR BSD-3-Clause</string>
+	<key>OSBundleCompatibleVersion</key>
+	<string>1.0.0</string>
+	<key>OSBundleRequired</key>
+	<string>Network-Root</string>
+	<key>OSBundleLibraries</key>
+	<dict>
+		<key>com.apple.iokit.IO80211FamilyLegacy</key>
+		<string>12.0</string>
+		<key>com.apple.iokit.IONetworkingFamily</key>
+		<string>3.4</string>
+		<key>com.apple.iokit.IOPCIFamily</key>
+		<string>2.9</string>
+		<key>com.apple.iokit.IOSkywalkFamily</key>
+		<string>1.0</string>
+		<key>com.apple.kpi.bsd</key>
+		<string>20.0.0</string>
+		<key>com.apple.kpi.iokit</key>
+		<string>20.0.0</string>
+		<key>com.apple.kpi.libkern</key>
+		<string>20.0.0</string>
+		<key>com.apple.kpi.mach</key>
+		<string>20.0.0</string>
+		<key>com.apple.kpi.unsupported</key>
+		<string>20.0.0</string>
+	</dict>
+	<key>IOKitPersonalities</key>
+	<dict>
+		<key>AirPort_RTW88_8822BE</key>
+		<dict>
+			<key>CFBundleIdentifier</key>
+			<string>com.rtw88.airport</string>
+			<key>IOClass</key>
+			<string>AirportRTW88</string>
+			<key>IOMatchCategory</key>
+			<string>IODefaultMatchCategory</string>
+			<key>IOProbeScore</key>
+			<integer>5000</integer>
+			<key>IOProviderClass</key>
+			<string>IOPCIDevice</string>
+			<key>IOPCIMatch</key>
+			<string>0xB82210EC</string>
+		</dict>
+		<key>AirPort_RTW88_8822CE</key>
+		<dict>
+			<key>CFBundleIdentifier</key>
+			<string>com.rtw88.airport</string>
+			<key>IOClass</key>
+			<string>AirportRTW88</string>
+			<key>IOMatchCategory</key>
+			<string>IODefaultMatchCategory</string>
+			<key>IOProbeScore</key>
+			<integer>5000</integer>
+			<key>IOProviderClass</key>
+			<string>IOPCIDevice</string>
+			<key>IOPCIMatch</key>
+			<string>0xC82210EC 0xC82F10EC</string>
+		</dict>
+		<key>AirPort_RTW88_8821CE</key>
+		<dict>
+			<key>CFBundleIdentifier</key>
+			<string>com.rtw88.airport</string>
+			<key>IOClass</key>
+			<string>AirportRTW88</string>
+			<key>IOMatchCategory</key>
+			<string>IODefaultMatchCategory</string>
+			<key>IOProbeScore</key>
+			<integer>5000</integer>
+			<key>IOProviderClass</key>
+			<string>IOPCIDevice</string>
+			<key>IOPCIMatch</key>
+			<string>0xC82110EC 0xB82110EC</string>
+		</dict>
+	</dict>
+</dict>
+</plist>
