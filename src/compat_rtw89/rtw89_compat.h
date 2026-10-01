@@ -536,6 +536,37 @@ u64 rtw89_compat_ktime_ns(void);
 static inline s64 ktime_us_delta(ktime_t later, ktime_t earlier) { return (later - earlier) / 1000; }
 static inline s64 ktime_ms_delta(ktime_t later, ktime_t earlier) { return (later - earlier) / 1000000; }
 
+/*
+ * The inherited read_poll_timeout() busy-waits between polls. This is the
+ * sleeping variant (read_poll_timeout_atomic is the one that must spin), and
+ * rtw89 polls for up to seconds with it, so sleep like Linux does.
+ */
+#undef read_poll_timeout
+#define read_poll_timeout(op, val, cond, sleep_us, timeout_us,              \
+                          sleep_before_read, args...)                        \
+({                                                                           \
+    u64 __timeout_us = (timeout_us);                                         \
+    unsigned long __sleep_us = (sleep_us);                                   \
+    u64 __end = rtw89_compat_ktime_ns() + __timeout_us * 1000ULL;            \
+    int __ret = 0;                                                           \
+    if ((sleep_before_read) && __sleep_us)                                   \
+        usleep_range((__sleep_us >> 2) + 1, __sleep_us);                     \
+    for (;;) {                                                               \
+        (val) = op(args);                                                    \
+        if (cond)                                                            \
+            break;                                                           \
+        if (__timeout_us && rtw89_compat_ktime_ns() > __end) {               \
+            (val) = op(args);                                                \
+            if (!(cond))                                                     \
+                __ret = -ETIMEDOUT;                                          \
+            break;                                                           \
+        }                                                                    \
+        if (__sleep_us)                                                      \
+            usleep_range((__sleep_us >> 2) + 1, __sleep_us);                 \
+    }                                                                        \
+    __ret;                                                                   \
+})
+
 /* hrtimer: only embedded in cfg80211's wiphy_hrtimer_work, which rtw89 does not use. */
 enum hrtimer_restart { HRTIMER_NORESTART, HRTIMER_RESTART };
 enum hrtimer_mode { HRTIMER_MODE_ABS, HRTIMER_MODE_REL };
@@ -678,6 +709,17 @@ static inline void rfkill_resume_polling(struct rfkill *rfkill) { }
 #undef PCI_EXP_DEVCTL2_COMP_TMOUT_DIS
 #include <linux/pci_regs.h>
 #include <linux/pci_ids.h>
+
+/*
+ * There is no PCI bus core to register with. module_pci_driver() instead
+ * exports the driver so the platform glue (rtw89_glue.c) can match the device
+ * against its id_table and call probe/remove itself. One PCI front end
+ * (rtw8852be.c) is built in, so one accessor is enough.
+ */
+#undef module_pci_driver
+#define module_pci_driver(__pci_driver) \
+    struct pci_driver *rtw89_compat_pci_driver(void) { return &(__pci_driver); }
+struct pci_driver *rtw89_compat_pci_driver(void);
 
 /* Walk the PCIe extended capability list (config space 0x100 and up). */
 static inline u16 pci_find_ext_capability(struct pci_dev *dev, int cap)

@@ -80,7 +80,9 @@ static int rtw88_decompress(uint8_t *dest, uint32_t *dest_len,
         IOLog("rtw88: inflate error %d (avail_in=%u avail_out=%u)\n",
               err, zs.avail_in, zs.avail_out);
         inflateEnd(&zs);
-        return err;
+        /* Not Z_STREAM_END is a failure even when zlib says Z_OK (0), which
+         * the caller would take for success and hand out a half-filled image. */
+        return err ? err : Z_BUF_ERROR;
     }
 
     *dest_len = (uint32_t)zs.total_out;
