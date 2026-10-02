@@ -26,8 +26,10 @@
 #include <IOKit/network/IOOutputQueue.h>
 #include <IOKit/network/IONetworkStats.h>
 #include <IOKit/pci/IOPCIDevice.h>
+#include <kern/thread_call.h>
 
 #include "rtw89_glue.h"
+#include "../front/rtw89_front_api.h"
 
 class AirPort_RTW89 : public IOEthernetController {
     OSDeclareDefaultStructors(AirPort_RTW89)
@@ -81,6 +83,43 @@ private:
     static void rxFrame(void *ctx, const uint8_t *frame, size_t len);
     static void txWake(void *ctx);
     bool transmit(mbuf_t m);
+
+    /* Native Wi-Fi (AirPortRTW89Native.cpp): connected to AirPortRTW89Front
+     * instead of publishing an Ethernet interface. */
+    struct NativeState;
+    bool connectFront();
+    void disconnectFront();
+    void nativeRxFrame(const uint8_t *frame, size_t len);
+    void nativeTxWake();
+    void nativeLink(const struct rtw89_glue_link &link);
+    void nativeNotify(UInt32 events);
+    void nativeEvents();
+    static void nativeEventsCall(thread_call_param_t self, thread_call_param_t);
+    void nativePost(unsigned int msg, void *data = nullptr, size_t len = 0);
+    int nativeRequest(bool isSet, int number, void *data);
+    int nativeAssociate(void *data);
+    static void scanDone(void *ctx, bool aborted);
+    static void backGetMac(void *ctx, uint8_t mac[6]);
+    static int backSetMac(void *ctx, const uint8_t mac[6]);
+    static int backRequest(void *ctx, unsigned int type, int number, void *interface, void *data);
+    static int backIoctl(void *ctx, void *interface, void *vif, void *ifnet, unsigned long cmd,
+                         void *data, bool *handled);
+    static int backIoctlSet(void *ctx, void *interface, void *vif, void *skywalk, void *data,
+                            bool *handled);
+    static int backEnable(void *ctx, bool on);
+    static uint32_t backOutput(void *ctx, mbuf_t m);
+    static void backPower(void *ctx, bool on);
+
+    bool _native = false;
+    /* Link changes and finished scans reach IO80211 from a thread of their
+     * own: the driver reports them with its locks held, and IO80211 may be
+     * waiting for those very locks inside a request of its own. */
+    thread_call_t _nativeCall = nullptr;
+    volatile UInt32 _nativeEvents = 0;
+    volatile bool _nativeClosing = false;
+    volatile SInt32 _nativeRunning = 0;
+    IOService *_front = nullptr;
+    NativeState *_ns = nullptr;
 
     IOPCIDevice *_pci = nullptr;
     IOMemoryMap *_mmio = nullptr;

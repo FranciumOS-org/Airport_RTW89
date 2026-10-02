@@ -63,6 +63,8 @@ static struct {
     /* radio up: one station interface */
     bool up;
     struct ieee80211_vif *vif;
+    bool have_mac;                      /* rtw89_glue_set_mac() */
+    u8 mac[ETH_ALEN];
 
     /* scan */
     bool scanning;
@@ -973,6 +975,8 @@ static void glue_scan_done(void *ctx, bool aborted)
     /* the attempt to get the network back was waiting for this */
     if (glue.rejoining)
         glue_rejoin_queue(0);
+    if (glue.plat.scan_done)
+        glue.plat.scan_done(glue.plat.ctx, aborted);
 }
 
 /* For the userspace smoke test, whose pretend chip never finishes a scan. */
@@ -1094,7 +1098,8 @@ static int glue_up_locked(void)
     local = hw_to_local(hw);
     rtw89_m80211_set_glue(hw, &glue_m80211_ops, NULL);
 
-    glue.vif = rtw89_m80211_vif_alloc(hw, NL80211_IFTYPE_STATION, hw->wiphy->perm_addr);
+    glue.vif = rtw89_m80211_vif_alloc(hw, NL80211_IFTYPE_STATION,
+                                      glue.have_mac ? glue.mac : hw->wiphy->perm_addr);
     if (!glue.vif)
         return -ENOMEM;
 
@@ -1140,11 +1145,10 @@ static void glue_forget_network(void)
     memset(glue.want.pmk, 0, sizeof(glue.want.pmk));
 }
 
+static void glue_down_locked(void);
+
 void rtw89_glue_down(void)
 {
-    struct rtw89_m80211_local *local;
-    struct ieee80211_hw *hw;
-
     if (!glue.active)
         return;
     /* before the lock: the work takes it too */
@@ -1152,10 +1156,17 @@ void rtw89_glue_down(void)
     cancel_delayed_work_sync(&glue.rejoin_work);
 
     mutex_lock(&glue.cmd_lock);
-    if (!glue.up) {
-        mutex_unlock(&glue.cmd_lock);
+    glue_down_locked();
+    mutex_unlock(&glue.cmd_lock);
+}
+
+static void glue_down_locked(void)
+{
+    struct rtw89_m80211_local *local;
+    struct ieee80211_hw *hw;
+
+    if (!glue.up)
         return;
-    }
     glue.up = false;
     rtw88_napi_post_poll = NULL;
     cancel_delayed_work_sync(&glue.ppdu_flush_work);
@@ -1180,7 +1191,32 @@ void rtw89_glue_down(void)
     glue.vif = NULL;
     /* the driver is stopped: nothing can still be using what was freed */
     rtw89_m80211_reap(hw, true);
+}
+
+int rtw89_glue_set_mac(const uint8_t mac[6])
+{
+    int ret = 0;
+
+    if (!glue.probed)
+        return -ENODEV;
+    if (is_multicast_ether_addr(mac) || is_zero_ether_addr(mac))
+        return -EINVAL;
+
+    glue_forget_network();
+    cancel_delayed_work_sync(&glue.rejoin_work);
+    mutex_lock(&glue.cmd_lock);
+    if (!glue.have_mac || !ether_addr_equal(glue.mac, mac)) {
+        bool was_up = glue.up;
+
+        /* the interface gets its address when it is added */
+        glue_down_locked();
+        memcpy(glue.mac, mac, ETH_ALEN);
+        glue.have_mac = true;
+        if (was_up)
+            ret = glue_up_locked();
+    }
     mutex_unlock(&glue.cmd_lock);
+    return ret;
 }
 
 /* ------------------------------------------------------------------ */
@@ -1314,6 +1350,81 @@ unsigned int rtw89_glue_scan_results(struct rtw89_glue_bss *out, unsigned int ma
     return n;
 }
 
+static void glue_copy_entry(const struct rtw89_glue_bss_entry *e, struct rtw89_glue_bss *out,
+                            uint8_t *ies, size_t ies_max, size_t *ies_len, uint16_t *beacon_int)
+{
+    size_t n = min_t(size_t, e->ies_len, ies_max);
+
+    if (out)
+        *out = e->pub;
+    if (ies && n)
+        memcpy(ies, e->ies, n);
+    if (ies_len)
+        *ies_len = ies ? n : 0;
+    if (beacon_int)
+        *beacon_int = e->beacon_int;
+}
+
+bool rtw89_glue_scan_entry(unsigned int index, struct rtw89_glue_bss *out, uint8_t *ies,
+                           size_t ies_max, size_t *ies_len, uint16_t *beacon_int)
+{
+    bool found = false;
+
+    if (!glue.active)
+        return false;
+    spin_lock(&glue.bss_lock);
+    if (index < glue.n_bss) {
+        glue_copy_entry(&glue.bss[index], out, ies, ies_max, ies_len, beacon_int);
+        found = true;
+    }
+    spin_unlock(&glue.bss_lock);
+    return found;
+}
+
+bool rtw89_glue_find_bss(const uint8_t bssid[6], struct rtw89_glue_bss *out, uint8_t *ies,
+                         size_t ies_max, size_t *ies_len, uint16_t *beacon_int)
+{
+    bool found = false;
+    unsigned int i;
+
+    if (!glue.active)
+        return false;
+    spin_lock(&glue.bss_lock);
+    for (i = 0; i < glue.n_bss && !found; i++) {
+        if (ether_addr_equal(glue.bss[i].pub.bssid, bssid)) {
+            glue_copy_entry(&glue.bss[i], out, ies, ies_max, ies_len, beacon_int);
+            found = true;
+        }
+    }
+    spin_unlock(&glue.bss_lock);
+    return found;
+}
+
+unsigned int rtw89_glue_channels(struct rtw89_glue_channel *out, unsigned int max)
+{
+    struct ieee80211_supported_band *sband;
+    unsigned int n = 0;
+    int band, i;
+
+    if (!glue.probed)
+        return 0;
+    for (band = 0; band < NUM_NL80211_BANDS; band++) {
+        sband = glue_hw()->wiphy->bands[band];
+        for (i = 0; sband && i < sband->n_channels && n < max; i++) {
+            const struct ieee80211_channel *chan = &sband->channels[i];
+
+            if (chan->flags & IEEE80211_CHAN_DISABLED)
+                continue;
+            out[n].freq = (u16)chan->center_freq;
+            out[n].channel = (u8)chan->hw_value;
+            out[n].passive = !!(chan->flags & IEEE80211_CHAN_NO_IR);
+            out[n].radar = !!(chan->flags & IEEE80211_CHAN_RADAR);
+            n++;
+        }
+    }
+    return n;
+}
+
 /* ------------------------------------------------------------------ */
 /*  Join / leave                                                        */
 /* ------------------------------------------------------------------ */
@@ -1350,7 +1461,7 @@ static int glue_derive_pmk(const u8 *ssid, size_t ssid_len,
 }
 
 /* Join the strongest access point of the last scan that has this name. */
-static int glue_join_locked(const u8 *ssid, size_t ssid_len, const u8 *pmk)
+static int glue_join_locked(const u8 *ssid, size_t ssid_len, const u8 *bssid, const u8 *pmk)
 {
     static u8 ies[RTW89_GLUE_MAX_IES];  /* under cmd_lock */
     struct rtw89_glue_bss_entry *best = NULL;
@@ -1365,6 +1476,8 @@ static int glue_join_locked(const u8 *ssid, size_t ssid_len, const u8 *pmk)
 
         if (e->pub.ssid_len != ssid_len || memcmp(e->pub.ssid, ssid, ssid_len) ||
             !e->ies_len)
+            continue;
+        if (bssid && !ether_addr_equal(e->pub.bssid, bssid))
             continue;
         if (!best || e->pub.signal > best->pub.signal)
             best = e;
@@ -1391,24 +1504,10 @@ static int glue_join_locked(const u8 *ssid, size_t ssid_len, const u8 *pmk)
     return ret;
 }
 
-int rtw89_glue_join(const uint8_t *ssid, size_t ssid_len,
-                    const char *passphrase, size_t passphrase_len)
+static int glue_join_request(const u8 *ssid, size_t ssid_len, const u8 *bssid, const u8 *pmk)
 {
     typeof(glue.want) old;
-    bool have_pmk = false;
-    u8 pmk[32];
     int ret;
-
-    if (!glue.up)
-        return -ENETDOWN;
-    if (!ssid_len || ssid_len > IEEE80211_MAX_SSID_LEN)
-        return -EINVAL;
-    if (passphrase && passphrase_len) {
-        ret = glue_derive_pmk(ssid, ssid_len, passphrase, passphrase_len, pmk);
-        if (ret)
-            return ret;
-        have_pmk = true;
-    }
 
     mutex_lock(&glue.cmd_lock);
     if (!glue.up) {
@@ -1432,12 +1531,12 @@ int rtw89_glue_join(const uint8_t *ssid, size_t ssid_len,
     memset(&glue.want, 0, sizeof(glue.want));
     memcpy(glue.want.ssid, ssid, ssid_len);
     glue.want.ssid_len = (u8)ssid_len;
-    glue.want.have_pmk = have_pmk;
-    if (have_pmk)
-        memcpy(glue.want.pmk, pmk, sizeof(pmk));
+    glue.want.have_pmk = pmk != NULL;
+    if (pmk)
+        memcpy(glue.want.pmk, pmk, sizeof(glue.want.pmk));
     glue.want.valid = true;
 
-    ret = glue_join_locked(ssid, ssid_len, have_pmk ? pmk : NULL);
+    ret = glue_join_locked(ssid, ssid_len, bssid, pmk);
     if (ret)
         glue.want = old;
     else
@@ -1445,8 +1544,39 @@ int rtw89_glue_join(const uint8_t *ssid, size_t ssid_len,
     memset(&old, 0, sizeof(old));
 out:
     mutex_unlock(&glue.cmd_lock);
+    return ret;
+}
+
+int rtw89_glue_join(const uint8_t *ssid, size_t ssid_len,
+                    const char *passphrase, size_t passphrase_len)
+{
+    bool have_pmk = false;
+    u8 pmk[32];
+    int ret;
+
+    if (!glue.up)
+        return -ENETDOWN;
+    if (!ssid_len || ssid_len > IEEE80211_MAX_SSID_LEN)
+        return -EINVAL;
+    if (passphrase && passphrase_len) {
+        ret = glue_derive_pmk(ssid, ssid_len, passphrase, passphrase_len, pmk);
+        if (ret)
+            return ret;
+        have_pmk = true;
+    }
+    ret = glue_join_request(ssid, ssid_len, NULL, have_pmk ? pmk : NULL);
     memset(pmk, 0, sizeof(pmk));
     return ret;
+}
+
+int rtw89_glue_join_pmk(const uint8_t *ssid, size_t ssid_len, const uint8_t *bssid,
+                        const uint8_t *pmk)
+{
+    if (!glue.up)
+        return -ENETDOWN;
+    if (!ssid_len || ssid_len > IEEE80211_MAX_SSID_LEN)
+        return -EINVAL;
+    return glue_join_request(ssid, ssid_len, bssid, pmk);
 }
 
 void rtw89_glue_leave(void)
@@ -1502,7 +1632,7 @@ static void glue_rejoin_work(struct work_struct *work)
 
     glue.rejoin_scanned = false;
     glue.rejoin_tries++;
-    ret = glue_join_locked(glue.want.ssid, glue.want.ssid_len,
+    ret = glue_join_locked(glue.want.ssid, glue.want.ssid_len, NULL,
                            glue.want.have_pmk ? glue.want.pmk : NULL);
     if (ret) {
         IOLog("[rtw89] attempt %u to join \"%.*s\" again failed: %d\n", glue.rejoin_tries,
@@ -1599,6 +1729,12 @@ void rtw89_glue_link(struct rtw89_glue_link *link)
     memcpy(link->ssid, st.ssid, sizeof(link->ssid));
     link->freq = st.freq;
     link->aid = st.aid;
+    if (st.state != RTW89_MLME_IDLE) {
+        struct rtw89_glue_bss bss;
+
+        if (rtw89_glue_find_bss(st.bssid, &bss, NULL, 0, NULL, NULL))
+            link->signal = bss.signal;
+    }
     link->width = st.width;
     link->center_freq = st.center_freq;
     link->mode = st.mode;
