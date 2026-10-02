@@ -588,11 +588,27 @@ void AirPort_RTW89::linkChanged(void *ctx)
     static_cast<AirPort_RTW89 *>(ctx)->publishLink();
 }
 
+/* "1201.0 Mb/s (802.11ax MCS 11, 2 streams, 80 MHz)", or nothing when unknown. */
+static void describeRate(const struct rtw89_glue_rate &rate, char *buf, size_t len)
+{
+    static const char *const kModes[] = { "802.11a/b/g", "802.11n", "802.11ac", "802.11ax" };
+
+    buf[0] = 0;
+    if (!rate.kbps)
+        return;
+    if (rate.mode == 0)
+        snprintf(buf, len, "%u.%u Mb/s (802.11a/b/g)", rate.kbps / 1000, rate.kbps % 1000 / 100);
+    else
+        snprintf(buf, len, "%u.%u Mb/s (%s MCS %u, %u stream%s, %u MHz)", rate.kbps / 1000,
+                 rate.kbps % 1000 / 100, kModes[rate.mode & 3], rate.mcs, rate.nss,
+                 rate.nss == 1 ? "" : "s", rate.width);
+}
+
 void AirPort_RTW89::publishLink()
 {
     static const char *const kStates[] = { "down", "joining", "associated", "connected" };
     struct rtw89_glue_link link;
-    char bssid[18];
+    char bssid[18], rate[80];
 
     rtw89_glue_link(&link);
     snprintf(bssid, sizeof(bssid), "%02x:%02x:%02x:%02x:%02x:%02x", link.bssid[0],
@@ -623,6 +639,18 @@ void AirPort_RTW89::publishLink()
     setProperty("RTW89 AX Allowed", link.ax);
     setProperty("RTW89 TX Aggregation", link.tx_ba, 32);
     setProperty("RTW89 RX Aggregation", link.rx_ba, 32);
+    describeRate(link.tx_rate, rate, sizeof(rate));
+    setProperty("RTW89 TX Rate", rate);
+    describeRate(link.rx_rate, rate, sizeof(rate));
+    setProperty("RTW89 RX Rate", rate);
+    setProperty("RTW89 Beacons", link.beacons, 32);
+    setProperty("RTW89 Beacon Losses", link.beacon_losses, 32);
+    setProperty("RTW89 Beacon Updates", link.beacon_updates, 32);
+    setProperty("RTW89 Probe Acks", link.probe_acks, 32);
+    setProperty("RTW89 Rejoin", link.rejoin);
+    setProperty("RTW89 Rejoining", link.rejoining);
+    setProperty("RTW89 Rejoin Tries", link.rejoin_tries, 32);
+    setProperty("RTW89 Rejoins", link.rejoins, 32);
 
     /* The stack starts DHCP when the link comes up and forgets its addresses
      * when it goes down. */
@@ -687,6 +715,12 @@ IOReturn AirPort_RTW89::setProperties(OSObject *properties)
         rtw89_glue_set_ppdu_flush(command->isEqualTo("flush-on"));
     } else if (command->isEqualTo("ax-on") || command->isEqualTo("ax-off")) {
         rtw89_glue_set_ax(command->isEqualTo("ax-on"));
+    } else if (command->isEqualTo("rejoin-on") || command->isEqualTo("rejoin-off")) {
+        rtw89_glue_set_rejoin(command->isEqualTo("rejoin-on"));
+    } else if (command->isEqualTo("probe")) {
+        rtw89_glue_probe_ap();
+    } else if (command->isEqualTo("drop")) {
+        rtw89_glue_drop();
     } else if (command->isEqualTo("leave")) {
         rtw89_glue_leave();
     } else if (command->isEqualTo("results")) {

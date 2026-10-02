@@ -10,7 +10,10 @@
  * and 802.11ax on channels up to 80 MHz wide; WPA2-PSK with CCMP: the
  * supplicant side of the 4-way and group key handshakes (IEEE 802.11
  * 12.7.6/12.7.7) and installing the keys in the driver; BlockAck sessions.
- * Data frames are rtw89_data.c's. Beacons are not followed after the join.
+ * Data frames are rtw89_data.c's. While connected: the AP is probed when the
+ * driver reports missed beacons, and its beacons are watched for changed
+ * parameters and for a move to another channel (which is answered by leaving;
+ * the glue joins again).
  *
  * Everything runs under the wiphy mutex, as in mac80211: commands take it,
  * received frames are queued and handled from a wiphy work.
@@ -23,6 +26,8 @@
 #define MLME_MAX_TRIES      3
 #define MLME_KEY_TIMEOUT    (10 * HZ)   /* for the whole key handshake */
 #define MLME_MAX_IES        1024
+#define MLME_PROBE_WAIT     (HZ / 2)    /* for a probing frame's fate (probe_wait_ms) */
+#define MLME_PROBE_TRIES    2           /* max_nullfunc_tries */
 
 static struct {
     bool running;
@@ -87,6 +92,25 @@ static struct {
     u8 dialog_token;
     struct wiphy_work ba_work;
     struct wiphy_delayed_work ba_timeout_work;
+
+    /* connection monitor (ieee80211_mgd_probe_ap()) */
+    bool poll;                  /* probing the AP after missed beacons */
+    u8 probe_tries;             /* null frames sent in this round; 0 once one was acked */
+    bool probe_failed;          /* the last one was not acknowledged */
+    unsigned long probe_timeout;
+    struct wiphy_work beacon_loss_work;
+    struct wiphy_work probe_work;
+    struct wiphy_delayed_work probe_timeout_work;
+
+    /* what the AP's beacons said last */
+    u32 beacon_hash;
+    bool beacon_hash_valid;
+    struct cfg80211_chan_def beacon_def;    /* the channel by the first beacon */
+    bool beacon_def_valid;
+    int wmm_param_set, mu_edca_param_set;   /* parameter set counts in use, -1: none */
+    bool csa_pending;                       /* the AP announced a channel switch */
+    struct wiphy_delayed_work csa_work;
+    u32 beacons, beacon_losses, beacon_updates, probe_acks;
 
     void (*notify)(void);
     void (*tx_tap)(const u8 *frame, size_t len);
@@ -289,13 +313,14 @@ static struct sk_buff *mlme_alloc_frame(size_t len)
     return skb;
 }
 
-/* Hand a management frame to the driver, as ieee80211_tx_skb() ends up doing. */
-static void mlme_tx_mgmt(struct sk_buff *skb)
+/* Hand a frame of our own to the driver, as ieee80211_tx_skb() ends up doing. */
+static void mlme_tx_frame(struct sk_buff *skb, u32 flags)
 {
     struct ieee80211_tx_info *info = IEEE80211_SKB_CB(skb);
     struct ieee80211_tx_control control = { .sta = mlme.sta };
 
     memset(info, 0, sizeof(*info));
+    info->flags = flags;
     info->control.vif = mlme.vif;
     info->band = mlme.chan->band;
     info->hw_queue = mlme.vif->hw_queue[IEEE80211_AC_VO];
@@ -305,6 +330,11 @@ static void mlme_tx_mgmt(struct sk_buff *skb)
     if (mlme.tx_tap)
         mlme.tx_tap(skb->data, skb->len);
     mlme.local->ops->tx(mlme.hw, &control, skb);
+}
+
+static void mlme_tx_mgmt(struct sk_buff *skb)
+{
+    mlme_tx_frame(skb, 0);
 }
 
 static struct ieee80211_mgmt *mlme_mgmt_header(struct sk_buff *skb, u16 stype, size_t len)
@@ -442,6 +472,12 @@ static void mlme_teardown(u16 deauth_reason)
     int i;
 
     wiphy_delayed_work_cancel(mlme.hw->wiphy, &mlme.timeout_work);
+    wiphy_delayed_work_cancel(mlme.hw->wiphy, &mlme.probe_timeout_work);
+    wiphy_delayed_work_cancel(mlme.hw->wiphy, &mlme.csa_work);
+    mlme.poll = false;
+    mlme.csa_pending = false;
+    mlme.beacon_hash_valid = false;
+    mlme.beacon_def_valid = false;
 
     /* no more data in either direction, and nothing left queued for the AP */
     rtw89_data_detach();
@@ -1424,6 +1460,41 @@ static void mlme_conf_tx(const struct element *wmm, const struct ieee80211_mu_ed
     for (ac = 0; ac < IEEE80211_NUM_ACS; ac++)
         if (mlme.local->ops->conf_tx)
             mlme.local->ops->conf_tx(mlme.hw, mlme.vif, 0, ac, &params[ac]);
+
+    /* which version of each set this was: beacons announce new ones by count */
+    mlme.wmm_param_set = wmm && wmm->datalen >= 7 ? wmm->data[6] & 0x0f : -1;
+    mlme.mu_edca_param_set = mu_edca ? mu_edca->mu_qos_info & 0x0f : -1;
+}
+
+/* ieee80211_handle_bss_capability(): protection, preamble and slot time from
+ * the capability field and the ERP element. Returns what changed. */
+static u64 mlme_bss_capability(u16 capab, const struct element *erp)
+{
+    struct ieee80211_bss_conf *conf = &mlme.vif->bss_conf;
+    bool valid = erp && erp->datalen >= 1;
+    bool cts_prot = valid && (erp->data[0] & WLAN_ERP_USE_PROTECTION);
+    bool short_preamble = valid ? !(erp->data[0] & WLAN_ERP_BARKER_PREAMBLE) :
+                                  !!(capab & WLAN_CAPABILITY_SHORT_PREAMBLE);
+    bool short_slot = !!(capab & WLAN_CAPABILITY_SHORT_SLOT_TIME);
+    u64 changed = 0;
+
+    if (mlme.sband->band != NL80211_BAND_2GHZ) {
+        short_slot = true;
+        short_preamble = true;
+    }
+    if (conf->use_cts_prot != cts_prot) {
+        conf->use_cts_prot = cts_prot;
+        changed |= BSS_CHANGED_ERP_CTS_PROT;
+    }
+    if (conf->use_short_preamble != short_preamble) {
+        conf->use_short_preamble = short_preamble;
+        changed |= BSS_CHANGED_ERP_PREAMBLE;
+    }
+    if (conf->use_short_slot != short_slot) {
+        conf->use_short_slot = short_slot;
+        changed |= BSS_CHANGED_ERP_SLOT;
+    }
+    return changed;
 }
 
 static void mlme_rx_assoc_resp(const struct ieee80211_mgmt *mgmt, size_t len)
@@ -1487,12 +1558,7 @@ static void mlme_rx_assoc_resp(const struct ieee80211_mgmt *mgmt, size_t len)
 
     /* the link: ERP, HT operation, QoS, DTIM */
     conf->assoc_capability = capab;
-    elem = mlme_elem(WLAN_EID_ERP_INFO, ies, ies_len);
-    conf->use_cts_prot = elem && elem->datalen >= 1 && (elem->data[0] & WLAN_ERP_USE_PROTECTION);
-    conf->use_short_preamble = (capab & WLAN_CAPABILITY_SHORT_PREAMBLE) &&
-        !(elem && elem->datalen >= 1 && (elem->data[0] & WLAN_ERP_BARKER_PREAMBLE));
-    conf->use_short_slot = mlme.sband->band != NL80211_BAND_2GHZ ||
-                           (capab & WLAN_CAPABILITY_SHORT_SLOT_TIME);
+    mlme_bss_capability(capab, mlme_find_elem(WLAN_EID_ERP_INFO, mlme.bss.ies, mlme.bss.ies_len));
     elem = mlme.ht ? mlme_elem(WLAN_EID_HT_OPERATION, ies, ies_len) : NULL;
     conf->ht_operation_mode = elem && elem->datalen >= sizeof(struct ieee80211_ht_operation) ?
         le16_to_cpu(((const struct ieee80211_ht_operation *)elem->data)->operation_mode) : 0;
@@ -2279,6 +2345,312 @@ static void mlme_rx_action(const struct ieee80211_mgmt *mgmt, size_t len)
     }
 }
 
+/* ------------------------------------------------------------------ */
+/*  While connected: is the AP still there, and what its beacons say    */
+/* ------------------------------------------------------------------ */
+
+/* ieee80211_reset_ap_probe() */
+static void mlme_reset_ap_probe(void)
+{
+    if (!mlme.poll)
+        return;
+    mlme.poll = false;
+    wiphy_delayed_work_cancel(mlme.hw->wiphy, &mlme.probe_timeout_work);
+}
+
+/*
+ * ieee80211_mgd_probe_ap_send(): a null data frame the AP has to
+ * acknowledge. The driver reports whether it did (REPORTS_TX_ACK_STATUS),
+ * and rtw89_mlme_tx_status() takes the answer.
+ */
+static void mlme_probe_send(void)
+{
+    struct sk_buff *skb;
+
+    mlme.probe_tries++;
+    mlme.probe_failed = false;
+    skb = ieee80211_nullfunc_get(mlme.hw, mlme.vif, -1,
+                                 !ieee80211_hw_check(mlme.hw, DOESNT_SUPPORT_QOS_NDP));
+    if (skb)
+        mlme_tx_frame(skb, IEEE80211_TX_INTFL_DONT_ENCRYPT | IEEE80211_TX_CTL_REQ_TX_STATUS |
+                           IEEE80211_TX_CTL_USE_MINRATE);
+
+    mlme.probe_timeout = jiffies + MLME_PROBE_WAIT;
+    wiphy_delayed_work_queue(mlme.hw->wiphy, &mlme.probe_timeout_work, MLME_PROBE_WAIT);
+}
+
+/* The poll part of ieee80211_sta_work(): after a status report or a timeout. */
+static void mlme_probe_check(void)
+{
+    if (!mlme.running || !mlme.poll || mlme.state < RTW89_MLME_ASSOCIATED)
+        return;
+
+    if (!mlme.probe_tries) {
+        mlme_info("the access point acknowledged a probe: still connected");
+        mlme.probe_acks++;
+        mlme_reset_ap_probe();
+    } else if (mlme.probe_failed && mlme.probe_tries < MLME_PROBE_TRIES) {
+        mlme_probe_send();
+    } else if (!mlme.probe_failed && time_before(jiffies, mlme.probe_timeout)) {
+        wiphy_delayed_work_queue(mlme.hw->wiphy, &mlme.probe_timeout_work,
+                                 mlme.probe_timeout - jiffies);
+    } else {
+        mlme_info("the access point does not answer (%s): disconnecting",
+                  mlme.probe_failed ? "probe not acknowledged" :
+                                      "the driver did not report what became of the probe");
+        mlme.last_error = -ENOLINK;
+        /* no farewell: there is nobody to hear it */
+        mlme_teardown(0);
+    }
+}
+
+static void mlme_probe_work(struct wiphy *wiphy, struct wiphy_work *work)
+{
+    mlme_probe_check();
+}
+
+/* ieee80211_mgd_probe_ap(): the driver has missed beacons. */
+static void mlme_beacon_loss_work(struct wiphy *wiphy, struct wiphy_work *work)
+{
+    if (!mlme.running || mlme.state < RTW89_MLME_ASSOCIATED)
+        return;
+    mlme.beacon_losses++;
+    /* the driver keeps reporting while the AP is silent: one round at a time */
+    if (mlme.poll)
+        return;
+    mlme_info("beacons from the access point are missing: probing it");
+    mlme.poll = true;
+    mlme.probe_tries = 0;
+    mlme_probe_send();
+}
+
+/* Any context. */
+void rtw89_mlme_beacon_loss(void)
+{
+    if (mlme.running)
+        wiphy_work_queue(mlme.hw->wiphy, &mlme.beacon_loss_work);
+}
+
+/* ieee80211_sta_tx_notify(): the driver is done with a frame of ours. Any
+ * context; the skb stays the caller's. */
+void rtw89_mlme_tx_status(const struct sk_buff *skb)
+{
+    const struct ieee80211_hdr *hdr = (const void *)skb->data;
+    const struct ieee80211_tx_info *info = IEEE80211_SKB_CB((struct sk_buff *)skb);
+
+    if (!mlme.running || !mlme.poll || skb->len < sizeof(struct ieee80211_hdr_3addr) ||
+        !ieee80211_is_any_nullfunc(hdr->frame_control) ||
+        !(info->flags & IEEE80211_TX_CTL_REQ_TX_STATUS))
+        return;
+
+    if (info->flags & IEEE80211_TX_STAT_ACK)
+        mlme.probe_tries = 0;
+    else
+        mlme.probe_failed = true;
+    wiphy_work_queue(mlme.hw->wiphy, &mlme.probe_work);
+}
+
+/* The AP has moved (or is about to): the connection ends here, and whoever
+ * asked for it joins again on the new channel. */
+static void mlme_csa_work(struct wiphy *wiphy, struct wiphy_work *work)
+{
+    if (!mlme.running || !mlme.csa_pending || mlme.state < RTW89_MLME_ASSOCIATED)
+        return;
+    mlme_info("the access point has changed channel: leaving to join it there");
+    mlme.last_error = -ENETRESET;
+    mlme_teardown(0);
+}
+
+/*
+ * A channel switch announcement in a beacon. Linux follows the AP to the new
+ * channel (ieee80211_sta_process_chanswitch()); this only waits until the
+ * switch is due and then drops the connection.
+ */
+static void mlme_beacon_chanswitch(const u8 *ies, size_t len)
+{
+    const struct element *csa = mlme_find_elem(WLAN_EID_CHANNEL_SWITCH, ies, len);
+    const struct element *ecsa = mlme_find_elem(WLAN_EID_EXT_CHANSWITCH_ANN, ies, len);
+    unsigned int chan, count, tu;
+
+    if (ecsa && ecsa->datalen >= 4) {           /* mode, operating class, channel, count */
+        chan = ecsa->data[2];
+        count = ecsa->data[3];
+    } else if (csa && csa->datalen >= 3) {      /* mode, channel, count */
+        chan = csa->data[1];
+        count = csa->data[2];
+    } else {
+        return;
+    }
+    if (mlme.csa_pending)
+        return;
+
+    mlme.csa_pending = true;
+    mlme_info("the access point announces a move to channel %u in %u beacon(s)", chan, count);
+    /* the beacons left on this channel, and a little for the AP to settle */
+    tu = count * (mlme.bss.beacon_int ? mlme.bss.beacon_int : 100) + 100;
+    wiphy_delayed_work_queue(mlme.hw->wiphy, &mlme.csa_work,
+                             usecs_to_jiffies(tu * 1024));
+}
+
+/* The channel the elements of a beacon describe, by the rules of the join. */
+static void mlme_beacon_chandef(const u8 *ies, size_t len, struct cfg80211_chan_def *def)
+{
+    const u8 *saved_ies = mlme.bss.ies;
+    size_t saved_len = mlme.bss.ies_len;
+    unsigned int bw_limit = mlme.bw_limit;
+    bool ht = mlme.ht, vht = mlme.vht, he = mlme.he;
+
+    mlme.bss.ies = ies;
+    mlme.bss.ies_len = len;
+    mlme_determine_chandef(def);
+    mlme.bss.ies = saved_ies;
+    mlme.bss.ies_len = saved_len;
+    mlme.bw_limit = bw_limit;
+    mlme.ht = ht;
+    mlme.vht = vht;
+    mlme.he = he;
+}
+
+/* The elements a change of which matters after the join (care_about_ies in
+ * Linux), reduced to one number. */
+static u32 mlme_beacon_hash(const struct ieee80211_mgmt *mgmt, const u8 *ies, size_t len)
+{
+    const u8 *fixed = (const u8 *)&mgmt->u.beacon.beacon_int;   /* interval, capabilities */
+    const struct element *elem;
+    u32 hash = 2166136261u;     /* FNV-1a */
+    unsigned int i;
+
+    for (i = 0; i < 4; i++)
+        hash = (hash ^ fixed[i]) * 16777619u;
+
+    for_each_element(elem, ies, len) {
+        const u8 *raw = (const u8 *)elem;
+        bool care;
+
+        switch (elem->id) {
+        case WLAN_EID_ERP_INFO:
+        case WLAN_EID_HT_OPERATION:
+        case WLAN_EID_VHT_OPERATION:
+        case WLAN_EID_CHANNEL_SWITCH:
+        case WLAN_EID_EXT_CHANSWITCH_ANN:
+            care = true;
+            break;
+        case WLAN_EID_VENDOR_SPECIFIC:  /* WMM parameters */
+            care = elem->datalen >= 7 && elem->data[0] == 0x00 && elem->data[1] == 0x50 &&
+                   elem->data[2] == 0xf2 && elem->data[3] == WLAN_OUI_TYPE_MICROSOFT_WMM &&
+                   elem->data[4] == 1;
+            break;
+        case WLAN_EID_EXTENSION:
+            care = elem->datalen >= 1 && (elem->data[0] == WLAN_EID_EXT_HE_OPERATION ||
+                                          elem->data[0] == WLAN_EID_EXT_HE_MU_EDCA);
+            break;
+        default:
+            care = false;
+            break;
+        }
+        for (i = 0; care && i < 2u + elem->datalen; i++)
+            hash = (hash ^ raw[i]) * 16777619u;
+    }
+    return hash;
+}
+
+/* ieee80211_rx_mgmt_beacon(), as far as this MLME goes. */
+static void mlme_rx_beacon(const struct ieee80211_mgmt *mgmt, size_t len, u16 freq)
+{
+    const size_t fixed = offsetof(struct ieee80211_mgmt, u.beacon.variable);
+    struct ieee80211_bss_conf *conf = &mlme.vif->bss_conf;
+    const struct ieee80211_mu_edca_param_set *mu_edca = NULL;
+    const struct element *elem, *wmm;
+    struct cfg80211_chan_def def;
+    const u8 *ies;
+    size_t ies_len;
+    u64 changed = 0;
+    u32 hash;
+
+    if (mlme.state < RTW89_MLME_ASSOCIATED || len < fixed)
+        return;
+    /* ieee80211_rx_beacon_freq_valid(): heard while tuned elsewhere, as a
+     * scan does, it is not evidence of anything */
+    if (freq != mlme.chan->center_freq)
+        return;
+    ies = mgmt->u.beacon.variable;
+    ies_len = len - fixed;
+
+    mlme.beacons++;
+    if (mlme.poll) {
+        mlme_info("a beacon arrived: still connected");
+        mlme_reset_ap_probe();
+    }
+
+    hash = mlme_beacon_hash(mgmt, ies, ies_len);
+    if (mlme.beacon_hash_valid && hash == mlme.beacon_hash)
+        return;
+    mlme.beacon_hash = hash;
+    mlme.beacon_hash_valid = true;
+
+    mlme_beacon_chanswitch(ies, ies_len);
+
+    changed |= mlme_bss_capability(le16_to_cpu(mgmt->u.beacon.capab_info),
+                                   mlme_find_elem(WLAN_EID_ERP_INFO, ies, ies_len));
+
+    /* new EDCA parameters: the AP counts the versions */
+    wmm = mlme.sta->wme ? mlme_wmm_param(ies, ies_len) : NULL;
+    if (wmm) {
+        int count = wmm->data[6] & 0x0f, mu_count = -1;
+
+        if (conf->he_support)
+            mu_edca = (const void *)mlme_ext_elem(WLAN_EID_EXT_HE_MU_EDCA, ies, ies_len,
+                                                  sizeof(*mu_edca), NULL);
+        if (mu_edca)
+            mu_count = mu_edca->mu_qos_info & 0x0f;
+        if (count != mlme.wmm_param_set || mu_count != mlme.mu_edca_param_set) {
+            mlme_conf_tx(wmm, mu_edca);
+            changed |= BSS_CHANGED_QOS;
+        }
+    }
+
+    /* ieee80211_config_bw(): the protection the AP asks 802.11n stations for */
+    elem = mlme.ht ? mlme_find_elem(WLAN_EID_HT_OPERATION, ies, ies_len) : NULL;
+    if (elem && elem->datalen >= sizeof(struct ieee80211_ht_operation)) {
+        u16 mode = le16_to_cpu(((const struct ieee80211_ht_operation *)elem->data)->operation_mode);
+
+        if (conf->ht_operation_mode != mode) {
+            conf->ht_operation_mode = mode;
+            changed |= BSS_CHANGED_HT;
+        }
+    }
+
+    /*
+     * ... and the channel itself. Linux changes width with the AP; here a
+     * change ends the connection, to be joined again as the AP now is. The
+     * first beacon is the reference, not the scan result the join used, so
+     * that an AP whose beacons and probe responses disagree is not left
+     * over and over.
+     */
+    mlme_beacon_chandef(ies, ies_len, &def);
+    if (!mlme.beacon_def_valid) {
+        mlme.beacon_def = def;
+        mlme.beacon_def_valid = true;
+        if (def.width != mlme.chandef.width || def.center_freq1 != mlme.chandef.center_freq1)
+            mlme_info("the beacon describes a %u MHz channel around %u MHz, the scan said %u around %u",
+                      mlme_chandef_mhz(&def), def.center_freq1,
+                      mlme_chandef_mhz(&mlme.chandef), mlme.chandef.center_freq1);
+    } else if (!mlme.csa_pending && (def.width != mlme.beacon_def.width ||
+                                     def.center_freq1 != mlme.beacon_def.center_freq1)) {
+        mlme_info("the access point changed its channel to %u MHz around %u MHz: leaving to join again",
+                  mlme_chandef_mhz(&def), def.center_freq1);
+        mlme.last_error = -ENETRESET;
+        mlme_teardown(WLAN_REASON_DEAUTH_LEAVING);
+        return;
+    }
+
+    if (changed) {
+        mlme.beacon_updates++;
+        if (mlme.local->ops->link_info_changed)
+            mlme.local->ops->link_info_changed(mlme.hw, mlme.vif, conf, changed);
+    }
+}
+
 static void mlme_rx_frame(struct sk_buff *skb)
 {
     const struct ieee80211_mgmt *mgmt = (const void *)skb->data;
@@ -2288,8 +2660,13 @@ static void mlme_rx_frame(struct sk_buff *skb)
     if (mlme.state == RTW89_MLME_IDLE || len < sizeof(struct ieee80211_hdr_3addr))
         return;
 
-    if (!ieee80211_is_mgmt(fc) || !ether_addr_equal(mgmt->bssid, mlme.bss.bssid) ||
-        !ether_addr_equal(mgmt->da, mlme.vif->addr))
+    if (!ieee80211_is_mgmt(fc) || !ether_addr_equal(mgmt->bssid, mlme.bss.bssid))
+        return;
+    if (ieee80211_is_beacon(fc)) {
+        mlme_rx_beacon(mgmt, len, IEEE80211_SKB_RXCB(skb)->freq);
+        return;
+    }
+    if (!ether_addr_equal(mgmt->da, mlme.vif->addr))
         return;
 
     if (ieee80211_is_auth(fc)) {
@@ -2357,6 +2734,22 @@ void rtw89_mlme_rx(struct sk_buff *skb)
 }
 
 /* The firmware stopped hearing the AP. Any context. */
+/* A beacon, FCS still on; IEEE80211_SKB_RXCB(skb) says where it was heard.
+ * Takes the skb. Any context. */
+void rtw89_mlme_rx_beacon(struct sk_buff *skb)
+{
+    const struct ieee80211_mgmt *mgmt = (const void *)skb->data;
+
+    /* only the AP's own, and not more than can be looked at */
+    if (!mlme.running || mlme.state < RTW89_MLME_ASSOCIATED ||
+        skb->len < sizeof(struct ieee80211_hdr_3addr) + FCS_LEN ||
+        !ether_addr_equal(mgmt->bssid, mlme.bss.bssid) || skb_queue_len(&mlme.rxq) > 16) {
+        kfree_skb(skb);
+        return;
+    }
+    rtw89_mlme_rx(skb);
+}
+
 void rtw89_mlme_connection_lost(void)
 {
     if (mlme.running)
@@ -2430,6 +2823,12 @@ void rtw89_mlme_start(struct ieee80211_hw *hw, struct ieee80211_vif *vif, void (
     skb_queue_head_init(&mlme.rxq);
     wiphy_work_init(&mlme.rx_work, mlme_rx_work);
     wiphy_work_init(&mlme.lost_work, mlme_lost_work);
+    wiphy_work_init(&mlme.beacon_loss_work, mlme_beacon_loss_work);
+    wiphy_work_init(&mlme.probe_work, mlme_probe_work);
+    wiphy_delayed_work_init(&mlme.probe_timeout_work, mlme_probe_work);
+    wiphy_delayed_work_init(&mlme.csa_work, mlme_csa_work);
+    mlme.wmm_param_set = -1;
+    mlme.mu_edca_param_set = -1;
     wiphy_work_init(&mlme.ba_work, mlme_ba_work);
     wiphy_delayed_work_init(&mlme.ba_timeout_work, mlme_ba_timeout_work);
     wiphy_delayed_work_init(&mlme.timeout_work, mlme_timeout_work);
@@ -2446,6 +2845,10 @@ void rtw89_mlme_stop(void)
     wiphy_delayed_work_cancel(mlme.hw->wiphy, &mlme.timeout_work);
     wiphy_work_cancel(mlme.hw->wiphy, &mlme.rx_work);
     wiphy_work_cancel(mlme.hw->wiphy, &mlme.lost_work);
+    wiphy_work_cancel(mlme.hw->wiphy, &mlme.beacon_loss_work);
+    wiphy_work_cancel(mlme.hw->wiphy, &mlme.probe_work);
+    wiphy_delayed_work_cancel(mlme.hw->wiphy, &mlme.probe_timeout_work);
+    wiphy_delayed_work_cancel(mlme.hw->wiphy, &mlme.csa_work);
     wiphy_work_cancel(mlme.hw->wiphy, &mlme.ba_work);
     wiphy_delayed_work_cancel(mlme.hw->wiphy, &mlme.ba_timeout_work);
     skb_queue_purge(&mlme.rxq);
@@ -2480,8 +2883,26 @@ void rtw89_mlme_get_status(struct rtw89_mlme_status *status)
             status->mode = mlme.he ? 3 : mlme.vht ? 2 : mlme.ht ? 1 : 0;
         status->nss = mlme.sta ? mlme.sta->deflink.rx_nss : 0;
     }
+    status->beacons = mlme.beacons;
+    status->beacon_losses = mlme.beacon_losses;
+    status->beacon_updates = mlme.beacon_updates;
+    status->probe_acks = mlme.probe_acks;
     if (status->state >= RTW89_MLME_ASSOCIATED) {
+        struct ieee80211_sta *sta = mlme.sta;   /* freed late, see rtw89_m80211_free_later() */
+        struct station_info *sinfo;
         unsigned int tid;
+
+        /* the rate the firmware's rate control is sending at (the structure
+         * is too big for a kernel stack) */
+        sinfo = sta && mlme.local->ops->sta_statistics ? kzalloc(sizeof(*sinfo), GFP_KERNEL) : NULL;
+        if (sinfo) {
+            mlme.local->ops->sta_statistics(mlme.hw, mlme.vif, sta, sinfo);
+            if (sinfo->filled & BIT_ULL(NL80211_STA_INFO_TX_BITRATE)) {
+                status->tx_rate = sinfo->txrate;
+                status->tx_rate_valid = true;
+            }
+            kfree(sinfo);
+        }
 
         status->rx_ba = mlme.rx_ba;
         for (tid = 0; tid < ARRAY_SIZE(mlme.tx_ba); tid++)

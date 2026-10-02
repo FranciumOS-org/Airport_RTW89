@@ -225,6 +225,12 @@ struct rtw89_mlme_status {
     u16 center_freq;            /* MHz, of the whole channel */
     u8 mode;                    /* 0: 802.11a/b/g, 1: n, 2: ac, 3: ax */
     u8 nss;                     /* spatial streams towards the AP */
+    bool tx_rate_valid;
+    struct rate_info tx_rate;   /* what the firmware's rate control sends at */
+    u32 beacons;                /* the AP's beacons looked at since the radio came up */
+    u32 beacon_losses;          /* times the driver reported them missing */
+    u32 beacon_updates;         /* times a beacon changed the link's parameters */
+    u32 probe_acks;             /* times the AP acknowledged a probe after that */
 };
 
 /* All of these are called with the wiphy mutex held, except rtw89_mlme_rx(). */
@@ -235,6 +241,11 @@ void rtw89_mlme_stop(void);
 int rtw89_mlme_connect(const struct rtw89_mlme_bss *bss, const u8 *pmk);
 /* For tests: see every management frame the MLME transmits. */
 void rtw89_mlme_set_tx_tap(void (*tap)(const u8 *frame, size_t len));
+/* The AP's beacons while associated, FCS on; takes the skb. Any context. */
+void rtw89_mlme_rx_beacon(struct sk_buff *skb);
+/* The driver reports missed beacons / is done with a frame. Any context. */
+void rtw89_mlme_beacon_loss(void);
+void rtw89_mlme_tx_status(const struct sk_buff *skb);
 /* Whether joins may use 802.11ax (default: yes). Any context. */
 void rtw89_mlme_set_he(bool on);
 bool rtw89_mlme_get_he(void);
