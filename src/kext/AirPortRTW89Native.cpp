@@ -30,6 +30,7 @@ struct AirPort_RTW89::NativeState {
     unsigned int scanCursor = 0;
     bool scanInProgress = false;
     bool scanBootstrapTried = false;
+    uint64_t lastConnectedScan = 0;     /* uptime (ns) of the last scan while connected */
     uint32_t authLower = APPLE80211_AUTHTYPE_OPEN;
     uint32_t authUpper = APPLE80211_AUTHTYPE_NONE;
     uint8_t countryCode[APPLE80211_MAX_CC_LEN] = { 'Z', 'Z', 0 };
@@ -1078,12 +1079,26 @@ int AirPort_RTW89::nativeRequest(bool isSet, int number, void *data)
             return kIOReturnSuccess;
         _ns->scanCursor = 0;
         if (link.state != RTW89_GLUE_LINK_DOWN) {
-            /* connected: answered from what has been heard, without taking
-             * the radio off the access point's channel */
-            UInt32 result = 0;
+            /*
+             * Connected: a real scan at most every kConnectedScanGap, the
+             * firmware going back to the access point's channel in between
+             * (rtw89's hw_scan with the operating channel, as on Linux).
+             * Requests in between, and any while joining, are answered from
+             * what has been heard. Without the real ones a network that comes
+             * up later (a phone's hotspot) never appeared in the list.
+             */
+            const uint64_t kConnectedScanGap = 30ULL * 1000 * 1000 * 1000;
+            uint64_t now;
 
-            nativePost(APPLE80211_M_SCAN_DONE, &result, sizeof(result));
-            return kIOReturnSuccess;
+            absolutetime_to_nanoseconds(mach_absolute_time(), &now);
+            if (!isConnected(link) ||
+                (_ns->lastConnectedScan && now - _ns->lastConnectedScan < kConnectedScanGap)) {
+                UInt32 result = 0;
+
+                nativePost(APPLE80211_M_SCAN_DONE, &result, sizeof(result));
+                return kIOReturnSuccess;
+            }
+            _ns->lastConnectedScan = now;
         }
         _ns->scanInProgress = true;
         IOLockLock(_commandLock);
