@@ -89,12 +89,14 @@ static struct {
     unsigned int irq_next;
 } glue;
 
-#define RTW89_GLUE_PPDU_WAIT    2       /* ms a frame may wait for its status report */
+#define RTW89_GLUE_PPDU_WAIT    1       /* ms a frame may wait for its status report */
 #define RTW89_GLUE_LATE_US      5000
 
 static struct ieee80211_hw *glue_hw(void);
 static void glue_deliver(const u8 *frame, size_t len);
 static void glue_tx_wake(void);
+struct rtw89_glue_bss_entry;
+static void glue_bss_describe(struct rtw89_glue_bss_entry *e);
 
 /* ------------------------------------------------------------------ */
 /*  PCI ops                                                             */
@@ -634,6 +636,7 @@ void rtw89_glue_note_bss(const u8 *frame, size_t len, u16 freq, s8 signal)
             memcpy(e->ies, frame + fixed, len - fixed);
             e->beacon_int = le16_to_cpu(mgmt->u.beacon.beacon_int);
             e->pub.capability = le16_to_cpu(mgmt->u.beacon.capab_info);
+            glue_bss_describe(e);
         }
         e->pub.freq = freq;
         e->pub.channel = (u8)ieee80211_frequency_to_channel(freq);
@@ -642,6 +645,79 @@ void rtw89_glue_note_bss(const u8 *frame, size_t len, u16 freq, s8 signal)
         e->pub.seen++;
     }
     spin_unlock(&glue.bss_lock);
+}
+
+/* Mode, width and security of a network, from its elements. */
+static void glue_bss_describe(struct rtw89_glue_bss_entry *e)
+{
+    const struct element *elem;
+    const u8 *p, *end;
+    u16 count;
+
+    e->pub.mode = 0;
+    e->pub.width = 20;
+    e->pub.security = e->pub.capability & WLAN_CAPABILITY_PRIVACY ? RTW89_GLUE_SEC_WEP_WPA1 : 0;
+
+    elem = cfg80211_find_elem(WLAN_EID_HT_OPERATION, e->ies, e->ies_len);
+    if (elem && elem->datalen >= sizeof(struct ieee80211_ht_operation) &&
+        cfg80211_find_elem(WLAN_EID_HT_CAPABILITY, e->ies, e->ies_len)) {
+        e->pub.mode = 1;
+        if (elem->data[1] & IEEE80211_HT_PARAM_CHA_SEC_OFFSET)
+            e->pub.width = 40;
+    }
+    elem = cfg80211_find_elem(WLAN_EID_VHT_OPERATION, e->ies, e->ies_len);
+    if (e->pub.mode && elem && elem->datalen >= sizeof(struct ieee80211_vht_operation) &&
+        cfg80211_find_elem(WLAN_EID_VHT_CAPABILITY, e->ies, e->ies_len)) {
+        const struct ieee80211_vht_operation *oper = (const void *)elem->data;
+
+        e->pub.mode = 2;
+        if (oper->chan_width == IEEE80211_VHT_CHANWIDTH_80MHZ)
+            /* a second centre eight channels away means 160 MHz */
+            e->pub.width = oper->center_freq_seg1_idx &&
+                           abs(oper->center_freq_seg1_idx - oper->center_freq_seg0_idx) == 8 ?
+                           160 : 80;
+        else if (oper->chan_width == IEEE80211_VHT_CHANWIDTH_160MHZ)
+            e->pub.width = 160;
+    }
+    if (cfg80211_find_ext_elem(WLAN_EID_EXT_HE_CAPABILITY, e->ies, e->ies_len))
+        e->pub.mode = 3;
+
+    /* RSN: version, group cipher, pairwise list, AKM list, capabilities */
+    elem = cfg80211_find_elem(WLAN_EID_RSN, e->ies, e->ies_len);
+    if (!elem)
+        return;
+    e->pub.security = 0;
+    p = elem->data;
+    end = p + elem->datalen;
+    if (end - p < 8)
+        return;
+    p += 6;
+    count = get_unaligned_le16(p);
+    p += 2;
+    if (end - p < count * 4 + 2)
+        return;
+    p += count * 4;
+    count = get_unaligned_le16(p);
+    p += 2;
+    if (end - p < count * 4)
+        return;
+    for (; count; count--, p += 4) {
+        if (p[0] != 0x00 || p[1] != 0x0f || p[2] != 0xac)
+            continue;
+        switch (p[3]) {
+        case 2: case 4: case 6:             /* PSK, FT-PSK, PSK-SHA256 */
+            e->pub.security |= RTW89_GLUE_SEC_WPA2_PSK;
+            break;
+        case 8: case 9: case 24: case 25:   /* SAE and its variants */
+            e->pub.security |= RTW89_GLUE_SEC_WPA3_SAE;
+            break;
+        default:
+            e->pub.security |= RTW89_GLUE_SEC_ENTERPRISE;
+            break;
+        }
+    }
+    if (end - p >= 2 && (get_unaligned_le16(p) & BIT(6)))
+        e->pub.security |= RTW89_GLUE_SEC_PMF_REQUIRED;
 }
 
 /* Every received frame lands here, on the driver's receive thread. */
@@ -1164,6 +1240,10 @@ void rtw89_glue_link(struct rtw89_glue_link *link)
     memcpy(link->ssid, st.ssid, sizeof(link->ssid));
     link->freq = st.freq;
     link->aid = st.aid;
+    link->width = st.width;
+    link->center_freq = st.center_freq;
+    link->mode = st.mode;
+    link->nss = st.nss;
     link->last_error = st.last_error;
     link->eapol_rx = st.eapol_rx;
     link->tx_ba = st.tx_ba;

@@ -124,7 +124,16 @@ struct rtw89_glue_bss {
     int8_t   signal;            /* dBm */
     uint16_t capability;
     uint32_t seen;              /* beacons and probe responses heard */
+    uint8_t  mode;              /* 0: 802.11a/b/g, 1: n, 2: ac, 3: ax */
+    uint8_t  width;             /* MHz the AP operates on */
+    uint8_t  security;          /* RTW89_GLUE_SEC_* bits; 0: open */
 };
+
+#define RTW89_GLUE_SEC_WEP_WPA1     0x01    /* encrypted, but not RSN: WEP or WPA1 only */
+#define RTW89_GLUE_SEC_WPA2_PSK     0x02
+#define RTW89_GLUE_SEC_WPA3_SAE     0x04
+#define RTW89_GLUE_SEC_ENTERPRISE   0x08    /* 802.1X */
+#define RTW89_GLUE_SEC_PMF_REQUIRED 0x10    /* management frame protection required */
 
 /* Networks heard since the last rtw89_glue_scan() (beacons and probe
  * responses). Returns how many were copied to @out. */
@@ -156,6 +165,10 @@ struct rtw89_glue_link {
     char     ssid[33];
     uint16_t freq;
     uint16_t aid;
+    uint8_t  width;                 /* channel width in MHz */
+    uint16_t center_freq;           /* centre of the whole channel, MHz */
+    uint8_t  mode;                  /* 0: 802.11a/b/g, 1: 802.11n, 2: 802.11ac */
+    uint8_t  nss;                   /* spatial streams */
     int      last_error;            /* 0, -errno, -1000-status or -2000-reason */
     uint32_t eapol_rx;
 

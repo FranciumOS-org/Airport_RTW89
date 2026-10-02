@@ -203,9 +203,17 @@ static void print_link(io_service_t service)
         return;
     printf("%-10s %s\n", "link", state);
     if (strcmp(state, "down")) {
+        static const char *const modes[] = { "802.11a/b/g", "802.11n", "802.11ac" };
+        long mode = get_long(service, CFSTR("RTW89 Link Mode"));
+
         printf("%-10s %s, %ld MHz, AID %ld\n", "network", bssid,
                get_long(service, CFSTR("RTW89 Link Frequency")),
                get_long(service, CFSTR("RTW89 Link AID")));
+        printf("%-10s %s, %ld MHz wide (centre %ld MHz), %ld stream(s)\n", "channel",
+               mode >= 0 && mode <= 2 ? modes[mode] : "?",
+               get_long(service, CFSTR("RTW89 Link Width")),
+               get_long(service, CFSTR("RTW89 Link Center")),
+               get_long(service, CFSTR("RTW89 Link Streams")));
         printf("%-10s %ld EAPOL frame(s) from the AP\n", "handshake",
                get_long(service, CFSTR("RTW89 Link EAPOL Frames")));
     }
@@ -283,7 +291,7 @@ static void print_results(io_service_t service)
     n = CFArrayGetCount(list);
     printf("%ld network(s)\n", (long)n);
     if (n)
-        printf("%-18s %4s %5s %5s  %s\n", "BSSID", "CH", "RSSI", "SEEN", "SSID");
+        printf("%-18s %4s %5s  %-10s %-10s %s\n", "BSSID", "CH", "RSSI", "MODE", "SECURITY", "SSID");
     for (i = 0; i < n; i++) {
         CFDictionaryRef bss = CFArrayGetValueAtIndex(list, i);
         CFStringRef bssid = CFDictionaryGetValue(bss, CFSTR("bssid"));
@@ -308,10 +316,26 @@ static void print_results(io_service_t service)
             }
         }
         name[out] = 0;
-        /* rssi was stored as a 32-bit two's complement number */
-        printf("%-18s %4ld %5d %5ld  %s\n", mac, get_number(bss, CFSTR("channel")),
-               (int)(signed char)get_number(bss, CFSTR("rssi")), get_number(bss, CFSTR("seen")),
-               out ? name : "(hidden)");
+        {
+            static const char *const modes[] = { "a/b/g", "n", "ac", "ax" };
+            long mode = get_number(bss, CFSTR("mode")), sec = get_number(bss, CFSTR("security"));
+            char how[24], security[24];
+
+            snprintf(how, sizeof(how), "%s %ld", mode >= 0 && mode <= 3 ? modes[mode] : "?",
+                     get_number(bss, CFSTR("width")));
+            /* what this driver can join: open and WPA2-PSK without required PMF */
+            snprintf(security, sizeof(security), "%s%s",
+                     !sec ? "open" :
+                     (sec & 0x02) && (sec & 0x04) ? "WPA2/3" :
+                     sec & 0x02 ? "WPA2" :
+                     sec & 0x04 ? "WPA3" :
+                     sec & 0x08 ? "802.1X" : "WEP/WPA",
+                     (sec & 0x10) || (sec && !(sec & 0x02)) ? " (no)" : "");
+            /* rssi was stored as a 32-bit two's complement number */
+            printf("%-18s %4ld %5d  %-10s %-10s %s\n", mac, get_number(bss, CFSTR("channel")),
+                   (int)(signed char)get_number(bss, CFSTR("rssi")), how, security,
+                   out ? name : "(hidden)");
+        }
     }
     CFRelease(list);
 }
