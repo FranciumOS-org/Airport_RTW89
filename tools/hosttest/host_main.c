@@ -45,7 +45,7 @@ void rtw89_data_set_tx_tap(void (*tap)(const uint8_t *frame, size_t len));
 unsigned int rtw89_data_tx_waiting(uint8_t tid);
 
 /* The access point the smoke test pretends to be, and the card (fakechip_core.c). */
-static const uint8_t ap_mac[6] = { 0x02, 0xaa, 0xbb, 0xcc, 0xdd, 0x01 };
+static uint8_t ap_mac[6] = { 0x02, 0xaa, 0xbb, 0xcc, 0xdd, 0x01 };
 static const uint8_t sta_mac[6] = { 0x00, 0xe0, 0x4c, 0x88, 0x52, 0xbe };
 
 static const uint8_t ap_ies[] = {
@@ -68,6 +68,53 @@ static const uint8_t ap_ies[] = {
     0x42, 0x43, 0x5e, 0x00, 0x62, 0x32, 0x2f, 0x00,
 };
 
+/* A second network: 5 GHz channel 36, 80 MHz wide (centre channel 42), 802.11ac. */
+static uint8_t ap5_ies[] = {
+    0x00, 0x08, 't', 'e', 's', 't', 'n', 'e', 't', '5',              /* SSID */
+    0x01, 0x08, 0x8c, 0x12, 0x98, 0x24, 0xb0, 0x48, 0x60, 0x6c,      /* rates */
+    0x05, 0x04, 0x00, 0x02, 0x00, 0x00,                              /* TIM */
+    0x30, 0x14, 0x01, 0x00, 0x00, 0x0f, 0xac, 0x04, 0x01, 0x00,      /* RSN: CCMP/PSK */
+    0x00, 0x0f, 0xac, 0x04, 0x01, 0x00, 0x00, 0x0f, 0xac, 0x02, 0x00, 0x00,
+    0x2d, 0x1a, 0xef, 0x01, 0x03, 0xff, 0xff, 0x00, 0x00, 0x00,      /* HT capabilities, 40 MHz */
+    0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+    0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+    0x3d, 0x16, 0x24, 0x05, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,      /* HT operation: 36, */
+    0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,      /* secondary above */
+    0x00, 0x00, 0x00, 0x00,
+    0xbf, 0x0c, 0x32, 0x00, 0x00, 0x00, 0xfa, 0xff, 0x00, 0x00,      /* VHT capabilities: */
+    0xfa, 0xff, 0x00, 0x00,                                          /* 2 streams, MCS 0-9 */
+#define AP5_VHT_OPER 114                                             /* offset of the next element */
+    0xc0, 0x05, 0x01, 0x2a, 0x00, 0xfc, 0xff,                        /* VHT operation: 80, centre 42 */
+    0xdd, 0x18, 0x00, 0x50, 0xf2, 0x02, 0x01, 0x01, 0x00, 0x00,      /* WMM parameters */
+    0x03, 0xa4, 0x00, 0x00, 0x27, 0xa4, 0x00, 0x00,
+    0x42, 0x43, 0x5e, 0x00, 0x62, 0x32, 0x2f, 0x00,
+};
+
+/* Which network the pretend AP is at the moment. */
+static const uint8_t *ap_cur_ies = ap_ies;
+static size_t ap_cur_ies_len = sizeof(ap_ies);
+static uint16_t ap_freq = 2437;
+static const char *ap_ssid = "testnet";
+
+static void ap_select(bool five_ghz)
+{
+    ap_cur_ies = five_ghz ? ap5_ies : ap_ies;
+    ap_cur_ies_len = five_ghz ? sizeof(ap5_ies) : sizeof(ap_ies);
+    ap_freq = five_ghz ? 5180 : 2437;
+    ap_ssid = five_ghz ? "testnet5" : "testnet";
+    ap_mac[5] = five_ghz ? 0x05 : 0x01;
+}
+
+/* The element with id @eid in the current network's beacon. */
+static const uint8_t *ap_find_ie(uint8_t eid)
+{
+    size_t off = 0;
+
+    while (off + 2 <= ap_cur_ies_len && ap_cur_ies[off] != eid)
+        off += 2 + ap_cur_ies[off + 1];
+    return off + 2 <= ap_cur_ies_len ? ap_cur_ies + off : NULL;
+}
+
 /* Build a management frame from the AP to the card and deliver it. */
 static void ap_send(uint8_t subtype, const uint8_t *body, size_t body_len)
 {
@@ -81,15 +128,15 @@ static void ap_send(uint8_t subtype, const uint8_t *body, size_t body_len)
     memcpy(frame + 16, ap_mac, 6);
     memcpy(frame + len, body, body_len);
     len += body_len;
-    rtw89_glue_test_rx(frame, len, 2437, -40, false);
+    rtw89_glue_test_rx(frame, len, ap_freq, -40, false);
 }
 
 static void ap_send_beacon(void)
 {
-    uint8_t body[12 + sizeof(ap_ies)] = { 0, 0, 0, 0, 0, 0, 0, 0, 0x64, 0x00, 0x11, 0x04 };
+    uint8_t body[12 + 400] = { 0, 0, 0, 0, 0, 0, 0, 0, 0x64, 0x00, 0x11, 0x04 };
 
-    memcpy(body + 12, ap_ies, sizeof(ap_ies));
-    ap_send(0x80, body, sizeof(body));
+    memcpy(body + 12, ap_cur_ies, ap_cur_ies_len);
+    ap_send(0x80, body, 12 + ap_cur_ies_len);
 }
 
 static void ap_send_auth(uint16_t status)
@@ -101,12 +148,12 @@ static void ap_send_auth(uint16_t status)
 
 static void ap_send_assoc_resp(uint16_t status)
 {
-    uint8_t body[6 + sizeof(ap_ies)] = { 0x11, 0x04, (uint8_t)status, (uint8_t)(status >> 8),
-                                         0x05, 0xc0 };
+    uint8_t body[6 + 400] = { 0x11, 0x04, (uint8_t)status, (uint8_t)(status >> 8), 0x05, 0xc0 };
+    size_t ssid = 2 + ap_cur_ies[1];
 
     /* an association response carries the same elements minus the SSID */
-    memcpy(body + 6, ap_ies + 9, sizeof(ap_ies) - 9);
-    ap_send(0x10, body, 6 + sizeof(ap_ies) - 9);
+    memcpy(body + 6, ap_cur_ies + ssid, ap_cur_ies_len - ssid);
+    ap_send(0x10, body, 6 + ap_cur_ies_len - ssid);
 }
 
 static void ap_send_deauth(uint16_t reason)
@@ -134,6 +181,9 @@ static struct {
     uint8_t data[2400];
     size_t data_len;
     int data_count;
+    /* the last association request */
+    uint8_t assoc_req[400];
+    size_t assoc_req_len;
     /* BlockAck action frames from the station, by TID */
     struct {
         volatile int count;
@@ -184,6 +234,10 @@ static void ap_tx_tap(const uint8_t *frame, size_t len)
     size_t hdrlen = (frame[0] & 0x80) ? 26 : 24;    /* QoS data has a QoS control field */
     bool prot = frame[1] & 0x40;
 
+    if (frame[0] == 0x00 && len <= sizeof(ap.assoc_req)) {
+        memcpy(ap.assoc_req, frame, len);
+        ap.assoc_req_len = len;
+    }
     if (frame[0] == 0xd0 && len >= 24 + 6 && frame[24] == 3) {
         const uint8_t *b = frame + 26;      /* after category and action code */
         int tid;
@@ -298,7 +352,7 @@ static void ap_send_key(uint16_t key_info, const uint8_t *kd, size_t kd_len, boo
     }
 
     len = hdr + 8 + 4 + 95 + wrapped + (protect ? 8 : 0);   /* + CCMP MIC */
-    rtw89_glue_test_rx(frame, len, 2437, -40, protect);
+    rtw89_glue_test_rx(frame, len, ap_freq, -40, protect);
 }
 
 /* Check the MIC of the station's last EAPOL-Key frame; returns its key info. */
@@ -322,7 +376,7 @@ static void ap_send_msg3(const uint8_t gtk[16], int gtk_idx)
     uint8_t kd[64];
     size_t kd_len;
 
-    memcpy(kd, ap_ies + 31, 22);                    /* the RSN element of the beacon */
+    memcpy(kd, ap_find_ie(0x30), 22);               /* the RSN element of the beacon */
     kd[22] = 0xdd; kd[23] = 22; kd[24] = 0x00; kd[25] = 0x0f; kd[26] = 0xac; kd[27] = 1;
     kd[28] = (uint8_t)gtk_idx; kd[29] = 0;
     memcpy(kd + 30, gtk, 16);
@@ -341,7 +395,7 @@ static int ap_handshake(const uint8_t gtk[16], int gtk_idx)
     int base = ap.eapol_count, info;
 
     rtw89_pbkdf2_sha1((const uint8_t *)AP_PASSWORD, strlen(AP_PASSWORD),
-                      (const uint8_t *)"testnet", 7, 4096, ap.pmk, 32);
+                      (const uint8_t *)ap_ssid, strlen(ap_ssid), 4096, ap.pmk, 32);
     memset(ap.anonce, 0x5a, sizeof(ap.anonce));
     ap.anonce[0] = (uint8_t)ap.replay;              /* fresh per handshake */
 
@@ -437,7 +491,7 @@ static void ap_send_data(const uint8_t *da, const uint8_t *sa, int tid, bool ams
         memset(frame + len, 0xee, 8);       /* where the MIC was */
         len += 8;
     }
-    rtw89_glue_test_rx(frame, len, 2437, -40, keyid >= 0 && hw_decrypted);
+    rtw89_glue_test_rx(frame, len, ap_freq, -40, keyid >= 0 && hw_decrypted);
 }
 
 /* Hand an Ethernet frame to the driver the way the kext does. */
@@ -812,10 +866,20 @@ static int wait_link(enum rtw89_glue_link_state state)
     return link_state() == state;
 }
 
+/* An element of the last association request the station sent. */
+static const uint8_t *sta_assoc_ie(uint8_t eid)
+{
+    size_t off = 24 + 4;        /* header, capabilities, listen interval */
+
+    while (off + 2 <= ap.assoc_req_len && ap.assoc_req[off] != eid)
+        off += 2 + ap.assoc_req[off + 1];
+    return off + 2 <= ap.assoc_req_len ? ap.assoc_req + off : NULL;
+}
+
 /* Authenticate and associate with the pretend AP answering. */
 static int join_testnet(const char *password, uint16_t assoc_status)
 {
-    if (rtw89_glue_join((const uint8_t *)"testnet", 7, password, strlen(password)))
+    if (rtw89_glue_join((const uint8_t *)ap_ssid, strlen(ap_ssid), password, strlen(password)))
         return 0;
     ap_send_auth(0);
     /* the association request goes out once the auth answer is processed */
@@ -846,6 +910,9 @@ static int test_join(void)
     EXPECT(wait_link(RTW89_GLUE_LINK_ASSOCIATED));
     rtw89_glue_link(&link);
     EXPECT(link.aid == 5 && link.freq == 2437 && !link.last_error);
+    /* an 802.11n network on 20 MHz: no 40 MHz claimed, no 802.11ac element */
+    EXPECT(link.width == 20 && link.center_freq == 2437 && link.mode == 1 && link.nss == 2);
+    EXPECT(sta_assoc_ie(45) && !(sta_assoc_ie(45)[2] & 0x02) && !sta_assoc_ie(191));
     EXPECT(ap_handshake(gtk1, 1) == 0);
     EXPECT(wait_link(RTW89_GLUE_LINK_CONNECTED));
     printf("== connected: 4-way handshake verified by the test authenticator\n");
@@ -945,6 +1012,66 @@ static int test_join(void)
     EXPECT(wait_link(RTW89_GLUE_LINK_ASSOCIATED));
     EXPECT(ap_handshake(gtk2, 2) == 0);
     EXPECT(wait_link(RTW89_GLUE_LINK_CONNECTED));
+    rtw89_glue_leave();
+
+    /* ---- an 802.11ac network on an 80 MHz channel ---- */
+    ap_select(true);
+    ap_send_beacon();
+    {
+        struct rtw89_glue_bss list[8];
+        unsigned int i, n = rtw89_glue_scan_results(list, 8), found = 0;
+
+        for (i = 0; i < n; i++) {
+            if (!strcmp(list[i].ssid, "testnet5")) {
+                found++;
+                EXPECT(list[i].mode == 2 && list[i].width == 80 &&
+                       list[i].security == RTW89_GLUE_SEC_WPA2_PSK);
+            } else if (!strcmp(list[i].ssid, "testnet")) {
+                found++;
+                EXPECT(list[i].mode == 1 && list[i].width == 20 &&
+                       list[i].security == RTW89_GLUE_SEC_WPA2_PSK);
+            }
+        }
+        EXPECT(found == 2);
+    }
+    EXPECT(join_testnet(AP_PASSWORD, 0));
+    EXPECT(wait_link(RTW89_GLUE_LINK_ASSOCIATED));
+    rtw89_glue_link(&link);
+    EXPECT(link.freq == 5180 && link.width == 80 && link.center_freq == 5210);
+    EXPECT(link.mode == 2 && link.nss == 2);
+    /* the request says so: 40 MHz in the HT element, and a VHT element */
+    EXPECT(sta_assoc_ie(45) && (sta_assoc_ie(45)[2] & 0x02));
+    EXPECT(sta_assoc_ie(191) && sta_assoc_ie(191)[1] == 12);
+    EXPECT(ap_handshake(gtk1, 1) == 0);
+    EXPECT(wait_link(RTW89_GLUE_LINK_CONNECTED));
+    EXPECT(sta_tx_test() == 0);
+    rtw89_glue_leave();
+    EXPECT(link_state() == RTW89_GLUE_LINK_DOWN);
+
+    /* the same AP on 160 MHz (channels 36-64, centre 50): this card stays in
+     * the 80 MHz half that has the control channel */
+    ap5_ies[AP5_VHT_OPER + 2] = 2;
+    ap5_ies[AP5_VHT_OPER + 3] = 50;
+    ap_send_beacon();
+    EXPECT(join_testnet(AP_PASSWORD, 0));
+    EXPECT(wait_link(RTW89_GLUE_LINK_ASSOCIATED));
+    rtw89_glue_link(&link);
+    EXPECT(link.width == 80 && link.center_freq == 5210 && link.mode == 2);
+    rtw89_glue_leave();
+
+    /* VHT operation that contradicts the HT element (an 80 MHz channel the
+     * 40 MHz one is not part of): 802.11n rules, 40 MHz */
+    ap5_ies[AP5_VHT_OPER + 2] = 1;
+    ap5_ies[AP5_VHT_OPER + 3] = 58;
+    ap_send_beacon();
+    EXPECT(join_testnet(AP_PASSWORD, 0));
+    EXPECT(wait_link(RTW89_GLUE_LINK_ASSOCIATED));
+    rtw89_glue_link(&link);
+    EXPECT(link.width == 40 && link.center_freq == 5190 && link.mode == 1);
+    EXPECT(!sta_assoc_ie(191));
+    rtw89_glue_leave();
+    ap5_ies[AP5_VHT_OPER + 3] = 42;
+    ap_select(false);
 #undef EXPECT
     printf("== join test: %d failure(s)\n", failures);
     return failures;
@@ -975,6 +1102,8 @@ static int test_probed_device(void)
     EXPECT(!strcmp(bss[0].ssid, "test") && bss[0].ssid_len == 4);
     EXPECT(bss[0].channel == 6 && bss[0].signal == -55 && bss[0].seen == 2);
     EXPECT(bss[0].capability == 0x0411);
+    /* privacy bit without an RSN element: WEP or WPA1, 802.11b/g */
+    EXPECT(bss[0].mode == 0 && bss[0].width == 20 && bss[0].security == RTW89_GLUE_SEC_WEP_WPA1);
 
     EXPECT(rtw89_glue_scan() != 0);                         /* radio is down */
 

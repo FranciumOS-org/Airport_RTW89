@@ -165,9 +165,19 @@ the sequence number of the first frame held back, and lets the frames go when
 the AP has answered (or after a second without an answer). DELBA from either
 side ends a session, and all of them are torn down before the station goes.
 
+**Wide channels and 802.11ac (built, not yet run on hardware).** The channel
+is taken from the AP's HT and VHT operation elements as
+`ieee80211_determine_ap_chan()` does: 40 MHz from the secondary channel offset,
+80 MHz from the VHT centre frequency, checked against each other and against
+the channels the regulatory domain allows, and narrowed step by step if not
+usable (an AP on 160 MHz is joined on the 80 MHz half with the control
+channel). The association request then carries the 40 MHz bits and a VHT
+capabilities element, and the station entry gets the AP's VHT capabilities,
+bandwidth and stream count for the firmware's rate control. `rtw89ctl scan`
+shows each network's mode, width and security; `status` the channel in use.
+
 Not there yet:
-- Channels wider than 20 MHz, VHT and HE: the link is 802.11n on 20 MHz with
-  two streams, 144 Mb/s at best.
+- 802.11ax (HE). Networks that offer it are joined as 802.11ac.
 - Fragmented frames (dropped), software decryption of frames the chip did not
   decrypt (dropped and counted), power save, roaming, and beacon-loss detection
   beyond what the firmware reports.

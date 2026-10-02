@@ -519,7 +519,7 @@ void AirPort_RTW89::publishScanResults()
 
     array = OSArray::withCapacity(n ? n : 1);
     for (unsigned int i = 0; array && i < n; i++) {
-        OSDictionary *dict = OSDictionary::withCapacity(6);
+        OSDictionary *dict = OSDictionary::withCapacity(9);
         char bssid[18];
         OSObject *value;
 
@@ -552,6 +552,18 @@ void AirPort_RTW89::publishScanResults()
         }
         if ((value = OSNumber::withNumber(list[i].seen, 32))) {
             dict->setObject("seen", value);
+            value->release();
+        }
+        if ((value = OSNumber::withNumber(list[i].mode, 32))) {
+            dict->setObject("mode", value);
+            value->release();
+        }
+        if ((value = OSNumber::withNumber(list[i].width, 32))) {
+            dict->setObject("width", value);
+            value->release();
+        }
+        if ((value = OSNumber::withNumber(list[i].security, 32))) {
+            dict->setObject("security", value);
             value->release();
         }
         array->setObject(dict);
@@ -589,6 +601,10 @@ void AirPort_RTW89::publishLink()
     setProperty("RTW89 Link BSSID", bssid);
     setProperty("RTW89 Link Frequency", link.freq, 32);
     setProperty("RTW89 Link AID", link.aid, 32);
+    setProperty("RTW89 Link Width", link.width, 32);
+    setProperty("RTW89 Link Center", link.center_freq, 32);
+    setProperty("RTW89 Link Mode", link.mode, 32);
+    setProperty("RTW89 Link Streams", link.nss, 32);
     setProperty("RTW89 Link EAPOL Frames", link.eapol_rx, 32);
     setProperty("RTW89 Link Error", (unsigned long long)(long long)link.last_error, 32);
     setProperty("RTW89 TX Frames", link.tx_frames, 32);
@@ -611,9 +627,14 @@ void AirPort_RTW89::publishLink()
      * when it goes down. */
     bool active = link.state == RTW89_GLUE_LINK_CONNECTED;
     if (_medium && active != _linkActive) {
+        /* the best rate of the mode and width, two streams: what Wi-Fi
+         * settings would call the link speed */
+        UInt64 mbit = link.mode >= 2 ? (link.width >= 80 ? 866 : link.width >= 40 ? 400 : 173) :
+                      link.mode == 1 ? (link.width >= 40 ? 300 : 144) : 54;
+
         _linkActive = active;
         setLinkStatus(active ? (kIONetworkLinkValid | kIONetworkLinkActive) : kIONetworkLinkValid,
-                      _medium, active ? 100 * 1000000ULL : 0);
+                      _medium, active ? mbit * 1000000ULL : 0);
         LOG("link %s", active ? "up" : "down");
     }
 }
