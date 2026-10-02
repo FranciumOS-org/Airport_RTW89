@@ -13,10 +13,14 @@ set -eu
 here="$(cd "$(dirname "$0")/.." && pwd)"
 out="$here/build/log"
 mkdir -p "$out"
-/usr/bin/log show --last boot --style compact \
+# From the boot on. Not --last boot: after a wall clock adjustment that misses
+# everything since (log show warns about it), while --start does not.
+boot="$(sysctl -n kern.boottime | sed -n 's/.*sec = \([0-9]*\).*/\1/p')"
+start="$(date -r "$boot" '+%Y-%m-%d %H:%M:%S')"
+/usr/bin/log show --start "$start" --style compact \
     --predicate 'process == "kernel" AND (sender == "AirPort_RTW89" OR eventMessage CONTAINS "AirPort_RTW89" OR eventMessage CONTAINS "[rtw89")' \
     > "$out/user-driver.log" 2>/dev/null
-/usr/bin/log show --last boot --style compact \
+/usr/bin/log show --start "$start" --style compact \
     --predicate 'process == "airportd" AND (eventMessage CONTAINS[c] "join" OR eventMessage CONTAINS[c] "SAE" OR eventMessage CONTAINS[c] "WPA3" OR eventMessage CONTAINS[c] "password" OR eventMessage CONTAINS[c] "credential" OR eventMessage CONTAINS[c] "assoc" OR eventMessage CONTAINS[c] "fail")' \
     > "$out/user-airportd.log" 2>/dev/null
 owner="$(stat -f %u "$here")"
