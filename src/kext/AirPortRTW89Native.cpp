@@ -471,7 +471,7 @@ int AirPort_RTW89::backEnable(void *ctx, bool on)
 
     IOLockLock(me->_commandLock);
     if (on)
-        ret = rtw89_glue_up();
+        ret = me->radioUp();
     else
         rtw89_glue_down();
     IOLockUnlock(me->_commandLock);
@@ -1275,7 +1275,7 @@ int AirPort_RTW89::nativeRequest(bool isSet, int number, void *data)
                 return kIOReturnUnsupported;
             IOLockLock(_commandLock);
             if (d->power_state[0] == APPLE80211_POWER_ON)
-                ret = rtw89_glue_up();
+                ret = radioUp();
             else
                 rtw89_glue_down();
             IOLockUnlock(_commandLock);

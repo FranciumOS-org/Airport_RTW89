@@ -109,6 +109,13 @@ private:
     static int backEnable(void *ctx, bool on);
     static uint32_t backOutput(void *ctx, mbuf_t m);
     static void backPower(void *ctx, bool on);
+    /* The radio on, unless the machine is going down. */
+    int radioUp() { return _halting ? -100 : rtw89_glue_up(); }
+    static IOReturn powerEvent(void *target, void *refCon, UInt32 messageType,
+                               IOService *provider, void *messageArgument, vm_size_t argSize);
+
+    IONotifier *_powerNotifier = nullptr;
+    volatile bool _halting = false;
 
     bool _native = false;
     /* Link changes and finished scans reach IO80211 from a thread of their

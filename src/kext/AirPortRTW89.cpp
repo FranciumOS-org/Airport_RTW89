@@ -2,7 +2,9 @@
 #include "AirPortRTW89.hpp"
 
 #include <IOKit/IOLib.h>
+#include <IOKit/IOMessage.h>
 #include <IOKit/IOUserClient.h>
+#include <IOKit/pwr_mgt/RootDomain.h>
 #include <libkern/OSAtomic.h>
 #include <sys/kpi_mbuf.h>
 
@@ -484,9 +486,10 @@ bool AirPort_RTW89::start(IOService *provider)
 
     /* With the front in the registry this is the Wi-Fi device's driver;
      * without it, an Ethernet-style interface of our own. */
+    _powerNotifier = registerPrioritySleepWakeInterest(&AirPort_RTW89::powerEvent, this);
     if (connectFront()) {
         /* Wi-Fi is on until macOS says otherwise */
-        int up = rtw89_glue_up();
+        int up = radioUp();
 
         if (up)
             LOG("could not start the radio: %d", up);
@@ -712,12 +715,12 @@ IOReturn AirPort_RTW89::setProperties(OSObject *properties)
         result = kIOReturnNotReady;
     } else if (command->isEqualTo("up")) {
         LOG("radio up");
-        ret = rtw89_glue_up();
+        ret = radioUp();
     } else if (command->isEqualTo("down")) {
         LOG("radio down");
         rtw89_glue_down();
     } else if (command->isEqualTo("scan")) {
-        ret = rtw89_glue_up();
+        ret = radioUp();
         if (!ret)
             ret = rtw89_glue_scan();
     } else if (command->isEqualTo("join")) {
@@ -764,8 +767,35 @@ IOReturn AirPort_RTW89::setProperties(OSObject *properties)
     return result;
 }
 
+/*
+ * Shutting down and restarting do not stop drivers. A chip left running,
+ * with its interrupts and DMA live, goes on through a restart into the
+ * firmware and the next boot, which then hangs: bring it down here.
+ */
+IOReturn AirPort_RTW89::powerEvent(void *target, void *refCon, UInt32 messageType,
+                                   IOService *provider, void *messageArgument,
+                                   vm_size_t argSize)
+{
+    AirPort_RTW89 *me = static_cast<AirPort_RTW89 *>(target);
+
+    if (messageType != kIOMessageSystemWillPowerOff && messageType != kIOMessageSystemWillRestart)
+        return kIOReturnSuccess;
+    me->_halting = true;
+    IOLockLock(me->_commandLock);
+    if (me->_probed)
+        rtw89_glue_down();
+    IOLockUnlock(me->_commandLock);
+    LOG("the machine is %s: radio off", messageType == kIOMessageSystemWillRestart ?
+        "restarting" : "shutting down");
+    return kIOReturnSuccess;
+}
+
 void AirPort_RTW89::teardown()
 {
+    if (_powerNotifier) {
+        _powerNotifier->remove();
+        _powerNotifier = nullptr;
+    }
     /* No new frames into the driver, and wait for the ones on their way. */
     _dataReady = false;
     while (_txBusy)
