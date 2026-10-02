@@ -15,10 +15,14 @@ src="$root/build/out/RTW89DepTest.kext"
 
 echo "--- Wi-Fi stack in the running kernel"
 kmutil showloaded 2>/dev/null | grep -i -E 'skywalk|80211|amfipass' | awk '{print "   ", $6, $7}'
-if ! kmutil showloaded 2>/dev/null | grep -q com.apple.iokit.IO80211FamilyLegacy; then
-    echo "com.apple.iokit.IO80211FamilyLegacy is not loaded: the EFI change is not in effect"
+# an injected family nobody uses yet is in the kernel but not started: it only
+# shows among the "unloaded" entries
+if ! kmutil showloaded --show unloaded 2>/dev/null | grep -q com.apple.iokit.IO80211FamilyLegacy &&
+   ! kmutil showloaded 2>/dev/null | grep -q com.apple.iokit.IO80211FamilyLegacy; then
+    echo "com.apple.iokit.IO80211FamilyLegacy is not in the kernel: the EFI change is not in effect"
     exit 1
 fi
+echo "    com.apple.iokit.IO80211FamilyLegacy is in the kernel"
 
 stage=/private/var/tmp/RTW89DepTest.stage
 rm -rf "$stage"; mkdir -p "$stage"
