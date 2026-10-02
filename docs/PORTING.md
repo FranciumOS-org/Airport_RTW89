@@ -259,7 +259,7 @@ Not there yet:
   decrypt (dropped and counted), power save, and roaming between access points
   of one network while connected (after a loss the strongest one is joined).
 
-**Native Wi-Fi (started).** The Ethernet-style interface is not Wi-Fi to
+**Native Wi-Fi: the route.** The Ethernet-style interface is not Wi-Fi to
 macOS. For the menu, System Settings and location services the kext has to
 drive Apple's IO80211 family, and the choice (2026-10-01) is the one that
 exists up to Ventura and that OpenCore can put back on Sonoma to Tahoe:
@@ -272,10 +272,36 @@ no EFI change and no reboot per test, but tied to one macOS version, and
 nobody has done it (`tools/kcvtab.py` reads the class layouts it would need
 from the kernel collections).
 
-Order: the EFI change first (does the machine boot with the old stack, does the
-current kext still work, can a kext that depends on the injected family be
-loaded with `kmutil` or does every test need a restart), then an
-IO80211Controller on top of `rtw89_glue.h`.
+**Native Wi-Fi works on hardware (2026-10-01).** macOS lists the card as
+Wi-Fi (`en4`), its own software scans, and joining Golestan-5G from the Wi-Fi
+menu gave an 802.11ax link with an address and pings at 2-3 ms. No OCLP root
+patch: three kexts in the EFI and the block of Apple's IOSkywalkFamily are
+enough on Sequoia 15.8.1.
+
+How it is put together, because of two things found on the way:
+
+- `kmutil` will not load a kext that depends on a family OpenCore injected
+  (`tools/deptest.sh`). So the IO80211Controller is a small kext of its own,
+  `AirPortRTW89Front` (`src/front/`), injected by OpenCore next to the family.
+  It attaches to the card, creates the Wi-Fi interface and passes every request
+  on through a table of C functions (`src/front/rtw89_front_api.h`).
+- The driver proper stays what it was, loaded with `tools/load.sh`. If it finds
+  the front in the registry it connects to it instead of publishing its own
+  Ethernet interface (`src/kext/AirPortRTW89Native.cpp`: the requests of
+  AirPort_RTW88's controller, answered from the glue). Without the front it
+  behaves as before. Only a change to the front needs a restart.
+- OpenCore itself boots from a USB stick macOS cannot read; a second copy on
+  the internal EFI partition is the one that carries the front
+  (`efi/install_internal.sh`, `efi/install_front.sh`). The stick is the way
+  back.
+
+The first run double-faulted: IO80211 re-enters `apple80211Request()` from
+inside a power change, and the handler had 5.8 KB of locals. Its buffers are
+on the heap now.
+
+Not there yet in native mode: sleep and wake, AWDL (AirDrop), scans while
+connected (answered from what has been heard), WPA3, and loading the driver
+at boot (it is still loaded by hand).
 
 The reference for the IOKit side of M2/M3 is `reference/airport_rtw88/`
 (AirPort_RTW88's IO80211 controller and its own MLME, GPL-2.0, not compiled).
