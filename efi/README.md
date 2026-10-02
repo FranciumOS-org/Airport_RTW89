@@ -48,3 +48,33 @@ copy /Y S:\EFI\OC\config.plist.pre-wifistack S:\EFI\OC\config.plist
 `kmutil showloaded | grep -i -E 'skywalk|80211|amfipass'` should list
 `com.apple.iokit.IOSkywalkFamily`, `com.apple.iokit.IO80211FamilyLegacy` and
 `com.dhinakg.AMFIPass`.
+
+## OpenCore on the internal EFI partition
+
+On the TUF A15 OpenCore boots from a USB stick that macOS cannot read (the
+mount fails with an I/O error), so macOS cannot update it. A kext that depends
+on the injected family has to be injected too (`tools/deptest.sh` showed that
+`kmutil` will not load one from the running system), which means the EFI gets
+a new build for every test of the native driver's front. Hence a second copy
+of OpenCore where macOS can write:
+
+```sh
+sudo efi/install_internal.sh
+```
+
+copies `EFI/OC` from the backup on the Windows data drive to the internal EFI
+partition, with the stick's config (Wi-Fi stack added) and the three kexts. It
+writes only `EFI/OC`; Windows' and Ubuntu's files are left alone. The stick
+stays as it is: booting from it is the way back if the internal copy breaks.
+
+The firmware then needs a boot entry for `\EFI\OC\OpenCore.efi` on that
+partition. Either in the firmware setup (F2, Advanced Mode, Boot, Add New Boot
+Option, pick the internal EFI partition and that file), or from an
+administrator command prompt in Windows:
+
+```
+bcdedit /copy {bootmgr} /d "OpenCore internal"
+bcdedit /set {the-id-it-printed} path \EFI\OC\OpenCore.efi
+```
+
+and choose it from the boot menu (Esc at power-on).
