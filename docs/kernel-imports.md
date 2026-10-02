@@ -1,6 +1,6 @@
 # Kernel imports
 
-Symbols `AirPort_RTW89.o` leaves for the kernel to resolve (`make link`): **51**, unresolved: **0**.
+Symbols `AirPort_RTW89.o` leaves for the kernel to resolve (`make link`): **50**, unresolved: **0**.
 
 - `IODelay`
 - `IOFree`
@@ -10,7 +10,6 @@ Symbols `AirPort_RTW89.o` leaves for the kernel to resolve (`make link`): **51**
 - `IOLockSleep`
 - `IOLockUnlock`
 - `IOLockWakeup`
-- `IOLog`
 - `IOMalloc`
 - `IOMallocZero`
 - `IORecursiveLockAlloc`

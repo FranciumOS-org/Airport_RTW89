@@ -36,6 +36,17 @@ void IOLog(const char *fmt, ...)
     fflush(stdout);
 }
 
+/* The driver is built with -DIOLog=rtw89_iolog (its log ring in the kext). */
+void rtw89_iolog(const char *fmt, ...)
+{
+    va_list ap;
+
+    va_start(ap, fmt);
+    vfprintf(stdout, fmt, ap);
+    va_end(ap);
+    fflush(stdout);
+}
+
 void IODelay(unsigned us) { usleep(us); }
 void IOSleep(unsigned ms) { usleep(ms * 1000u); }
 
