@@ -1331,6 +1331,16 @@ int AirPort_RTW89::nativeRequest(bool isSet, int number, void *data)
         d->capabilities[5] = 0x8C;
         d->capabilities[6] = 0x8C;
         d->capabilities[7] = 0x84;
+        /*
+         * The family's structure carries 12 capability bytes, not the 8 of
+         * the header here (measured: macOS reads 12 back, the last 4 zero),
+         * and the front passes the family's buffer straight through. Byte 9
+         * is where Sequoia's IO80211 framework looks for SAE: bit 0x08
+         * (capability 75) or Apple80211Associate2 says "SAE is not
+         * supported" and never sends a WPA3 join, bit 0x10 (76) for picking
+         * the SAE key management suite.
+         */
+        static_cast<uint8_t *>(d->capabilities)[9] |= 0x08 | 0x10;
         return kIOReturnSuccess;
     }
     case APPLE80211_IOC_POWER: {
