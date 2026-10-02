@@ -1,5 +1,6 @@
 #!/bin/sh
-# Save this boot's Wi-Fi logs where Claude can read them:
+# Save this boot's Wi-Fi logs (the driver's lines are matched by text too: loaded
+# from the EFI, its sender is the kernel collection, not AirPort_RTW89) where Claude can read them:
 #   build/log/user-driver.log   the driver's own lines
 #   build/log/user-airportd.log macOS's Wi-Fi daemon, join-related lines only
 #
@@ -13,7 +14,8 @@ here="$(cd "$(dirname "$0")/.." && pwd)"
 out="$here/build/log"
 mkdir -p "$out"
 /usr/bin/log show --last boot --style compact \
-    --predicate 'sender == "AirPort_RTW89"' > "$out/user-driver.log" 2>/dev/null
+    --predicate 'process == "kernel" AND (sender == "AirPort_RTW89" OR eventMessage CONTAINS "AirPort_RTW89" OR eventMessage CONTAINS "[rtw89")' \
+    > "$out/user-driver.log" 2>/dev/null
 /usr/bin/log show --last boot --style compact \
     --predicate 'process == "airportd" AND (eventMessage CONTAINS[c] "join" OR eventMessage CONTAINS[c] "SAE" OR eventMessage CONTAINS[c] "WPA3" OR eventMessage CONTAINS[c] "password" OR eventMessage CONTAINS[c] "credential" OR eventMessage CONTAINS[c] "assoc" OR eventMessage CONTAINS[c] "fail")' \
     > "$out/user-airportd.log" 2>/dev/null
