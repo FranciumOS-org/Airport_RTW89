@@ -17,11 +17,9 @@ enable=True
 [ "${1:-}" = "--disable" ] && enable=False
 [ -f "$src/Contents/MacOS/AirPortRTW89Front" ] || { echo "no kext at $src; run: make front" >&2; exit 1; }
 
-part=disk1s1
-perl -e 'alarm 90; exec @ARGV' diskutil mount "$part" >/dev/null
-mp="$(diskutil info "$part" | sed -n 's/^ *Mount Point: *//p')"
-oc="$mp/EFI/OC"
-[ -f "$oc/config.plist" ] || { echo "no OpenCore at $oc (see efi/install_internal.sh)" >&2; exit 1; }
+. "$here/internal_efi.sh"
+internal_efi
+oc="$INTERNAL_OC"
 
 export COPYFILE_DISABLE=1
 rm -rf "$oc/Kexts/AirPortRTW89Front.kext"
