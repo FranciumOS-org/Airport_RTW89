@@ -184,16 +184,20 @@ int rtw89_glue_join(const uint8_t *ssid, size_t ssid_len,
                     const char *passphrase, size_t passphrase_len);
 /*
  * Join a network with 802.1X sign-in (WPA2-Enterprise). The glue only
- * associates: the sign-in and the key handshake are done by whoever sends and
- * receives the EAPOL frames on the data path, and the keys they produce are
- * handed over with rtw89_glue_set_key() (CCMP, 16 bytes; @rsc: the group
- * key's receive counter). @rsn_ie: the RSN element to associate with, or
- * NULL. The link counts as connected once associated; data other than EAPOL
- * flows when both keys are in (rtw89_glue_link()'s authorized).
+ * associates: the sign-in is done by whoever sends and receives the EAP
+ * frames on the data path. What it produces is handed over either as the
+ * pairwise master key with rtw89_glue_set_pmk() (32 bytes), after which the
+ * key handshake is done here, or, by a supplicant that has done the handshake
+ * itself, as keys with rtw89_glue_set_key() (CCMP, 16 bytes; @rsc: the group
+ * key's receive counter). EAPOL-Key frames are not passed up. @rsn_ie: the
+ * RSN element to associate with, or NULL. The link counts as connected once
+ * associated; data other than EAPOL flows when both keys are in
+ * (rtw89_glue_link()'s authorized).
  */
 int rtw89_glue_join_ext(const uint8_t *ssid, size_t ssid_len, const uint8_t *bssid,
                         const uint8_t *rsn_ie, size_t rsn_len);
 int rtw89_glue_set_key(bool pairwise, int index, const uint8_t *key, size_t len, uint64_t rsc);
+int rtw89_glue_set_pmk(const uint8_t *pmk, size_t len);
 /* The RSN element this side put in its association request; returns its length. */
 size_t rtw89_glue_assoc_rsn_ie(uint8_t *buf, size_t max);
 

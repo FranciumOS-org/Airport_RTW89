@@ -86,7 +86,7 @@ static struct {
     u8 addr[ETH_ALEN];
     enum nl80211_band band;
     bool protect;               /* the network encrypts: never send or accept data in the clear */
-    bool external;              /* EAPOL frames go to the stack, not to the MLME */
+    bool external;              /* EAP frames go to the stack, not to the MLME */
     bool authorized;            /* the key handshake is done (or there is none) */
 
     struct ieee80211_key_conf *tx_key;
@@ -591,7 +591,9 @@ static void data_rx_msdu(const u8 *da, const u8 *sa, u8 *p, size_t len, bool dec
          * ieee80211_frame_allowed()), but only if addressed to us. */
         if (!ether_addr_equal(da, data.addr) && !ether_addr_equal(da, data_pae_group_addr))
             goto drop;
-        if (data.external) {
+        if (data.external && !(flen >= ETH_HLEN + 2 && eth[ETH_HLEN + 1] == 3)) {
+            /* the sign-in (EAP) is the outside supplicant's; the key
+             * handshake after it (EAPOL-Key, type 3) is ours */
             if (data.deliver)
                 data.deliver(eth, flen);
         } else {

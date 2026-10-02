@@ -1619,6 +1619,20 @@ int rtw89_glue_set_key(bool pairwise, int index, const uint8_t *key, size_t len,
     return ret;
 }
 
+int rtw89_glue_set_pmk(const uint8_t *pmk, size_t len)
+{
+    struct ieee80211_hw *hw;
+    int ret;
+
+    if (!glue.up)
+        return -ENETDOWN;
+    hw = glue_hw();
+    wiphy_lock(hw->wiphy);
+    ret = rtw89_mlme_set_pmk(pmk, len);
+    wiphy_unlock(hw->wiphy);
+    return ret;
+}
+
 int rtw89_glue_join_pmk(const uint8_t *ssid, size_t ssid_len, const uint8_t *bssid,
                         const uint8_t *pmk)
 {
