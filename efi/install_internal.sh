@@ -7,7 +7,7 @@
 #   sudo efi/install_internal.sh [EFI backup folder] [config.plist to use] [partition]
 #
 # Defaults: the backup on the Windows data drive; the stick's config with the
-# Wi-Fi stack added, as staged by efi/stage_for_windows.sh; disk1s1.
+# Wi-Fi stack added, as staged by efi/stage_for_windows.sh; the partition is found by its UUID.
 # Only EFI/OC is written. EFI/BOOT, EFI/Microsoft and EFI/ubuntu are left
 # alone, so the firmware needs a boot entry for \EFI\OC\OpenCore.efi.
 # Only a person runs this.
@@ -16,7 +16,7 @@ set -eu
 [ "$(id -u)" = 0 ] || { echo "run with sudo: sudo efi/install_internal.sh" >&2; exit 1; }
 here="$(cd "$(dirname "$0")" && pwd)"
 backup="${1:-/Volumes/Extra Storage/mac development/setup/EFI-TUF-A15-working}"
-part="${3:-disk1s1}"
+part="${3:-BC5C5FBD-D3C3-42BD-AE73-558AE9D9D5A5}"   # the internal EFI partition, by UUID (disk numbers change)
 kit="$here/kit"
 
 [ -f "$backup/EFI/OC/OpenCore.efi" ] || { echo "no EFI/OC/OpenCore.efi under $backup" >&2; exit 1; }
