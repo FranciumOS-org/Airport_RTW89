@@ -26,6 +26,9 @@ start="$(date -r "$boot" '+%Y-%m-%d %H:%M:%S')"
 # The kernel's message buffer: IOLog always lands there. Loaded from the EFI,
 # the driver's lines have not been reaching the unified log at all.
 dmesg 2>/dev/null | grep -E "AirPort_RTW89|AirPortRTW89|rtw89" > "$out/user-dmesg.log" || true
+# The driver's own log ring (everything it logged since it loaded): the one
+# source that neither fills up with other kexts' lines nor depends on logd.
+"$here/build/out/rtw89ctl" log > "$out/user-ring.log" 2>&1 || true
 owner="$(stat -f %u "$here")"
-chown "$owner" "$out/user-driver.log" "$out/user-airportd.log" "$out/user-dmesg.log"
-echo "saved: $(wc -l < "$out/user-driver.log") driver lines, $(wc -l < "$out/user-dmesg.log") dmesg lines, $(wc -l < "$out/user-airportd.log") airportd lines"
+chown "$owner" "$out/user-driver.log" "$out/user-airportd.log" "$out/user-dmesg.log" "$out/user-ring.log"
+echo "saved: $(wc -l < "$out/user-ring.log") driver log ring lines, $(wc -l < "$out/user-driver.log") driver lines, $(wc -l < "$out/user-dmesg.log") dmesg lines, $(wc -l < "$out/user-airportd.log") airportd lines"

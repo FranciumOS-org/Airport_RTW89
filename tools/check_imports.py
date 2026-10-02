@@ -13,6 +13,9 @@ import sys
 from pathlib import Path
 
 KERNEL = Path("/System/Library/Kernels/kernel")
+# Defined by whatever the driver objects are linked into, not by the kernel:
+# the kext (src/kext/rtw89_logring.cpp) and the hosttest (host_kernel.c).
+PROVIDED_ELSEWHERE = {"_rtw89_iolog"}
 
 
 def symbols(path, flag):
@@ -22,7 +25,7 @@ def symbols(path, flag):
 
 def main():
     obj = Path(sys.argv[1])
-    undefined = sorted(symbols(obj, "-u"))
+    undefined = sorted(symbols(obj, "-u") - PROVIDED_ELSEWHERE)
     if not KERNEL.exists():
         print(f"{len(undefined)} undefined symbols; no {KERNEL} to check them against")
         return 0

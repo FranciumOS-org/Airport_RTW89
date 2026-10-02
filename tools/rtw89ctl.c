@@ -31,6 +31,7 @@
 #include <net/if.h>
 #include <spawn.h>
 #include <stdio.h>
+#include <stdlib.h>
 #include <string.h>
 #include <sys/ioctl.h>
 #include <sys/socket.h>
@@ -389,6 +390,31 @@ int main(int argc, char **argv)
         return 0;
     }
 
+    if (!strcmp(command, "log")) {
+        /* the driver's own log ring: its lines since it loaded (64 KB) */
+        CFTypeRef v;
+
+        kr = send_command(service, "log");
+        if (kr != KERN_SUCCESS) {
+            fprintf(stderr, "log failed: 0x%x%s\n", kr,
+                    kr == kIOReturnNotPrivileged ? " (run with sudo)" : "");
+            return 1;
+        }
+        v = IORegistryEntryCreateCFProperty(service, CFSTR("RTW89 Log"), NULL, 0);
+        if (v && CFGetTypeID(v) == CFStringGetTypeID()) {
+            CFIndex n = CFStringGetMaximumSizeForEncoding(CFStringGetLength(v),
+                                                          kCFStringEncodingUTF8) + 1;
+            char *buf = malloc((size_t)n);
+
+            if (buf && CFStringGetCString(v, buf, n, kCFStringEncodingUTF8))
+                fputs(buf, stdout);
+            free(buf);
+        }
+        if (v)
+            CFRelease(v);
+        return 0;
+    }
+
     if (!strcmp(command, "flush") && argc >= 3 &&
         (!strcmp(argv[2], "on") || !strcmp(argv[2], "off"))) {
         kr = send_command(service, !strcmp(argv[2], "on") ? "flush-on" : "flush-off");
@@ -429,7 +455,7 @@ int main(int argc, char **argv)
          strcmp(command, "join") && strcmp(command, "leave") && strcmp(command, "probe") &&
          strcmp(command, "drop")) ||
         (!strcmp(command, "join") && argc < 3)) {
-        fprintf(stderr, "usage: rtw89ctl up|down|scan|join SSID|leave|status|probe|drop|flush on|off|ax on|off|"
+        fprintf(stderr, "usage: rtw89ctl up|down|scan|join SSID|leave|status|log|probe|drop|flush on|off|ax on|off|"
                         "rejoin on|off\n");
         return 2;
     }

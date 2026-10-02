@@ -8,6 +8,12 @@
 #include <libkern/OSAtomic.h>
 #include <sys/kpi_mbuf.h>
 
+extern "C" {
+void rtw89_logring_init(void);
+void rtw89_logring_free(void);
+size_t rtw89_logring_copy(char *out, size_t max);
+}
+
 #define super IOEthernetController
 OSDefineMetaClassAndStructors(AirPort_RTW89, IOEthernetController)
 
@@ -393,6 +399,7 @@ bool AirPort_RTW89::start(IOService *provider)
     struct rtw89_glue_device device = {};
     int ret;
 
+    rtw89_logring_init();
     if (!super::start(provider))
         return false;
 
@@ -710,6 +717,24 @@ IOReturn AirPort_RTW89::setProperties(OSObject *properties)
         kIOReturnSuccess)
         return kIOReturnNotPrivileged;
 
+    if (command->isEqualTo("log")) {
+        /* the driver's log ring, published for rtw89ctl log to read */
+        const size_t max = 64 * 1024;
+        char *text = static_cast<char *>(IOMallocZero(max + 1));
+        OSString *s;
+
+        if (!text)
+            return kIOReturnNoMemory;
+        text[rtw89_logring_copy(text, max)] = 0;
+        s = OSString::withCString(text);
+        IOFree(text, max + 1);
+        if (!s)
+            return kIOReturnNoMemory;
+        setProperty("RTW89 Log", s);
+        s->release();
+        return kIOReturnSuccess;
+    }
+
     IOLockLock(_commandLock);
     if (!_probed) {
         result = kIOReturnNotReady;
@@ -916,6 +941,7 @@ void AirPort_RTW89::stop(IOService *provider)
 void AirPort_RTW89::free()
 {
     teardown();
+    rtw89_logring_free();
     if (_commandLock) {
         IOLockFree(_commandLock);
         _commandLock = nullptr;

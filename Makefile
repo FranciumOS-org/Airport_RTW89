@@ -52,8 +52,12 @@ COMPAT_FLAGS := -I$(COMPAT89_DIR) \
                 -I$(COMPAT_DIR) \
                 -I$(COMPAT_DIR)/linux
 
+# Every IOLog of the driver also lands in its own log ring (src/kext/rtw89_logring.cpp,
+# read with `rtw89ctl log`); the hosttest provides rtw89_iolog as printf.
+LOGRING_DEF := -DIOLog=rtw89_iolog
+
 DRIVER_CFLAGS := \
-    $(KEXT_FLAGS) $(COMPAT_FLAGS) \
+    $(KEXT_FLAGS) $(COMPAT_FLAGS) $(LOGRING_DEF) \
     -include $(COMPAT89_DIR)/rtw89_compat.h \
     -I$(RTW89_SRC) \
     -std=gnu11 \
@@ -108,7 +112,7 @@ FW_BINS       := $(wildcard $(FIRMWARE_DIR)/*.bin)
 FW_OBJS       := $(BUILD_DIR)/fw/rtw88_firmware.o $(BUILD_DIR)/fw/fw_blobs.o \
                  $(BUILD_DIR)/fw/rtw89_crypto.o
 # Plain kernel C: rtw88_firmware.c is written against IOKit, not the Linux shims.
-FW_CFLAGS     := $(KEXT_FLAGS) -std=gnu11 -DKERNEL -I$(COMPAT_DIR)
+FW_CFLAGS     := $(KEXT_FLAGS) $(LOGRING_DEF) -std=gnu11 -DKERNEL -I$(COMPAT_DIR)
 
 ALL_OBJS      := $(DRIVER_OBJS) $(COMPAT_OBJS) $(COMPAT89_OBJS) $(FW_OBJS)
 
@@ -214,6 +218,7 @@ KEXT_CXXFLAGS := $(ARCH) $(MINOS) -isysroot $(SDK) -nostdinc \
                  -D__PRIVATE_SPI__ -D__IO80211_TARGET=__MAC_13_0 \
                  -I$(MKSDK)/Headers -I$(COMPAT89_DIR) -Wall -MMD -MP
 KEXT_OBJS     := $(BUILD_DIR)/kext/AirPortRTW89.o $(BUILD_DIR)/kext/AirPortRTW89Native.o \
+                 $(BUILD_DIR)/kext/rtw89_logring.o \
                  $(BUILD_DIR)/kext/kmod_info.o
 KEXT_BUNDLE   := $(BUILD_DIR)/out/AirPort_RTW89.kext
 KEXT_BIN      := $(KEXT_BUNDLE)/Contents/MacOS/AirPort_RTW89
@@ -221,7 +226,7 @@ KEXT_BIN      := $(KEXT_BUNDLE)/Contents/MacOS/AirPort_RTW89
 $(BUILD_DIR)/kext/%.o: $(KEXT_SRC)/%.cpp
 	@mkdir -p $(dir $@)
 	@echo "  CXX  kext/$*.cpp"
-	@$(CXX) $(KEXT_CXXFLAGS) -c $< -o $@
+	@$(CXX) $(KEXT_CXXFLAGS) $(LOGRING_DEF) -c $< -o $@
 
 $(BUILD_DIR)/kext/%.o: $(KEXT_SRC)/%.c
 	@mkdir -p $(dir $@)
