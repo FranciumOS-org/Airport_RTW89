@@ -54,7 +54,7 @@ SECS=float(sys.argv[3]) if len(sys.argv)>3 else 5
 RUNS=int(sys.argv[4]) if len(sys.argv)>4 else 3
 wifi_ip,wired_ip=addr(WIFI),addr(WIRED)
 srv=bound(WIRED,wired_ip,47032); srv.listen(1)
-cli=bound(WIFI,wifi_ip,47031); cli.settimeout(5)
+cli=bound(WIFI,wifi_ip,0); cli.settimeout(5)
 try: cli.connect((wired_ip,47032))
 except OSError as e: sys.exit(f"no connection from {WIFI} to {WIRED}: {e}")
 wire,_=srv.accept()
