@@ -186,7 +186,7 @@ card ran at 258-360 Mb/s down and about 200 Mb/s up, which is the connection's
 limit rather than the card's (the wired port did 100 Mb/s up at that moment).
 Round trips took a median of 1.3-2.4 ms at every size (worst 10 ms).
 
-**802.11ax (built, not yet run on hardware).** A network that has the HE
+**802.11ax (confirmed on hardware).** A network that has the HE
 capabilities and HE operation elements is joined as 802.11ax, on 5 GHz on top
 of 802.11ac and on 2.4 GHz on top of 802.11n, after the checks
 `ieee80211_determine_chan_mode()` makes: the AP's HE rates are consistent, the
@@ -201,6 +201,17 @@ Linux; otherwise the join stays 802.11ac. BlockAck: requests to an 802.11ax AP
 ask for 128 frames (the chip's limit) instead of 64 and carry the ADDBA
 extension element; the receive window stays at 64 frames, the chip's limit.
 `rtw89ctl ax off` makes the next join stop at 802.11ac, for comparing.
+
+On the test machine the same network came up as 802.11ax, 80 MHz, two streams.
+Against the wired port (`tools/tput_probe.py`) uploads rose to 504-670 Mb/s;
+downloads stayed where 802.11ac had them, at 477-518 Mb/s, so something other
+than the radio rate limits that direction (the 64-frame receive window is one
+candidate; the machine's processors are not busy). Round trips: median
+1.2-1.7 ms. Internet downloads 355-388 Mb/s against 633-675 Mb/s on the wired
+port. During the downloads about 0.3% of frames reached the driver more than
+5 ms after the chip's receive timestamp (worst 19 ms), which did not happen
+with 802.11ac; whether that is real delay or the timestamp of a long 802.11ax
+transmission being that of its start is not known yet.
 
 Not there yet:
 - Following the AP's beacons after the join. Changes it announces there (BSS

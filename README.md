@@ -6,10 +6,10 @@ AirPort_RTW88 in [Realtek-AirPort-Family](https://github.com/xnoah222/Realtek-Ai
 
 **Status: Wi-Fi works through an Ethernet-style interface. On the TUF A15
 (macOS 15.8.1) the kext brings the RTL8852BE up, scans, joins a WPA2-PSK or open
-network (802.11ac, up to 80 MHz, two streams) and carries about 500 Mb/s each way.
-802.11ax is built but has not run on the card yet. There is no Wi-Fi menu: networks
-are joined with `rtw89ctl`. Not there yet: WPA3, power management and sleep. Do not
-put this in an EFI.**
+network (802.11ax or 802.11ac, up to 80 MHz, two streams) and carries about
+500 Mb/s down and 500-670 Mb/s up. There is no Wi-Fi menu: networks are joined with
+`rtw89ctl`. Not there yet: WPA3, following the access point's beacons, reconnecting,
+power management and sleep. Do not put this in an EFI.**
 
 See [docs/PORTING.md](docs/PORTING.md) for the plan and milestones.
 
