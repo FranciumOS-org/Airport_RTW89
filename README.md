@@ -4,12 +4,12 @@ Work-in-progress port of the Linux **rtw89** driver to macOS for the
 **Realtek RTL8852BE** (`10EC:B852`, Wi-Fi 6 PCIe), following the approach of
 AirPort_RTW88 in [Realtek-AirPort-Family](https://github.com/xnoah222/Realtek-AirPort-Family).
 
-**Status: Wi-Fi works through an Ethernet-style interface. On the TUF A15
-(macOS 15.8.1) the kext brings the RTL8852BE up, scans, joins a WPA2-PSK or open
-network (802.11ax or 802.11ac, up to 80 MHz, two streams) and carries about
-500 Mb/s down and 500-670 Mb/s up. There is no Wi-Fi menu: networks are joined with
-`rtw89ctl`. A lost connection is noticed and joined again. Not there yet: WPA3, power
-management and sleep, joining at boot. Do not put this in an EFI.**
+**Status: native Wi-Fi works on the TUF A15 (macOS 15.8.1). The RTL8852BE shows up
+as Wi-Fi in macOS, which scans and joins WPA2-PSK and open networks through its own
+menu (802.11ax or 802.11ac, up to 80 MHz, two streams, about 500 Mb/s down and
+500-670 Mb/s up). It needs the old Wi-Fi stack and a small front kext in the OpenCore
+EFI (see [efi/README.md](efi/README.md)); the driver itself is still loaded by hand.
+Not there yet: sleep and wake, AirDrop, WPA3, loading at boot.**
 
 See [docs/PORTING.md](docs/PORTING.md) for the plan and milestones.
 
