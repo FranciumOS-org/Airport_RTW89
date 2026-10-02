@@ -67,7 +67,7 @@ bool AirPortRTW89Front::start(IOService *provider)
     _pci = OSDynamicCast(IOPCIDevice, provider);
     if (!_pci)
         return false;
-    _backLock = IORWLockAlloc();
+    _backLock = IOLockAlloc();
     if (!_backLock)
         return false;
     _mac = kPlaceholderMac;
@@ -105,7 +105,7 @@ void AirPortRTW89Front::stop(IOService *provider)
 void AirPortRTW89Front::free()
 {
     if (_backLock) {
-        IORWLockFree(_backLock);
+        IOLockFree(_backLock);
         _backLock = nullptr;
     }
     OSSafeReleaseNULL(_workLoop);
@@ -119,16 +119,34 @@ IOReturn AirPortRTW89Front::registerWithPolicyMaker(IOService *policyMaker)
 
 IOReturn AirPortRTW89Front::setPowerState(unsigned long powerStateOrdinal, IOService *whatDevice)
 {
-    IORWLockRead(_backLock);
-    if (_connected && _back.power)
+    const bool there = backEnter();
+    if (there && _back.power)
         _back.power(_back.ctx, powerStateOrdinal != kPowerStateOff);
-    IORWLockUnlock(_backLock);
+    backLeave();
     return IOPMAckImplied;
 }
 
 /* ------------------------------------------------------------------ */
 /*  The driver proper comes and goes                                    */
 /* ------------------------------------------------------------------ */
+
+/*
+ * Around every call into the driver proper. Not a read/write lock: IO80211
+ * calls back in from inside such a call (postMessage() asks for the BSSID),
+ * and a second read lock taken while disconnectBack() waits for the write
+ * lock would never be granted. Counting instead, the call that comes in
+ * during a disconnect is told nobody is there, and the outer one returns.
+ */
+bool AirPortRTW89Front::backEnter()
+{
+    OSIncrementAtomic(&_backCalls);
+    return _connected;
+}
+
+void AirPortRTW89Front::backLeave()
+{
+    OSDecrementAtomic(&_backCalls);
+}
 
 IOReturn AirPortRTW89Front::callPlatformFunction(const OSSymbol *functionName, bool waitForFunction,
                                                  void *param1, void *param2, void *param3,
@@ -165,14 +183,14 @@ IOReturn AirPortRTW89Front::connectBack(const struct rtw89_back_ops *back,
         !back->request || !back->output)
         return kIOReturnBadArgument;
 
-    IORWLockWrite(_backLock);
+    IOLockLock(_backLock);
     if (_connected) {
-        IORWLockUnlock(_backLock);
+        IOLockUnlock(_backLock);
         return kIOReturnExclusiveAccess;
     }
     _back = *back;
     _connected = true;
-    IORWLockUnlock(_backLock);
+    IOLockUnlock(_backLock);
 
     back->get_mac(back->ctx, _mac.bytes);
     _haveMac = true;
@@ -214,13 +232,18 @@ IOReturn AirPortRTW89Front::disconnectBack()
 
     if (!_backLock)
         return kIOReturnSuccess;
-    /* waits for calls in progress; none start after this */
-    IORWLockWrite(_backLock);
+    /* none start after this; wait for the ones in progress */
+    IOLockLock(_backLock);
     was = _connected;
     _connected = false;
     gAppleRsn = false;
+    for (unsigned int ms = 1; _backCalls; ms++) {
+        IOSleep(1);
+        if (ms % 5000 == 0)
+            LOG("still waiting for %d call(s) into the driver to return", (int)_backCalls);
+    }
     bzero(&_back, sizeof(_back));
-    IORWLockUnlock(_backLock);
+    IOLockUnlock(_backLock);
 
     if (was) {
         setProperty("RTW89 Back Connected", kOSBooleanFalse);
@@ -331,10 +354,10 @@ SInt32 AirPortRTW89Front::apple80211_ioctl(IO80211Interface *interface, IO80211V
     bool handled = false;
     SInt32 ret = 0;
 
-    IORWLockRead(_backLock);
-    if (_connected && _back.ioctl)
+    const bool there = backEnter();
+    if (there && _back.ioctl)
         ret = _back.ioctl(_back.ctx, interface, vif, net, cmd, data, &handled);
-    IORWLockUnlock(_backLock);
+    backLeave();
     return handled ? ret : super::apple80211_ioctl(interface, vif, net, cmd, data);
 }
 
@@ -345,10 +368,10 @@ SInt32 AirPortRTW89Front::apple80211_ioctl_set(IO80211Interface *interface,
     bool handled = false;
     SInt32 ret = 0;
 
-    IORWLockRead(_backLock);
-    if (_connected && _back.ioctl_set)
+    const bool there = backEnter();
+    if (there && _back.ioctl_set)
         ret = _back.ioctl_set(_back.ctx, interface, vif, skywalk, data, &handled);
-    IORWLockUnlock(_backLock);
+    backLeave();
     return handled ? ret : super::apple80211_ioctl_set(interface, vif, skywalk, data);
 }
 
@@ -357,10 +380,10 @@ SInt32 AirPortRTW89Front::apple80211Request(unsigned int type, int number,
 {
     SInt32 ret = ENXIO;     /* nobody there to ask */
 
-    IORWLockRead(_backLock);
-    if (_connected)
+    const bool there = backEnter();
+    if (there)
         ret = _back.request(_back.ctx, type, number, interface, data);
-    IORWLockUnlock(_backLock);
+    backLeave();
     return ret;
 }
 
@@ -368,10 +391,10 @@ IOReturn AirPortRTW89Front::enable(IONetworkInterface *iface)
 {
     IOReturn ret = kIOReturnSuccess;
 
-    IORWLockRead(_backLock);
-    if (_connected && _back.enable)
+    const bool there = backEnter();
+    if (there && _back.enable)
         ret = _back.enable(_back.ctx, true) ? kIOReturnError : kIOReturnSuccess;
-    IORWLockUnlock(_backLock);
+    backLeave();
     if (ret != kIOReturnSuccess)
         return ret;
 
@@ -389,10 +412,10 @@ IOReturn AirPortRTW89Front::disable(IONetworkInterface *iface)
 {
     IOReturn ret = super::disable(iface);
 
-    IORWLockRead(_backLock);
-    if (_connected && _back.enable)
+    const bool there = backEnter();
+    if (there && _back.enable)
         _back.enable(_back.ctx, false);
-    IORWLockUnlock(_backLock);
+    backLeave();
     IO80211Controller::setLinkStatus(kIONetworkLinkValid | kIONetworkLinkNoNetworkChange);
     return ret;
 }
@@ -401,15 +424,15 @@ UInt32 AirPortRTW89Front::outputPacket(mbuf_t m, void *param)
 {
     UInt32 ret;
 
-    IORWLockRead(_backLock);
-    if (_connected) {
+    const bool there = backEnter();
+    if (there) {
         ret = _back.output(_back.ctx, m);
     } else {
         if (m)
             mbuf_freem(m);
         ret = kIOReturnOutputDropped;
     }
-    IORWLockUnlock(_backLock);
+    backLeave();
     return ret;
 }
 
@@ -461,10 +484,10 @@ IOReturn AirPortRTW89Front::setHardwareAddress(const IOEthernetAddress *addr)
     if (!addr)
         return kIOReturnBadArgument;
     /* CoreWiFi sets a per-network private address before it asks to join */
-    IORWLockRead(_backLock);
-    if (_connected && _back.set_mac)
+    const bool there = backEnter();
+    if (there && _back.set_mac)
         ret = _back.set_mac(_back.ctx, addr->bytes) ? kIOReturnError : kIOReturnSuccess;
-    IORWLockUnlock(_backLock);
+    backLeave();
     if (ret == kIOReturnSuccess)
         _mac = *addr;
     return ret;
