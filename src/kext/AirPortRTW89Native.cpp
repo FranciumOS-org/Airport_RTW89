@@ -206,6 +206,34 @@ static bool decodeHostAssoc(const uint8_t *p, struct HostAssoc *out)
     return true;
 }
 
+/*
+ * A join request in the newer form that decodeHostAssoc() does not take (WPA3
+ * for one, whose layout is not known yet): log its shape so it can be worked
+ * out, never its contents. Per 4-byte word, '.' is zero and '#' is not; the
+ * fields that are not secret are printed as numbers.
+ */
+static void logHostAssocShape(const uint8_t *p, uint32_t len)
+{
+    char map[908 / 4 + 1];
+    uint32_t words = len / 4, i;
+
+    for (i = 0; i < words && i < sizeof(map) - 1; i++)
+        map[i] = (p[4 * i] | p[4 * i + 1] | p[4 * i + 2] | p[4 * i + 3]) ? '#' : '.';
+    map[i] = 0;
+    LOG("join request not understood (%u bytes): head %u %u %u, upper auth 0x%x, name length %u, "
+        "key length %u, key type %u", len, le32(p), le32(p + 4), le32(p + 8), le32(p + 12),
+        le32(p + 16), le32(p + 64), le32(p + 68));
+    for (i = 0; i < words; i += 64) {
+        char part[65];
+        uint32_t n = words - i < 64 ? words - i : 64;
+
+        memcpy(part, map + i, n);
+        part[n] = 0;
+        LOG("join request words %3u-%3u (bytes %3u-%3u): %s", i, i + n - 1, 4 * i, 4 * (i + n) - 1,
+            part);
+    }
+}
+
 static bool assocLooksValid(const struct apple80211_assoc_data *d)
 {
     const uint32_t personal = APPLE80211_AUTHTYPE_WPA_PSK | APPLE80211_AUTHTYPE_WPA2_PSK |
@@ -614,6 +642,12 @@ int AirPort_RTW89::backIoctl(void *ctx, void *interface, void *vif, void *ifnet,
             return errnoOf(r);
         }
         bzero(prefix, sizeof(prefix));
+        {
+            Scratch whole(len);
+
+            if (whole.p && copyin(reqData, whole.p, len) == 0)
+                logHostAssocShape(whole.bytes(), len);
+        }
     }
 
     const bool scanBridge = (isGet && reqType == APPLE80211_IOC_SCAN_RESULT) ||
@@ -770,8 +804,11 @@ int AirPort_RTW89::nativeAssociate(void *data)
     secure = (d->ad_auth_upper & personal) != 0;
     enterprise = isEnterprise(d->ad_auth_upper);
     if (d->ad_auth_lower != APPLE80211_AUTHTYPE_OPEN ||
-        (d->ad_auth_upper != APPLE80211_AUTHTYPE_NONE && !secure && !enterprise))
+        (d->ad_auth_upper != APPLE80211_AUTHTYPE_NONE && !secure && !enterprise)) {
+        LOG("join turned down: lower auth %u, upper auth 0x%x, key length %u, key type %u",
+            d->ad_auth_lower, d->ad_auth_upper, d->ad_key.key_len, d->ad_key.key_cipher_type);
         return kIOReturnUnsupported;
+    }
     /* The key handshake is the driver's, also after an 802.1X sign-in:
      * IO80211's supplicant is only started by its own handling of this
      * request, which newer systems' form of it never reaches. Without it
