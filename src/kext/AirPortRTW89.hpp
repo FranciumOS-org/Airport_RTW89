@@ -96,6 +96,8 @@ private:
     void nativeEvents();
     static void nativeEventsCall(thread_call_param_t self, thread_call_param_t);
     void nativePost(unsigned int msg, void *data = nullptr, size_t len = 0);
+    /* macOS asks again whether the radio is on */
+    void nativePowerChanged();
     int nativeRequest(bool isSet, int number, void *data);
     int nativeAssociate(void *data);
     static void scanDone(void *ctx, bool aborted);
@@ -109,13 +111,19 @@ private:
     static int backEnable(void *ctx, bool on);
     static uint32_t backOutput(void *ctx, mbuf_t m);
     static void backPower(void *ctx, bool on);
-    /* The radio on, unless the machine is going down. */
-    int radioUp() { return _halting ? -100 : rtw89_glue_up(); }
+    /* The radio on, unless the machine is going down or asleep. */
+    int radioUp() { return _halting ? -100 : _asleep ? -101 : rtw89_glue_up(); }
     static IOReturn powerEvent(void *target, void *refCon, UInt32 messageType,
                                IOService *provider, void *messageArgument, vm_size_t argSize);
+    void sleepRadio();
+    void wakeRadio();
 
     IONotifier *_powerNotifier = nullptr;
     volatile bool _halting = false;
+    /* between kIOMessageSystemWillSleep and kIOMessageSystemHasPoweredOn */
+    volatile bool _asleep = false;
+    /* the radio was up when the machine went to sleep */
+    bool _upBeforeSleep = false;
 
     bool _native = false;
     /* Link changes and finished scans reach IO80211 from a thread of their

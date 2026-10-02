@@ -719,6 +719,7 @@ static int test_data(void)
      * passed on after a couple of milliseconds, not at the next reception. */
     {
         uint8_t frame[26 + 8 + sizeof(body) + 8];
+        uint32_t flushed;
 
         memset(frame, 0, sizeof(frame));
         frame[0] = 0x88; frame[1] = 0x42;
@@ -730,13 +731,15 @@ static int test_data(void)
         frame[26] = (uint8_t)(pn + 50); frame[27] = (uint8_t)((pn + 50) >> 8);
         frame[29] = 0x20; frame[30] = (uint8_t)((pn + 50) >> 16);
         memcpy(frame + 34, body, sizeof(body));
+        rtw89_glue_link(&link);
+        flushed = link.rx_ppdu_flushed;
         n = sta_rx.count;
         rtw89_glue_test_rx_parked(frame, sizeof(frame), 2437, -40, true);
         EXPECT(sta_rx.count == n);
         usleep(100 * 1000);
         EXPECT(sta_rx.count == n + 1 && sta_rx.len == 14 + sizeof(test_ip));
         rtw89_glue_link(&link);
-        EXPECT(link.rx_ppdu_flushed == 1 && link.ppdu_flush);
+        EXPECT(link.rx_ppdu_flushed == flushed + 1 && link.ppdu_flush);
     }
 
 #undef EXPECT
@@ -1004,8 +1007,12 @@ static int test_keep(void)
     static const uint8_t csa[] = { 37, 3, 1, 11, 2 };   /* to channel 11 in two beacons */
     struct rtw89_glue_link link;
     int failures = 0, n, i;
+    uint32_t rejoins;
 
 #define EXPECT(cond) do { if (!(cond)) { failures++; printf("== FAIL %s\n", #cond); } } while (0)
+    /* counters run for the driver's lifetime: the test runs more than once */
+    rtw89_glue_link(&link);
+    rejoins = link.rejoins;
     /* the pretend chip's scan from the start of the test never ended */
     rtw89_glue_test_scan_done();
     ap_send_beacon();
@@ -1082,7 +1089,7 @@ static int test_keep(void)
     ap_send_deauth(7);
     EXPECT(ap_answer_rejoin(gtk1, 1));
     rtw89_glue_link(&link);
-    EXPECT(link.rejoins == 1 && !link.rejoining && link.rejoin && !link.last_error);
+    EXPECT(link.rejoins == rejoins + 1 && !link.rejoining && link.rejoin && !link.last_error);
     EXPECT(sta_tx_test() == 0);
 
     /* the AP goes silent, and is there again a little later */
@@ -1094,7 +1101,7 @@ static int test_keep(void)
     EXPECT(link.rejoining && link.state == RTW89_GLUE_LINK_DOWN);
     EXPECT(ap_answer_rejoin(gtk1, 1));
     rtw89_glue_link(&link);
-    EXPECT(link.rejoins == 2 && link.freq == 2437);
+    EXPECT(link.rejoins == rejoins + 2 && link.freq == 2437);
 
     /* the AP announces a move to channel 11, and moves */
     ap_beacon_extra = csa;
@@ -1114,7 +1121,7 @@ static int test_keep(void)
     ap_send_beacon();
     EXPECT(ap_answer_rejoin(gtk1, 1));
     rtw89_glue_link(&link);
-    EXPECT(link.rejoins == 3 && link.freq == 2462);
+    EXPECT(link.rejoins == rejoins + 3 && link.freq == 2462);
     EXPECT(sta_tx_test() == 0);
 
     /* an attempt that is refused is followed by another */
@@ -1133,7 +1140,7 @@ static int test_keep(void)
     ap_send_assoc_resp(17);
     EXPECT(ap_answer_rejoin(gtk1, 1));
     rtw89_glue_link(&link);
-    EXPECT(link.rejoins == 4);
+    EXPECT(link.rejoins == rejoins + 4);
 
     /* leaving is for good */
     n = ap.auth_count;
@@ -1598,6 +1605,18 @@ static int test_probed_device(void)
         rtw89_glue_down();
         EXPECT(!rtw89_glue_is_up() && !rtw89_glue_scanning());
         printf("== radio down\n");
+
+        /* Sleep and wake: down while it was in use, then up again on the
+         * same probed chip, and a join on top. */
+        ret = rtw89_glue_up();
+        printf("== radio up after down (wake) returned %d\n", ret);
+        EXPECT(ret == 0 && rtw89_glue_is_up());
+        if (!ret) {
+            failures += test_join();
+            rtw89_glue_down();
+            EXPECT(!rtw89_glue_is_up() && !rtw89_glue_scanning());
+            printf("== radio down again (sleep)\n");
+        }
     }
 #undef EXPECT
     return failures;

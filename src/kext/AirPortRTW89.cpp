@@ -771,6 +771,11 @@ IOReturn AirPort_RTW89::setProperties(OSObject *properties)
  * Shutting down and restarting do not stop drivers. A chip left running,
  * with its interrupts and DMA live, goes on through a restart into the
  * firmware and the next boot, which then hangs: bring it down here.
+ *
+ * Sleep takes the chip's power away, and with it the firmware and every
+ * register: the radio goes down before, as when Wi-Fi is turned off, and
+ * comes back up (firmware download included) after. The network is not
+ * joined again here; macOS does that itself once the radio is back.
  */
 IOReturn AirPort_RTW89::powerEvent(void *target, void *refCon, UInt32 messageType,
                                    IOService *provider, void *messageArgument,
@@ -778,6 +783,14 @@ IOReturn AirPort_RTW89::powerEvent(void *target, void *refCon, UInt32 messageTyp
 {
     AirPort_RTW89 *me = static_cast<AirPort_RTW89 *>(target);
 
+    if (messageType == kIOMessageSystemWillSleep) {
+        me->sleepRadio();
+        return kIOReturnSuccess;
+    }
+    if (messageType == kIOMessageSystemHasPoweredOn) {
+        me->wakeRadio();
+        return kIOReturnSuccess;
+    }
     if (messageType != kIOMessageSystemWillPowerOff && messageType != kIOMessageSystemWillRestart)
         return kIOReturnSuccess;
     me->_halting = true;
@@ -788,6 +801,44 @@ IOReturn AirPort_RTW89::powerEvent(void *target, void *refCon, UInt32 messageTyp
     LOG("the machine is %s: radio off", messageType == kIOMessageSystemWillRestart ?
         "restarting" : "shutting down");
     return kIOReturnSuccess;
+}
+
+void AirPort_RTW89::sleepRadio()
+{
+    IOLockLock(_commandLock);
+    /* from here on a request from macOS cannot bring the radio up */
+    _asleep = true;
+    _upBeforeSleep = _probed && rtw89_glue_is_up();
+    if (_upBeforeSleep)
+        rtw89_glue_down();
+    IOLockUnlock(_commandLock);
+    if (_upBeforeSleep)
+        publishLink();
+    LOG("going to sleep: radio %s", _upBeforeSleep ? "off" : "was already off");
+}
+
+void AirPort_RTW89::wakeRadio()
+{
+    uint64_t start, end;
+    int ret = 0;
+
+    if (!_asleep)
+        return;
+    clock_get_uptime(&start);
+    IOLockLock(_commandLock);
+    _asleep = false;
+    if (_upBeforeSleep)
+        ret = radioUp();
+    IOLockUnlock(_commandLock);
+    clock_get_uptime(&end);
+    absolutetime_to_nanoseconds(end - start, &end);
+    if (!_upBeforeSleep) {
+        LOG("awake: radio stays off");
+        return;
+    }
+    LOG("awake: radio on: %d (%llu ms)", ret, end / 1000000ULL);
+    if (_native)
+        nativePowerChanged();
 }
 
 void AirPort_RTW89::teardown()
