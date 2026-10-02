@@ -5,13 +5,13 @@
  * Calls macOS's own join function, Apple80211Associate2 (IO80211 private
  * framework), the way airportd does, so that a debugger can see which of its
  * checks turns a join down before anything reaches the driver. Scans, picks
- * the scan entry with that name and asks for the password at a prompt (never
- * on the command line; not printed or kept). It really joins if it works,
- * and leaves the current network first, as airportd would.
+ * the scan entry with that name and uses a dummy password: the checks that
+ * matter run before any key exchange, and under lldb a password prompt cannot
+ * take the terminal anyway (SIGTTOU). It leaves the current network first, as
+ * airportd would; the join itself then fails on the wrong password.
  */
 #include <CoreFoundation/CoreFoundation.h>
 #include <dlfcn.h>
-#include <readpassphrase.h>
 #include <stdio.h>
 #include <string.h>
 
@@ -56,13 +56,8 @@ int main(int argc, char **argv)
     }
     CFShow(CFDictionaryGetValue(net, CFSTR("RSN_IE")));
 
-    char pw[128];
-    if (!readpassphrase("Wi-Fi password: ", pw, sizeof(pw), RPP_REQUIRE_TTY))
-        return 1;
-    CFStringRef pass = CFStringCreateWithCString(NULL, pw, kCFStringEncodingUTF8);
-    memset(pw, 0, sizeof(pw));
+    CFStringRef pass = CFSTR("not-the-password");
     e = assoc2(ref, net, pass, NULL);
     printf("Apple80211Associate2: %d\n", e);
-    CFRelease(pass);
     return 0;
 }
