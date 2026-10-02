@@ -27,7 +27,7 @@
 #include <stdint.h>
 #include <sys/kernel_types.h>   /* mbuf_t */
 
-#define RTW89_FRONT_API_VERSION 1
+#define RTW89_FRONT_API_VERSION 2
 #define RTW89_FRONT_CLASS       "AirPortRTW89Front"
 /* callPlatformFunction(name, true, back ops, front ops out, 0, 0) */
 #define RTW89_FRONT_CONNECT     "RTW89FrontConnect"
@@ -59,6 +59,11 @@ struct rtw89_front_ops {
                        unsigned long cmd, void *data);
     int (*super_ioctl_set)(void *ctx, void *interface, void *virtual_interface,
                            void *skywalk_interface, void *data);
+    /* Who does the key handshake of the next join: IO80211's own supplicant
+     * (true; networks with 802.1X sign-in) or the driver (false). With true,
+     * received EAPOL frames are handed to IO80211 and the keys come back as
+     * APPLE80211_IOC_CIPHER_KEY requests. */
+    void (*set_apple_rsn)(void *ctx, bool on);
 };
 
 /* What the back does for the front. */

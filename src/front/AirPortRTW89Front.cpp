@@ -25,9 +25,19 @@ static IOPMPowerState gPowerStates[kPowerStateCount] = {
 
 OSDefineMetaClassAndStructors(AirPortRTW89FrontInterface, IO80211Interface)
 
+/* One card, one front: set through rtw89_front_ops.set_apple_rsn(). */
+static volatile bool gAppleRsn;
+
 UInt32 AirPortRTW89FrontInterface::inputPacket(mbuf_t packet, UInt32 length, IOOptionBits options,
                                                void *param)
 {
+    if (gAppleRsn && packet && mbuf_len(packet) >= 14) {
+        const uint8_t *eth = static_cast<const uint8_t *>(mbuf_data(packet));
+
+        /* EAPOL: for the supplicant inside IO80211, as AirportItlwm does */
+        if (eth[12] == 0x88 && eth[13] == 0x8e)
+            return IO80211Interface::inputPacket(packet, (UInt32)mbuf_pkthdr_len(packet), 0, param);
+    }
     return IOEthernetInterface::inputPacket(packet, length, options, param);
 }
 
@@ -190,6 +200,7 @@ IOReturn AirPortRTW89Front::connectBack(const struct rtw89_back_ops *back,
     front->tx_wake = opTxWake;
     front->super_ioctl = opSuperIoctl;
     front->super_ioctl_set = opSuperIoctlSet;
+    front->set_apple_rsn = opSetAppleRsn;
 
     setProperty("RTW89 Back Connected", kOSBooleanTrue);
     LOG("driver connected, address %02x:%02x:%02x:%02x:%02x:%02x", _mac.bytes[0], _mac.bytes[1],
@@ -207,6 +218,7 @@ IOReturn AirPortRTW89Front::disconnectBack()
     IORWLockWrite(_backLock);
     was = _connected;
     _connected = false;
+    gAppleRsn = false;
     bzero(&_back, sizeof(_back));
     IORWLockUnlock(_backLock);
 
@@ -253,6 +265,16 @@ void AirPortRTW89Front::opSetLink(void *ctx, bool up, uint64_t bps, unsigned int
             me->_netif->setLinkQualityMetric(100);
         return kIOReturnSuccess;
     }, (void *)(uintptr_t)up, (void *)(uintptr_t)(up ? 0 : reason));
+}
+
+void AirPortRTW89Front::opSetAppleRsn(void *ctx, bool on)
+{
+    gAppleRsn = on;
+}
+
+bool AirPortRTW89Front::useAppleRSNSupplicant(IO80211Interface *interface)
+{
+    return gAppleRsn;
 }
 
 mbuf_t AirPortRTW89Front::opAllocPacket(void *ctx, unsigned int len)

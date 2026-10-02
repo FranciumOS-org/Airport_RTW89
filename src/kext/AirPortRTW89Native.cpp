@@ -33,6 +33,8 @@ struct AirPort_RTW89::NativeState {
     uint32_t authUpper = APPLE80211_AUTHTYPE_NONE;
     uint8_t countryCode[APPLE80211_MAX_CC_LEN] = { 'Z', 'Z', 0 };
     uint32_t powerSave = APPLE80211_POWERSAVE_MODE_DISABLED;
+    uint8_t rsnIe[64] = {};             /* set by IO80211 for the next join */
+    uint8_t rsnIeLen = 0;
     uint8_t roamProfile[76] = {};
     bool roamProfileValid = false;
     volatile UInt32 assocRequests = 0;  /* ASSOCIATE requests that reached us */
@@ -88,6 +90,17 @@ static int errnoOf(SInt32 r)
     case kIOReturnNoSpace:      return ENOSPC;
     default:                    return EIO;
     }
+}
+
+/* Upper authentication types whose sign-in is 802.1X (WPA/WPA2-Enterprise). */
+static const uint32_t kEnterpriseAuth = APPLE80211_AUTHTYPE_WPA | APPLE80211_AUTHTYPE_WPA2 |
+                                        APPLE80211_AUTHTYPE_8021X | APPLE80211_AUTHTYPE_SHA256_8021X;
+static const uint32_t kPersonalAuth = APPLE80211_AUTHTYPE_WPA_PSK | APPLE80211_AUTHTYPE_WPA2_PSK |
+                                      APPLE80211_AUTHTYPE_SHA256_PSK;
+
+static bool isEnterprise(uint32_t upper)
+{
+    return (upper & kEnterpriseAuth) && !(upper & kPersonalAuth);
 }
 
 static bool isConnected(const struct rtw89_glue_link &link)
@@ -173,7 +186,7 @@ static bool decodeHostAssoc(const uint8_t *p, struct HostAssoc *out)
 
     if (le32(p) != 1 || le32(p + 4) != 2 || le32(p + 8) != 1 || le32(p + 60) != 1)
         return false;
-    if ((upper != 0 && upper != 8) || !ssidLen || ssidLen > 32 ||
+    if ((upper != 0 && upper != 8 && !isEnterprise(upper)) || !ssidLen || ssidLen > 32 ||
         (upper == 8 ? keyLen != 32 : keyLen != 0))
         return false;
     for (uint32_t i = 0; i < ssidLen; i++)
@@ -209,8 +222,11 @@ static bool assocLooksValid(const struct apple80211_assoc_data *d)
         if (!d->ad_ssid[i])
             return false;
     secure = (d->ad_auth_upper & personal) != 0;
-    if (d->ad_auth_lower != APPLE80211_AUTHTYPE_OPEN ||
-        (d->ad_auth_upper != APPLE80211_AUTHTYPE_NONE && !secure))
+    if (d->ad_auth_lower != APPLE80211_AUTHTYPE_OPEN)
+        return false;
+    if (isEnterprise(d->ad_auth_upper))
+        return true;
+    if (d->ad_auth_upper != APPLE80211_AUTHTYPE_NONE && !secure)
         return false;
     return secure ? d->ad_key.key_len == 32 : d->ad_key.key_len == 0;
 }
@@ -331,6 +347,8 @@ void AirPort_RTW89::disconnectFront()
 
     if (!_front)
         return;
+    if (_ns->front.set_apple_rsn)
+        _ns->front.set_apple_rsn(_ns->front.ctx, false);
     _nativeClosing = true;
     if (_nativeCall) {
         /* nothing new is queued now; let one that is running finish */
@@ -707,7 +725,7 @@ int AirPort_RTW89::nativeAssociate(void *data)
                               APPLE80211_AUTHTYPE_SHA256_PSK;
     struct rtw89_glue_link link;
     const uint8_t *bssid, *pmk = nullptr;
-    bool secure;
+    bool secure, enterprise;
     int ret;
 
     OSIncrementAtomic(&_ns->assocRequests);
@@ -716,10 +734,17 @@ int AirPort_RTW89::nativeAssociate(void *data)
         return kIOReturnBadArgument;
 
     secure = (d->ad_auth_upper & personal) != 0;
+    enterprise = isEnterprise(d->ad_auth_upper);
     if (d->ad_auth_lower != APPLE80211_AUTHTYPE_OPEN ||
-        (d->ad_auth_upper != APPLE80211_AUTHTYPE_NONE && !secure))
+        (d->ad_auth_upper != APPLE80211_AUTHTYPE_NONE && !secure && !enterprise))
         return kIOReturnUnsupported;
-    if (secure) {
+    /* 802.1X sign-in and the key handshake after it are IO80211's; a shared
+     * password's handshake is the driver's */
+    if (_ns->front.set_apple_rsn)
+        _ns->front.set_apple_rsn(_ns->front.ctx, enterprise);
+    if (enterprise) {
+        /* nothing to check: the keys come later */
+    } else if (secure) {
         /* IO80211 hands over the pairwise master key; the 4-way handshake is
          * the driver's */
         if (d->ad_key.key_len != 32)
@@ -743,12 +768,22 @@ int AirPort_RTW89::nativeAssociate(void *data)
         rtw89_glue_leave();
     _ns->authLower = d->ad_auth_lower;
     _ns->authUpper = d->ad_auth_upper;
-    ret = rtw89_glue_join_pmk(d->ad_ssid, d->ad_ssid_len, bssid, pmk);
-    if (ret == -2 && bssid)     /* that access point is not in the list: any of the network's */
-        ret = rtw89_glue_join_pmk(d->ad_ssid, d->ad_ssid_len, nullptr, pmk);
+    if (enterprise) {
+        const uint8_t *ie = d->ad_rsn_ie[0] == 48 ? d->ad_rsn_ie :
+                            _ns->rsnIeLen ? _ns->rsnIe : nullptr;
+        size_t ieLen = ie ? (size_t)ie[1] + 2 : 0;
+
+        ret = rtw89_glue_join_ext(d->ad_ssid, d->ad_ssid_len, bssid, ie, ieLen);
+        if (ret == -2 && bssid)
+            ret = rtw89_glue_join_ext(d->ad_ssid, d->ad_ssid_len, nullptr, ie, ieLen);
+    } else {
+        ret = rtw89_glue_join_pmk(d->ad_ssid, d->ad_ssid_len, bssid, pmk);
+        if (ret == -2 && bssid) /* that access point is not in the list: any of the network's */
+            ret = rtw89_glue_join_pmk(d->ad_ssid, d->ad_ssid_len, nullptr, pmk);
+    }
     IOLockUnlock(_commandLock);
-    LOG("join requested by macOS (%s, %u-byte name): %d", secure ? "WPA2" : "open",
-        d->ad_ssid_len, ret);
+    LOG("join requested by macOS (%s, upper auth 0x%x, %u-byte name): %d",
+        enterprise ? "802.1X" : secure ? "WPA2" : "open", d->ad_auth_upper, d->ad_ssid_len, ret);
     if (ret == -2)
         return ENOENT;
     return ret ? kIOReturnError : kIOReturnSuccess;
@@ -780,6 +815,10 @@ int AirPort_RTW89::nativeRequest(bool isSet, int number, void *data)
         if (isSet) {
             _ns->authLower = d->authtype_lower;
             _ns->authUpper = d->authtype_upper;
+            /* said before the join is asked for: IO80211 decides here
+             * whether its supplicant will run */
+            if (_ns->front.set_apple_rsn)
+                _ns->front.set_apple_rsn(_ns->front.ctx, isEnterprise(d->authtype_upper));
         } else {
             bzero(d, sizeof(*d));
             d->version = APPLE80211_VERSION;
@@ -802,9 +841,36 @@ int AirPort_RTW89::nativeRequest(bool isSet, int number, void *data)
         IOLockUnlock(_commandLock);
         return kIOReturnSuccess;
 
-    case APPLE80211_IOC_CIPHER_KEY:
-        /* keys come from the driver's own handshake */
-        return isSet ? kIOReturnSuccess : kIOReturnUnsupported;
+    case APPLE80211_IOC_CIPHER_KEY: {
+        struct apple80211_key *key = static_cast<struct apple80211_key *>(data);
+        uint64_t rsc = 0;
+        bool pairwise;
+        int ret;
+
+        if (!isSet)
+            return kIOReturnUnsupported;
+        if (key->version != APPLE80211_VERSION || key->key_len > APPLE80211_KEY_BUFF_LEN)
+            return kIOReturnBadArgument;
+        if (key->key_cipher_type == APPLE80211_CIPHER_NONE)
+            return kIOReturnSuccess;
+        if (key->key_cipher_type != APPLE80211_CIPHER_AES_CCM)
+            return kIOReturnUnsupported;
+        /* as AirportItlwm reads them: flags 4 the pairwise key, 0 a group key */
+        if (key->key_flags != 4 && key->key_flags != 0)
+            return kIOReturnUnsupported;
+        pairwise = key->key_flags == 4;
+        for (unsigned int i = 0; i < key->key_rsc_len && i < 6; i++)
+            rsc |= (uint64_t)key->key_rsc[i] << (8 * i);
+        ret = rtw89_glue_set_key(pairwise, pairwise ? 0 : key->key_index, key->key, key->key_len, rsc);
+        LOG("%s key from IO80211 (index %u, %u bytes): %d", pairwise ? "pairwise" : "group",
+            key->key_index, key->key_len, ret);
+        /* -67: the handshake of this connection is the driver's own, the
+         * key is not needed */
+        if (ret && ret != -67)
+            return kIOReturnError;
+        nativePost(APPLE80211_M_RSN_HANDSHAKE_DONE);
+        return kIOReturnSuccess;
+    }
 
     case APPLE80211_IOC_RSN_IE:
     case APPLE80211_IOC_AP_IE_LIST: {
@@ -813,8 +879,29 @@ int AirPort_RTW89::nativeRequest(bool isSet, int number, void *data)
         uint8_t *ies = iesBuf.bytes();
         size_t len = 0;
 
+        if (number == APPLE80211_IOC_RSN_IE) {
+            struct apple80211_rsn_ie_data *d = static_cast<struct apple80211_rsn_ie_data *>(data);
+            size_t own;
+
+            if (isSet) {
+                /* the element IO80211's supplicant wants us to associate with */
+                _ns->rsnIeLen = 0;
+                if (d->len >= 2 && d->len <= sizeof(_ns->rsnIe) && d->ie[0] == 48) {
+                    memcpy(_ns->rsnIe, d->ie, d->len);
+                    _ns->rsnIeLen = (uint8_t)d->len;
+                }
+                return kIOReturnSuccess;
+            }
+            /* ours, as sent: a handshake has to repeat it */
+            own = rtw89_glue_assoc_rsn_ie(d->ie, sizeof(d->ie));
+            if (own) {
+                d->version = APPLE80211_VERSION;
+                d->len = (uint16_t)own;
+                return kIOReturnSuccess;
+            }
+        }
         if (isSet)
-            return number == APPLE80211_IOC_RSN_IE ? kIOReturnSuccess : kIOReturnUnsupported;
+            return kIOReturnUnsupported;
         if (link.state == RTW89_GLUE_LINK_DOWN ||
             !rtw89_glue_find_bss(link.bssid, &bss, ies, 1024, &len, nullptr))
             return kIOReturnNotFound;

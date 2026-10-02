@@ -182,6 +182,21 @@ int rtw89_glue_set_mac(const uint8_t mac[6]);
  */
 int rtw89_glue_join(const uint8_t *ssid, size_t ssid_len,
                     const char *passphrase, size_t passphrase_len);
+/*
+ * Join a network with 802.1X sign-in (WPA2-Enterprise). The glue only
+ * associates: the sign-in and the key handshake are done by whoever sends and
+ * receives the EAPOL frames on the data path, and the keys they produce are
+ * handed over with rtw89_glue_set_key() (CCMP, 16 bytes; @rsc: the group
+ * key's receive counter). @rsn_ie: the RSN element to associate with, or
+ * NULL. The link counts as connected once associated; data other than EAPOL
+ * flows when both keys are in (rtw89_glue_link()'s authorized).
+ */
+int rtw89_glue_join_ext(const uint8_t *ssid, size_t ssid_len, const uint8_t *bssid,
+                        const uint8_t *rsn_ie, size_t rsn_len);
+int rtw89_glue_set_key(bool pairwise, int index, const uint8_t *key, size_t len, uint64_t rsc);
+/* The RSN element this side put in its association request; returns its length. */
+size_t rtw89_glue_assoc_rsn_ie(uint8_t *buf, size_t max);
+
 /* The same with the 32-byte pairwise master key already derived (NULL: an
  * open network), and optionally one access point picked by @bssid. */
 int rtw89_glue_join_pmk(const uint8_t *ssid, size_t ssid_len, const uint8_t *bssid,
@@ -215,6 +230,7 @@ struct rtw89_glue_link {
     uint8_t  mode;                  /* 0: 802.11a/b/g, 1: 802.11n, 2: 802.11ac, 3: 802.11ax */
     uint8_t  nss;                   /* spatial streams */
     int8_t   signal;                /* dBm, of the access point's beacons; 0 if unknown */
+    bool     authorized;            /* keys in place (or none needed): data flows */
     int      last_error;            /* 0, -errno, -1000-status or -2000-reason */
     uint32_t eapol_rx;
 

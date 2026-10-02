@@ -69,6 +69,7 @@ static uint8_t ap_ies[] = {
     0x03, 0xa4, 0x00, 0x00, 0x27, 0xa4, 0x00, 0x00,
     0x42, 0x43, 0x5e, 0x00, 0x62, 0x32, 0x2f, 0x00,
 };
+#define AP_RSN_AKM      50      /* the key management type in the RSN element */
 #define AP_DS_CHANNEL   21      /* offsets into ap_ies: the channel in the DS element, */
 #define AP_HT_CHANNEL   (sizeof(ap_ies) - 26 - 22)      /* in the HT operation element, */
 #define AP_WMM_COUNT    (sizeof(ap_ies) - 26 + 8)       /* and the WMM parameter set count */
@@ -1117,6 +1118,50 @@ static int test_keep(void)
     usleep(1500 * 1000);
     rtw89_glue_link(&link);
     EXPECT(link.state == RTW89_GLUE_LINK_DOWN && !link.rejoining && ap.auth_count == n);
+
+    /* ---- 802.1X sign-in: the handshake is an outside supplicant's ---- */
+    {
+        static const uint8_t gtk[16] = { 9, 9, 9, 9, 8, 8, 8, 8, 7, 7, 7, 7, 6, 6, 6, 6 };
+        static const uint8_t ptk[16] = { 1, 1, 1, 1, 2, 2, 2, 2, 3, 3, 3, 3, 4, 4, 4, 4 };
+        const uint8_t *rsn;
+        int rx;
+
+        ap_ies[AP_RSN_AKM] = 1;     /* the AP offers 802.1X instead of a shared password */
+        ap_send_beacon();
+        /* a shared-password join is turned down now, an 802.1X one starts */
+        EXPECT(rtw89_glue_join((const uint8_t *)"testnet", 7, AP_PASSWORD, strlen(AP_PASSWORD)) == -95);
+        EXPECT(rtw89_glue_join_ext((const uint8_t *)"testnet", 7, NULL, NULL, 0) == 0);
+        ap_send_auth(0);
+        usleep(300 * 1000);
+        ap_send_assoc_resp(0);
+        /* connected as far as the link goes, but nothing but EAPOL passes */
+        EXPECT(wait_link(RTW89_GLUE_LINK_CONNECTED));
+        rtw89_glue_link(&link);
+        EXPECT(!link.authorized);
+        rsn = sta_assoc_ie(48);
+        EXPECT(rsn && rsn[1] == 20 && rsn[2 + 17] == 1);
+        EXPECT(sta_tx_test() == -100);
+        /* the AP's EAPOL frames go to the stack, not to the driver's supplicant */
+        rx = sta_rx.count;
+        ap.replay = 1;
+        ap_send_key(0x008a, NULL, 0, false);
+        usleep(200 * 1000);
+        EXPECT(sta_rx.count == rx + 1 && sta_rx.frame[12] == 0x88 && sta_rx.frame[13] == 0x8e);
+        /* keys from outside: with both in place data flows */
+        EXPECT(rtw89_glue_set_key(true, 0, ptk, 16, 0) == 0);
+        rtw89_glue_link(&link);
+        EXPECT(!link.authorized);
+        EXPECT(rtw89_glue_set_key(false, 1, gtk, 16, 0) == 0);
+        rtw89_glue_link(&link);
+        EXPECT(link.authorized && link.state == RTW89_GLUE_LINK_CONNECTED);
+        EXPECT(sta_tx_test() == 0);
+        EXPECT(rtw89_glue_set_key(true, 0, ptk, 5, 0) != 0);
+        rtw89_glue_leave();
+        EXPECT(link_state() == RTW89_GLUE_LINK_DOWN);
+        EXPECT(rtw89_glue_set_key(true, 0, ptk, 16, 0) != 0);
+        ap_ies[AP_RSN_AKM] = 2;
+        ap_send_beacon();
+    }
 
     /* a join that never worked is not repeated */
     EXPECT(join_testnet("not the password", 0));

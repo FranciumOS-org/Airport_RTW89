@@ -52,6 +52,12 @@ static struct {
     struct cfg80211_chan_def chandef;   /* the channel and width we operate on */
     bool wmm;
     bool rsn;
+    /* The key handshake is somebody else's (macOS's supplicant, for networks
+     * with 802.1X sign-in): EAPOL frames pass through the data path and the
+     * keys arrive through rtw89_mlme_set_key(). */
+    bool external;
+    u8 ext_rsn_ie[64];          /* the RSN element to associate with */
+    u8 ext_rsn_len;
     u8 group_cipher[4];         /* group data cipher suite from the AP's RSN IE */
 
     struct ieee80211_chanctx_conf *chanctx;
@@ -138,6 +144,16 @@ static void mlme_set_state(enum rtw89_mlme_state state)
     if (mlme.notify)
         mlme.notify();
 }
+
+/* ... and what we send when the sign-in is 802.1X and nobody gave us one */
+static const u8 mlme_rsn_ie_8021x[] = {
+    WLAN_EID_RSN, 20,
+    1, 0,
+    0x00, 0x0f, 0xac, 4,
+    1, 0, 0x00, 0x0f, 0xac, 4,
+    1, 0, 0x00, 0x0f, 0xac, 1,  /* AKM: 802.1X */
+    0, 0,
+};
 
 #define mlme_info(fmt, ...) IOLog("[rtw89 mlme] " fmt "\n", ##__VA_ARGS__)
 
@@ -249,11 +265,12 @@ static void mlme_parse_rates(const u8 *ies, size_t len, u32 *rates, u32 *basic)
     }
 }
 
-/* What the AP's RSN element allows us to use. Returns 0 if WPA2-PSK/CCMP works. */
-static int mlme_check_rsn(const struct element *rsn)
+/* What the AP's RSN element allows us to use. Returns 0 if CCMP with WPA2-PSK
+ * (or, with @external, 802.1X) works. */
+static int mlme_check_rsn(const struct element *rsn, bool external)
 {
     static const u8 suite_ccmp[4] = { 0x00, 0x0f, 0xac, 4 };
-    static const u8 suite_psk[4] = { 0x00, 0x0f, 0xac, 2 };
+    const u8 suite_psk[4] = { 0x00, 0x0f, 0xac, (u8)(external ? 1 : 2) };
     const u8 *p = rsn->data, *end = rsn->data + rsn->datalen;
     bool ccmp = false, psk = false;
     u16 count, caps = 0;
@@ -294,7 +311,8 @@ static int mlme_check_rsn(const struct element *rsn)
         return -EOPNOTSUPP;
     }
     if (!psk) {
-        mlme_info("the network does not offer WPA2-PSK (WPA3-only or enterprise)");
+        mlme_info("%s", external ? "the network does not offer 802.1X sign-in" :
+                  "the network does not offer WPA2-PSK (WPA3-only or enterprise)");
         return -EOPNOTSUPP;
     }
     if (caps & BIT(6)) {    /* RSN capabilities: management frame protection required */
@@ -975,7 +993,9 @@ static void mlme_send_assoc(void)
     *count = n > 8 ? n - 8 : n;
 
     /* RSN: WPA2-PSK with CCMP for both pairwise and group */
-    if (mlme.rsn)
+    if (mlme.rsn && mlme.external)
+        skb_put_data(skb, mlme.ext_rsn_ie, mlme.ext_rsn_len);
+    else if (mlme.rsn)
         skb_put_data(skb, mlme_rsn_ie, sizeof(mlme_rsn_ie));
 
     if (mlme.ht) {
@@ -1603,10 +1623,13 @@ static void mlme_rx_assoc_resp(const struct ieee80211_mgmt *mgmt, size_t len)
     mlme.last_error = 0;
     if (!mlme.rsn)
         rtw89_data_authorize();
-    mlme_set_state(mlme.rsn ? RTW89_MLME_ASSOCIATED : RTW89_MLME_CONNECTED);
+    /* With an outside supplicant the link is up from here, so that its EAPOL
+     * frames can pass; data waits for the keys. How long the sign-in may take
+     * (a certificate to accept, a password to type) is its business. */
+    mlme_set_state(mlme.rsn && !mlme.external ? RTW89_MLME_ASSOCIATED : RTW89_MLME_CONNECTED);
     /* an AP that never starts or finishes the handshake must not leave us
      * associated without keys for ever */
-    if (mlme.rsn)
+    if (mlme.rsn && !mlme.external)
         wiphy_delayed_work_queue(mlme.hw->wiphy, &mlme.timeout_work, MLME_KEY_TIMEOUT);
     mlme_info("associated with %02x:%02x:%02x:%02x:%02x:%02x on %u MHz, AID %u, %s%s%s",
               mlme.bss.bssid[0], mlme.bss.bssid[1], mlme.bss.bssid[2],
@@ -1615,7 +1638,8 @@ static void mlme_rx_assoc_resp(const struct ieee80211_mgmt *mgmt, size_t len)
               mlme.sta->deflink.he_cap.has_he ? "802.11ax" :
               mlme.sta->deflink.vht_cap.vht_supported ? "802.11ac" :
               mlme.sta->deflink.ht_cap.ht_supported ? "802.11n" : "802.11a/b/g",
-              wmm ? ", WMM" : "", mlme.rsn ? ", waiting for the key handshake" : "");
+              wmm ? ", WMM" : "", !mlme.rsn ? "" : mlme.external ?
+              ", sign-in and keys left to the system" : ", waiting for the key handshake");
 }
 
 static void mlme_rx_auth(const struct ieee80211_mgmt *mgmt, size_t len)
@@ -2918,7 +2942,79 @@ void rtw89_mlme_get_status(struct rtw89_mlme_status *status)
 }
 
 /* ieee80211_mgd_auth() + ieee80211_prep_connection() */
+static int mlme_connect(const struct rtw89_mlme_bss *bss, const u8 *pmk, bool external,
+                        const u8 *rsn_ie, size_t rsn_len);
+
 int rtw89_mlme_connect(const struct rtw89_mlme_bss *bss, const u8 *pmk)
+{
+    return mlme_connect(bss, pmk, false, NULL, 0);
+}
+
+/* Join a network whose sign-in and key handshake an outside supplicant does.
+ * @rsn_ie: the RSN element it wants in the association request, if it has one. */
+int rtw89_mlme_connect_ext(const struct rtw89_mlme_bss *bss, const u8 *rsn_ie, size_t rsn_len)
+{
+    return mlme_connect(bss, NULL, true, rsn_ie, rsn_len);
+}
+
+/*
+ * A key from the outside supplicant: the pairwise key, or the group key with
+ * id @idx whose receive counter stands at @rsc. With both in place the
+ * station is authorised and data flows.
+ */
+int rtw89_mlme_set_key(bool pairwise, int idx, const u8 *key, size_t len, u64 rsc)
+{
+    if (!mlme.running || !mlme.external || !mlme.sta || mlme.state != RTW89_MLME_CONNECTED)
+        return -ENOLINK;
+    if (len != WLAN_KEY_LEN_CCMP || idx < 0 || idx > 3)
+        return -EOPNOTSUPP;
+
+    if (pairwise) {
+        if (!mlme_key_is(mlme.ptk_conf, key, 0)) {
+            rtw89_data_set_tx_key(NULL);
+            rtw89_data_set_rx_key(-1, false, 0);
+            mlme_key_remove(&mlme.ptk_conf, mlme.sta);
+            if (mlme_key_install(&mlme.ptk_conf, mlme.sta, key, 0))
+                return -EIO;
+            rtw89_data_set_rx_key(-1, true, 0);
+            rtw89_data_set_tx_key(mlme.ptk_conf);
+        }
+    } else if (mlme_gtk_install(idx, key, rsc)) {
+        return -EIO;
+    }
+
+    if (mlme.sta_state < IEEE80211_STA_AUTHORIZED && mlme.ptk_conf &&
+        (mlme.gtk_conf[0] || mlme.gtk_conf[1] || mlme.gtk_conf[2] || mlme.gtk_conf[3])) {
+        if (mlme_sta_move(IEEE80211_STA_AUTHORIZED))
+            return -EIO;
+        rtw89_data_authorize();
+        mlme_info("keys from the system's supplicant installed: connected");
+        if (mlme.notify)
+            mlme.notify();
+    }
+    return 0;
+}
+
+/* The RSN element of the association request of the current or last join.
+ * Returns its length, 0 for an open network. */
+size_t rtw89_mlme_assoc_rsn_ie(u8 *buf, size_t max)
+{
+    const u8 *ie = mlme.external ? mlme.ext_rsn_ie : mlme_rsn_ie;
+    size_t len = mlme.external ? mlme.ext_rsn_len : sizeof(mlme_rsn_ie);
+
+    if (!mlme.running || mlme.state == RTW89_MLME_IDLE || !mlme.rsn || len > max)
+        return 0;
+    memcpy(buf, ie, len);
+    return len;
+}
+
+bool rtw89_mlme_authorized(void)
+{
+    return mlme.running && mlme.sta && mlme.sta_state == IEEE80211_STA_AUTHORIZED;
+}
+
+static int mlme_connect(const struct rtw89_mlme_bss *bss, const u8 *pmk, bool external,
+                        const u8 *rsn_ie, size_t rsn_len)
 {
     const struct ieee80211_ops *ops = mlme.local->ops;
     struct ieee80211_bss_conf *conf = &mlme.vif->bss_conf;
@@ -2975,8 +3071,22 @@ int rtw89_mlme_connect(const struct rtw89_mlme_bss *bss, const u8 *pmk)
     elem = mlme_find_elem(WLAN_EID_RSN, mlme.ies, bss->ies_len);
     mlme.rsn = elem != NULL;
     mlme.have_pmk = false;
-    if (elem) {
-        ret = mlme_check_rsn(elem);
+    mlme.external = external && elem;
+    if (elem && external) {
+        ret = mlme_check_rsn(elem, true);
+        if (ret)
+            return ret;
+        /* its element as it is, if it is one: the handshake repeats it */
+        if (rsn_ie && rsn_len >= 2 && rsn_len <= sizeof(mlme.ext_rsn_ie) &&
+            rsn_ie[0] == WLAN_EID_RSN && (size_t)rsn_ie[1] + 2 == rsn_len) {
+            memcpy(mlme.ext_rsn_ie, rsn_ie, rsn_len);
+            mlme.ext_rsn_len = (u8)rsn_len;
+        } else {
+            memcpy(mlme.ext_rsn_ie, mlme_rsn_ie_8021x, sizeof(mlme_rsn_ie_8021x));
+            mlme.ext_rsn_len = sizeof(mlme_rsn_ie_8021x);
+        }
+    } else if (elem) {
+        ret = mlme_check_rsn(elem, false);
         if (ret)
             return ret;
         if (!pmk) {
@@ -3003,7 +3113,7 @@ int rtw89_mlme_connect(const struct rtw89_mlme_bss *bss, const u8 *pmk)
               bss->bssid[3], bss->bssid[4], bss->bssid[5], bss->freq,
               mlme_chandef_mhz(&mlme.chandef),
               mlme.he ? ", 802.11ax" : mlme.vht ? ", 802.11ac" : mlme.ht ? ", 802.11n" : "",
-              mlme.rsn ? ", WPA2" : ", open");
+              !mlme.rsn ? ", open" : mlme.external ? ", WPA2 with 802.1X sign-in" : ", WPA2");
 
     /* the station entry for the AP, with what is known before association */
     mlme.sta = rtw89_m80211_sta_alloc(mlme.vif, bss->bssid);
@@ -3019,6 +3129,7 @@ int rtw89_mlme_connect(const struct rtw89_mlme_bss *bss, const u8 *pmk)
      * can arrive before the association response has been dealt with. Nothing
      * but the handshake passes until the port is authorised. */
     rtw89_data_attach(mlme.vif, mlme.sta, bss->bssid, mlme.chan->band, mlme.rsn);
+    rtw89_data_set_external(mlme.external);
 
     /* from here on mlme_teardown() cleans up */
     mlme_set_state(RTW89_MLME_AUTHENTICATING);

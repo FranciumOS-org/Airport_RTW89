@@ -86,6 +86,7 @@ static struct {
     u8 addr[ETH_ALEN];
     enum nl80211_band band;
     bool protect;               /* the network encrypts: never send or accept data in the clear */
+    bool external;              /* EAPOL frames go to the stack, not to the MLME */
     bool authorized;            /* the key handshake is done (or there is none) */
 
     struct ieee80211_key_conf *tx_key;
@@ -160,6 +161,7 @@ void rtw89_data_attach(struct ieee80211_vif *vif, struct ieee80211_sta *sta,
     memcpy(data.addr, vif->addr, ETH_ALEN);
     data.band = band;
     data.protect = protect;
+    data.external = false;
     data.authorized = false;
     data.tx_key = NULL;
     data.tx_backlog = 0;
@@ -205,6 +207,12 @@ void rtw89_data_detach(void)
     /* a stack that is waiting for room gets to send again, into the void */
     if (wake && data.tx_wake)
         data.tx_wake();
+}
+
+/* EAPOL frames are the network stack's (an outside supplicant), not the MLME's. */
+void rtw89_data_set_external(bool external)
+{
+    data.external = external;
 }
 
 void rtw89_data_authorize(void)
@@ -583,7 +591,12 @@ static void data_rx_msdu(const u8 *da, const u8 *sa, u8 *p, size_t len, bool dec
          * ieee80211_frame_allowed()), but only if addressed to us. */
         if (!ether_addr_equal(da, data.addr) && !ether_addr_equal(da, data_pae_group_addr))
             goto drop;
-        rtw89_mlme_rx_eapol(eth + ETH_HLEN, flen - ETH_HLEN);
+        if (data.external) {
+            if (data.deliver)
+                data.deliver(eth, flen);
+        } else {
+            rtw89_mlme_rx_eapol(eth + ETH_HLEN, flen - ETH_HLEN);
+        }
         return;
     }
 
