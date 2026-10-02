@@ -100,7 +100,11 @@ private:
 
     /* The back's table: read-locked around every call into it, write-locked
      * to change it. */
-    IORWLock *_backLock = nullptr;
+    bool backEnter();
+    void backLeave();
+
+    IOLock *_backLock = nullptr;         /* connecting and disconnecting */
+    volatile SInt32 _backCalls = 0;     /* calls into the driver proper in progress */
     struct rtw89_back_ops _back = {};
-    bool _connected = false;
+    volatile bool _connected = false;
 };

@@ -849,21 +849,34 @@ int AirPort_RTW89::nativeRequest(bool isSet, int number, void *data)
 
         if (!isSet)
             return kIOReturnUnsupported;
-        if (key->version != APPLE80211_VERSION || key->key_len > APPLE80211_KEY_BUFF_LEN)
+        if (key->version != APPLE80211_VERSION)
             return kIOReturnBadArgument;
-        if (key->key_cipher_type == APPLE80211_CIPHER_NONE)
-            return kIOReturnSuccess;
-        if (key->key_cipher_type == APPLE80211_CIPHER_PMK) {
+        /* 6 the PMK, 9 the whole master session key (64 bytes, running on
+         * into the padding), of which the PMK is the first half */
+        if (key->key_cipher_type == APPLE80211_CIPHER_PMK || key->key_cipher_type == 9) {
             /* the 802.1X sign-in is through: its master key, for our handshake */
             if (!key->key_len)
-                return kIOReturnSuccess;
-            ret = rtw89_glue_set_pmk(key->key, key->key_len);
-            LOG("master key from the sign-in (%u bytes): %d", key->key_len, ret);
+                return kIOReturnSuccess;        /* forget the last one: done on leaving */
+            if (key->key_len < 32 || key->key_len > 64) {
+                LOG("master key from the sign-in (type %u) with %u bytes: not usable",
+                    key->key_cipher_type, key->key_len);
+                return kIOReturnBadArgument;
+            }
+            ret = rtw89_glue_set_pmk(key->key, 32);
+            LOG("master key from the sign-in (type %u, %u bytes): %d", key->key_cipher_type,
+                key->key_len, ret);
             /* -67: nothing to use it for now; the next join brings it again */
             return ret && ret != -67 ? kIOReturnError : kIOReturnSuccess;
         }
         if (key->key_cipher_type == APPLE80211_CIPHER_PMKSA)
             return kIOReturnSuccess;        /* no cache of earlier sign-ins */
+        if (key->key_len > APPLE80211_KEY_BUFF_LEN) {
+            LOG("key of type %u from IO80211 with %u bytes: too long", key->key_cipher_type,
+                key->key_len);
+            return kIOReturnBadArgument;
+        }
+        if (key->key_cipher_type == APPLE80211_CIPHER_NONE)
+            return kIOReturnSuccess;
         if (key->key_cipher_type != APPLE80211_CIPHER_AES_CCM) {
             LOG("key of type %u from IO80211 (flags 0x%x, %u bytes): not supported",
                 key->key_cipher_type, key->key_flags, key->key_len);
