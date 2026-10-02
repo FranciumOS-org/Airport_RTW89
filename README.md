@@ -8,8 +8,8 @@ AirPort_RTW88 in [Realtek-AirPort-Family](https://github.com/xnoah222/Realtek-Ai
 (macOS 15.8.1) the kext brings the RTL8852BE up, scans, joins a WPA2-PSK or open
 network (802.11ax or 802.11ac, up to 80 MHz, two streams) and carries about
 500 Mb/s down and 500-670 Mb/s up. There is no Wi-Fi menu: networks are joined with
-`rtw89ctl`. A lost connection is noticed and joined again (built, not yet run on the
-card). Not there yet: WPA3, power management and sleep. Do not put this in an EFI.**
+`rtw89ctl`. A lost connection is noticed and joined again. Not there yet: WPA3, power
+management and sleep, joining at boot. Do not put this in an EFI.**
 
 See [docs/PORTING.md](docs/PORTING.md) for the plan and milestones.
 
