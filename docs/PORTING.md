@@ -259,6 +259,24 @@ Not there yet:
   decrypt (dropped and counted), power save, and roaming between access points
   of one network while connected (after a loss the strongest one is joined).
 
+**Native Wi-Fi (started).** The Ethernet-style interface is not Wi-Fi to
+macOS. For the menu, System Settings and location services the kext has to
+drive Apple's IO80211 family, and the choice (2026-10-01) is the one that
+exists up to Ventura and that OpenCore can put back on Sonoma to Tahoe:
+`IO80211FamilyLegacy` on Ventura's `IOSkywalkFamily`, see `efi/README.md`. The
+reference driver shows that Sequoia's and Tahoe's own Wi-Fi software can talk
+to it unpatched (it translates their 900- and 908-byte association requests),
+so no OCLP root patch is planned; to be confirmed at the first scan here.
+Writing against Sequoia's own IO80211Family instead was looked at and dropped:
+no EFI change and no reboot per test, but tied to one macOS version, and
+nobody has done it (`tools/kcvtab.py` reads the class layouts it would need
+from the kernel collections).
+
+Order: the EFI change first (does the machine boot with the old stack, does the
+current kext still work, can a kext that depends on the injected family be
+loaded with `kmutil` or does every test need a restart), then an
+IO80211Controller on top of `rtw89_glue.h`.
+
 The reference for the IOKit side of M2/M3 is `reference/airport_rtw88/`
 (AirPort_RTW88's IO80211 controller and its own MLME, GPL-2.0, not compiled).
 
