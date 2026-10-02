@@ -213,7 +213,16 @@ port. During the downloads about 0.3% of frames reached the driver more than
 with 802.11ac; whether that is real delay or the timestamp of a long 802.11ax
 transmission being that of its start is not known yet.
 
-**Keeping the connection (built, not yet run on hardware).**
+**Keeping the connection (confirmed on hardware, as far as it can be provoked).**
+`rtw89ctl probe`: the AP acknowledged the null frame and the link stayed up, so
+the driver's transmit status works here as it does under Linux. `rtw89ctl
+drop`: joined again 4.5 s later (0.5 s pause, 3.7 s scan, 0.2 s join and
+handshake), and macOS renewed the address on the interface by itself. A real
+loss of the AP, a channel switch and a parameter change in a beacon have only
+been seen in the smoke test. The rates now shown explain nothing about the
+download ceiling: both directions run at 802.11ax MCS 10-11 on two streams
+(1081-1201 Mb/s) while downloads stay at 460-500 Mb/s and uploads reach
+635-650 Mb/s.
 
 - *Is the AP still there?* The firmware watches the beacons (the driver sets
   CONNECTION_MONITOR) and reports when they stop. As `ieee80211_mgd_probe_ap()`
