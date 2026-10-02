@@ -116,7 +116,7 @@ ALL_OBJS      := $(DRIVER_OBJS) $(COMPAT_OBJS) $(COMPAT89_OBJS) $(FW_OBJS)
 # Targets                                                              #
 # ------------------------------------------------------------------ #
 
-.PHONY: all compile errors link hosttest kext fetch-firmware clean
+.PHONY: deptest all compile errors link hosttest kext fetch-firmware clean
 
 all: compile
 
@@ -225,6 +225,19 @@ $(BUILD_DIR)/kext/%.o: $(KEXT_SRC)/%.c
 	@mkdir -p $(dir $@)
 	@echo "  CC   kext/$*.c"
 	@$(CC) $(FW_CFLAGS) -c $< -o $@
+
+# A kext that does nothing but depend on IO80211FamilyLegacy, for tools/deptest.sh.
+DEPTEST_BUNDLE := $(BUILD_DIR)/out/RTW89DepTest.kext
+deptest:
+	@rm -rf $(DEPTEST_BUNDLE)
+	@mkdir -p $(DEPTEST_BUNDLE)/Contents/MacOS $(BUILD_DIR)/kext
+	@cp tools/deptest/Info.plist $(DEPTEST_BUNDLE)/Contents/Info.plist
+	@$(CC) $(FW_CFLAGS) -c tools/deptest/deptest.c -o $(BUILD_DIR)/kext/deptest.o
+	@$(CXX) $(ARCH) $(MINOS) -isysroot $(SDK) -nostdlib -Xlinker -kext \
+	    -L$(MKSDK)/Library/x86_64 $(BUILD_DIR)/kext/deptest.o -lkmod -lcc_kext \
+	    -o $(DEPTEST_BUNDLE)/Contents/MacOS/RTW89DepTest
+	@codesign --force --sign - $(DEPTEST_BUNDLE) 2>/dev/null || true
+	@echo "  KEXT $(DEPTEST_BUNDLE)"
 
 # The smoke test gates the bundle: nothing gets packaged that crashed there.
 kext: hosttest $(KEXT_OBJS) $(KEXT_SRC)/Info.plist
