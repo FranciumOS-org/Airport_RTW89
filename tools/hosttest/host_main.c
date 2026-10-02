@@ -35,6 +35,8 @@ void rtw89_glue_note_bss(const uint8_t *frame, size_t len, uint16_t freq, int8_t
 void rtw89_glue_test_rx(const uint8_t *frame, size_t len, uint16_t freq, int8_t signal,
                         bool decrypted);
 /* ... left waiting for the chip's status report, as the driver leaves data frames */
+void rtw89_glue_test_scan_done(void);
+void rtw89_glue_test_beacon_loss(void);
 void rtw89_glue_test_rx_parked(const uint8_t *frame, size_t len, uint16_t freq, int8_t signal,
                                bool decrypted);
 /* src/compat_rtw89/rtw89_mlme.c and rtw89_data.c: see every management and
@@ -48,7 +50,7 @@ unsigned int rtw89_data_tx_waiting(uint8_t tid);
 static uint8_t ap_mac[6] = { 0x02, 0xaa, 0xbb, 0xcc, 0xdd, 0x01 };
 static const uint8_t sta_mac[6] = { 0x00, 0xe0, 0x4c, 0x88, 0x52, 0xbe };
 
-static const uint8_t ap_ies[] = {
+static uint8_t ap_ies[] = {
     0x00, 0x07, 't', 'e', 's', 't', 'n', 'e', 't',                   /* SSID */
     0x01, 0x08, 0x82, 0x84, 0x8b, 0x96, 0x0c, 0x12, 0x18, 0x24,      /* rates */
     0x03, 0x01, 0x06,                                                /* channel 6 */
@@ -67,6 +69,9 @@ static const uint8_t ap_ies[] = {
     0x03, 0xa4, 0x00, 0x00, 0x27, 0xa4, 0x00, 0x00,
     0x42, 0x43, 0x5e, 0x00, 0x62, 0x32, 0x2f, 0x00,
 };
+#define AP_DS_CHANNEL   21      /* offsets into ap_ies: the channel in the DS element, */
+#define AP_HT_CHANNEL   (sizeof(ap_ies) - 26 - 22)      /* in the HT operation element, */
+#define AP_WMM_COUNT    (sizeof(ap_ies) - 26 + 8)       /* and the WMM parameter set count */
 
 /* A second network: 5 GHz channel 36, 80 MHz wide (centre channel 42), 802.11ac. */
 static uint8_t ap5_ies[] = {
@@ -104,6 +109,10 @@ static uint8_t ap_he_ies[] = {
 };
 static bool ap_he;              /* the beacon has them */
 static bool ap_he_resp;         /* ... and the association response */
+
+/* More elements for the beacons alone, such as a channel switch announcement. */
+static const uint8_t *ap_beacon_extra;
+static size_t ap_beacon_extra_len;
 
 /* Which network the pretend AP is at the moment. */
 static const uint8_t *ap_cur_ies = ap_ies;
@@ -157,6 +166,10 @@ static void ap_send_beacon(void)
         memcpy(body + len, ap_he_ies, sizeof(ap_he_ies));
         len += sizeof(ap_he_ies);
     }
+    if (ap_beacon_extra) {
+        memcpy(body + len, ap_beacon_extra, ap_beacon_extra_len);
+        len += ap_beacon_extra_len;
+    }
     ap_send(0x80, body, len);
 }
 
@@ -209,6 +222,8 @@ static struct {
     /* the last association request */
     uint8_t assoc_req[400];
     size_t assoc_req_len;
+    volatile int auth_count;    /* authentication requests */
+    volatile int null_count;    /* null data frames */
     /* BlockAck action frames from the station, by TID */
     struct {
         volatile int count;
@@ -264,6 +279,12 @@ static void ap_tx_tap(const uint8_t *frame, size_t len)
     if (frame[0] == 0x00 && len <= sizeof(ap.assoc_req)) {
         memcpy(ap.assoc_req, frame, len);
         ap.assoc_req_len = len;
+    }
+    if (frame[0] == 0xb0)
+        ap.auth_count++;
+    if ((frame[0] & 0x4c) == 0x48) {                /* data without a body */
+        ap.null_count++;
+        return;
     }
     if (frame[0] == 0xd0 && len >= 24 + 6 && frame[24] == 3) {
         const uint8_t *b = frame + 26;      /* after category and action code */
@@ -929,6 +950,195 @@ static int join_testnet(const char *password, uint16_t assoc_status)
     return 1;
 }
 
+/* The station is trying to get back: let its scan end if it started one, then
+ * play the AP's side of the join. Returns 1 once it is connected again. */
+static int ap_answer_rejoin(const uint8_t *gtk, int gtk_id)
+{
+    int base = ap.auth_count, i;
+
+    for (i = 0; i < 300 && ap.auth_count == base; i++) {
+        if (rtw89_glue_scanning()) {
+            ap_send_beacon();
+            rtw89_glue_test_scan_done();
+        }
+        usleep(50 * 1000);
+    }
+    if (ap.auth_count == base)
+        return 0;
+    ap_send_auth(0);
+    usleep(300 * 1000);
+    ap_send_assoc_resp(0);
+    if (!wait_link(RTW89_GLUE_LINK_ASSOCIATED) || ap_handshake(gtk, gtk_id))
+        return 0;
+    return wait_link(RTW89_GLUE_LINK_CONNECTED);
+}
+
+/* Staying connected: beacons, a silent AP, an AP that sends us off or moves. */
+static int test_keep(void)
+{
+    static const uint8_t gtk1[16] = { 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16 };
+    static const uint8_t csa[] = { 37, 3, 1, 11, 2 };   /* to channel 11 in two beacons */
+    struct rtw89_glue_link link;
+    int failures = 0, n, i;
+
+#define EXPECT(cond) do { if (!(cond)) { failures++; printf("== FAIL %s\n", #cond); } } while (0)
+    /* the pretend chip's scan from the start of the test never ended */
+    rtw89_glue_test_scan_done();
+    ap_send_beacon();
+    EXPECT(join_testnet(AP_PASSWORD, 0));
+    EXPECT(wait_link(RTW89_GLUE_LINK_ASSOCIATED));
+    EXPECT(ap_handshake(gtk1, 1) == 0);
+    EXPECT(wait_link(RTW89_GLUE_LINK_CONNECTED));
+
+    /* ---- beacons ---- */
+    {
+        uint32_t seen, updates;
+
+        ap_send_beacon();
+        usleep(200 * 1000);
+        rtw89_glue_link(&link);
+        seen = link.beacons;
+        updates = link.beacon_updates;
+        EXPECT(seen >= 1);
+        /* the same again changes nothing */
+        ap_send_beacon();
+        usleep(200 * 1000);
+        rtw89_glue_link(&link);
+        EXPECT(link.beacons == seen + 1 && link.beacon_updates == updates);
+        /* heard while tuned to another channel: not counted */
+        ap_freq = 2462;
+        ap_send_beacon();
+        ap_freq = 2437;
+        usleep(200 * 1000);
+        rtw89_glue_link(&link);
+        EXPECT(link.beacons == seen + 1);
+        ap_send_beacon();
+        /* a new version of the EDCA parameters is taken in, once */
+        ap_ies[AP_WMM_COUNT] = 0x02;
+        ap_send_beacon();
+        ap_send_beacon();
+        usleep(200 * 1000);
+        rtw89_glue_link(&link);
+        EXPECT(link.beacons == seen + 4 && link.beacon_updates == updates + 1);
+        EXPECT(link_state() == RTW89_GLUE_LINK_CONNECTED);
+    }
+
+    /* the rate of the last frame from the AP: this one came at 1 Mb/s */
+    ap_send_agg(20, ap.tx_pn + 5000);
+    rtw89_glue_link(&link);
+    EXPECT(link.rx_rate.kbps == 1000 && link.rx_rate.mode == 0);
+
+    /* ---- the driver misses beacons: the AP is probed with a null frame ---- */
+    n = ap.null_count;
+    rtw89_glue_test_beacon_loss();
+    EXPECT(wait_count(&ap.null_count, n));
+    /* a beacon is as good as an answer */
+    ap_send_beacon();
+    usleep(900 * 1000);
+    rtw89_glue_link(&link);
+    EXPECT(link.state == RTW89_GLUE_LINK_CONNECTED && link.beacon_losses == 1);
+    /* no beacon and no acknowledgement (the pretend chip reports none): the
+     * connection is given up after half a second; with rejoin off that is all */
+    n = ap.auth_count;
+    rtw89_glue_test_beacon_loss();
+    EXPECT(wait_link(RTW89_GLUE_LINK_DOWN));
+    rtw89_glue_link(&link);
+    EXPECT(link.last_error == -67 && !link.rejoining && !link.rejoin);
+    usleep(1500 * 1000);
+    EXPECT(link_state() == RTW89_GLUE_LINK_DOWN && ap.auth_count == n);
+
+    /* ---- coming back ---- */
+    rtw89_glue_set_rejoin(true);
+    EXPECT(join_testnet(AP_PASSWORD, 0));
+    EXPECT(wait_link(RTW89_GLUE_LINK_ASSOCIATED));
+    EXPECT(ap_handshake(gtk1, 1) == 0);
+    EXPECT(wait_link(RTW89_GLUE_LINK_CONNECTED));
+
+    /* the AP sends us off: the station asks to be let in again */
+    ap_send_deauth(7);
+    EXPECT(ap_answer_rejoin(gtk1, 1));
+    rtw89_glue_link(&link);
+    EXPECT(link.rejoins == 1 && !link.rejoining && link.rejoin && !link.last_error);
+    EXPECT(sta_tx_test() == 0);
+
+    /* the AP goes silent, and is there again a little later */
+    rtw89_glue_test_beacon_loss();
+    for (i = 0; i < 100 && !link.rejoining; i++) {
+        usleep(50 * 1000);
+        rtw89_glue_link(&link);
+    }
+    EXPECT(link.rejoining && link.state == RTW89_GLUE_LINK_DOWN);
+    EXPECT(ap_answer_rejoin(gtk1, 1));
+    rtw89_glue_link(&link);
+    EXPECT(link.rejoins == 2 && link.freq == 2437);
+
+    /* the AP announces a move to channel 11, and moves */
+    ap_beacon_extra = csa;
+    ap_beacon_extra_len = sizeof(csa);
+    ap_send_beacon();
+    ap_beacon_extra = NULL;
+    ap_freq = 2462;
+    ap_ies[AP_DS_CHANNEL] = 11;
+    ap_ies[AP_HT_CHANNEL] = 11;
+    usleep(200 * 1000);
+    EXPECT(link_state() == RTW89_GLUE_LINK_CONNECTED);     /* not before the move is due */
+    for (i = 0; i < 100 && !link.rejoining; i++) {
+        usleep(50 * 1000);
+        rtw89_glue_link(&link);
+    }
+    EXPECT(link.rejoining && link.last_error == -102);
+    ap_send_beacon();
+    EXPECT(ap_answer_rejoin(gtk1, 1));
+    rtw89_glue_link(&link);
+    EXPECT(link.rejoins == 3 && link.freq == 2462);
+    EXPECT(sta_tx_test() == 0);
+
+    /* an attempt that is refused is followed by another */
+    ap_send_deauth(7);
+    n = ap.auth_count;
+    for (i = 0; i < 300 && ap.auth_count == n; i++) {
+        if (rtw89_glue_scanning()) {
+            ap_send_beacon();
+            rtw89_glue_test_scan_done();
+        }
+        usleep(50 * 1000);
+    }
+    EXPECT(ap.auth_count > n);
+    ap_send_auth(0);
+    usleep(300 * 1000);
+    ap_send_assoc_resp(17);
+    EXPECT(ap_answer_rejoin(gtk1, 1));
+    rtw89_glue_link(&link);
+    EXPECT(link.rejoins == 4);
+
+    /* leaving is for good */
+    n = ap.auth_count;
+    rtw89_glue_leave();
+    usleep(1500 * 1000);
+    rtw89_glue_link(&link);
+    EXPECT(link.state == RTW89_GLUE_LINK_DOWN && !link.rejoining && ap.auth_count == n);
+
+    /* a join that never worked is not repeated */
+    EXPECT(join_testnet("not the password", 0));
+    EXPECT(wait_link(RTW89_GLUE_LINK_ASSOCIATED));
+    EXPECT(ap_handshake(gtk1, 1) == 1);
+    n = ap.auth_count;
+    ap_send_deauth(15);
+    EXPECT(wait_link(RTW89_GLUE_LINK_DOWN));
+    usleep(1500 * 1000);
+    rtw89_glue_link(&link);
+    EXPECT(link.state == RTW89_GLUE_LINK_DOWN && !link.rejoining && ap.auth_count == n);
+
+    ap_freq = 2437;
+    ap_ies[AP_DS_CHANNEL] = 6;
+    ap_ies[AP_HT_CHANNEL] = 6;
+    ap_ies[AP_WMM_COUNT] = 0x00;
+    ap_send_beacon();
+#undef EXPECT
+    printf("== keep test: %d failure(s)\n", failures);
+    return failures;
+}
+
 /* Join the pretend network, playing the AP's side of each exchange. */
 static int test_join(void)
 {
@@ -940,6 +1150,9 @@ static int test_join(void)
 #define EXPECT(cond) do { if (!(cond)) { failures++; printf("== FAIL %s\n", #cond); } } while (0)
     rtw89_mlme_set_tx_tap(ap_tx_tap);
     rtw89_data_set_tx_tap(ap_tx_tap);
+    /* each of these looks at what one join does; coming back by itself has
+     * its own test at the end */
+    rtw89_glue_set_rejoin(false);
     ap_send_beacon();
     EXPECT(rtw89_glue_join((const uint8_t *)"nosuchnet", 9, AP_PASSWORD, strlen(AP_PASSWORD)) == -2);
     /* a WPA2 network needs a password of 8 to 63 characters */
@@ -1220,6 +1433,7 @@ static int test_join(void)
     ap_send_beacon();
 
     ap_select(false);
+    failures += test_keep();
 #undef EXPECT
     printf("== join test: %d failure(s)\n", failures);
     return failures;

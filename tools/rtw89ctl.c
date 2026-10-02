@@ -13,6 +13,11 @@
  *                           from the chip is missing after 1 ms (default on)
  *   sudo rtw89ctl ax on|off use 802.11ax where the network offers it (default
  *                           on); takes effect at the next join
+ *   sudo rtw89ctl rejoin on|off  join the network again when the connection
+ *                           is lost (default on)
+ *   sudo rtw89ctl probe     test: check that the access point still answers,
+ *                           as the driver does when beacons go missing
+ *   sudo rtw89ctl drop      test: drop the connection as if it had been lost
  *
  * Once a network is joined, traffic flows through the Ethernet-style
  * interface the kext publishes (the "interface" line of status, e.g. en7):
@@ -203,7 +208,11 @@ static void print_link(io_service_t service)
     get_string(service, CFSTR("RTW89 Link BSSID"), bssid, sizeof(bssid));
     if (!state[0])
         return;
-    printf("%-10s %s\n", "link", state);
+    if (get_bool(service, CFSTR("RTW89 Rejoining")))
+        printf("%-10s %s (connection lost; trying to join again, attempt %ld)\n", "link", state,
+               get_long(service, CFSTR("RTW89 Rejoin Tries")) + 1);
+    else
+        printf("%-10s %s\n", "link", state);
     if (strcmp(state, "down")) {
         static const char *const modes[] = { "802.11a/b/g", "802.11n", "802.11ac", "802.11ax" };
         long mode = get_long(service, CFSTR("RTW89 Link Mode"));
@@ -236,14 +245,28 @@ static void print_link(io_service_t service)
            get_long(service, CFSTR("RTW89 RX Status Flushed")),
            get_bool(service, CFSTR("RTW89 RX Status Flush")) ? "flush on" : "flush off");
     if (strcmp(state, "down")) {
-        char tx[64], rx[64];
+        char tx[96], rx[96];
 
         printf("%-10s sending on TIDs: %s; receiving on TIDs: %s (%ld frame(s) released "
                "after waiting for a missing one)\n", "aggregation",
                tid_list(get_long(service, CFSTR("RTW89 TX Aggregation")), tx, sizeof(tx)),
                tid_list(get_long(service, CFSTR("RTW89 RX Aggregation")), rx, sizeof(rx)),
                get_long(service, CFSTR("RTW89 RX Reorder Timeouts")));
+        get_string(service, CFSTR("RTW89 TX Rate"), tx, sizeof(tx));
+        get_string(service, CFSTR("RTW89 RX Rate"), rx, sizeof(rx));
+        if (tx[0] || rx[0])
+            printf("%-10s sending at %s; last frame received at %s\n", "rates",
+                   tx[0] ? tx : "?", rx[0] ? rx : "?");
+        printf("%-10s %ld seen; reported missing %ld time(s), the access point then "
+               "answered %ld; %ld changed the link's settings\n",
+               "beacons", get_long(service, CFSTR("RTW89 Beacons")),
+               get_long(service, CFSTR("RTW89 Beacon Losses")),
+               get_long(service, CFSTR("RTW89 Probe Acks")),
+               get_long(service, CFSTR("RTW89 Beacon Updates")));
     }
+    printf("%-10s %s; the connection has come back %ld time(s)\n", "rejoin",
+           get_bool(service, CFSTR("RTW89 Rejoin")) ? "on" : "off",
+           get_long(service, CFSTR("RTW89 Rejoins")));
     print_error(get_long(service, CFSTR("RTW89 Link Error")));
 }
 
@@ -378,6 +401,18 @@ int main(int argc, char **argv)
         return 0;
     }
 
+    if (!strcmp(command, "rejoin") && argc >= 3 &&
+        (!strcmp(argv[2], "on") || !strcmp(argv[2], "off"))) {
+        kr = send_command(service, !strcmp(argv[2], "on") ? "rejoin-on" : "rejoin-off");
+        if (kr != KERN_SUCCESS) {
+            fprintf(stderr, "rejoin failed: 0x%x%s\n", kr,
+                    kr == kIOReturnNotPrivileged ? " (run with sudo)" : "");
+            return 1;
+        }
+        printf("rejoin %s\n", argv[2]);
+        return 0;
+    }
+
     if (!strcmp(command, "ax") && argc >= 3 &&
         (!strcmp(argv[2], "on") || !strcmp(argv[2], "off"))) {
         kr = send_command(service, !strcmp(argv[2], "on") ? "ax-on" : "ax-off");
@@ -391,9 +426,11 @@ int main(int argc, char **argv)
     }
 
     if ((strcmp(command, "up") && strcmp(command, "down") && strcmp(command, "scan") &&
-         strcmp(command, "join") && strcmp(command, "leave")) ||
+         strcmp(command, "join") && strcmp(command, "leave") && strcmp(command, "probe") &&
+         strcmp(command, "drop")) ||
         (!strcmp(command, "join") && argc < 3)) {
-        fprintf(stderr, "usage: rtw89ctl up|down|scan|join SSID|leave|status|flush on|off|ax on|off\n");
+        fprintf(stderr, "usage: rtw89ctl up|down|scan|join SSID|leave|status|probe|drop|flush on|off|ax on|off|"
+                        "rejoin on|off\n");
         return 2;
     }
 
@@ -435,6 +472,21 @@ int main(int argc, char **argv)
     if (!strcmp(command, "leave")) {
         printf("left the network\n");
         return 0;
+    }
+    if (!strcmp(command, "probe") || !strcmp(command, "drop")) {
+        char state[32] = "";
+
+        /* A probe is settled within a second. Coming back after a drop takes
+         * a scan and a join: some ten seconds. */
+        for (i = 0; i < (!strcmp(command, "drop") ? 120 : 6); i++) {
+            usleep(250 * 1000);
+            get_string(service, CFSTR("RTW89 Link State"), state, sizeof(state));
+            if (i > 4 && !strcmp(state, "connected"))
+                break;
+        }
+        send_command(service, "results");
+        print_link(service);
+        return strcmp(state, "connected");
     }
 
     if (!strcmp(command, "scan")) {

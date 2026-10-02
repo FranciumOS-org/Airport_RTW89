@@ -159,6 +159,15 @@ enum rtw89_glue_link_state {
     RTW89_GLUE_LINK_CONNECTED,      /* associated and able to pass data */
 };
 
+/* A transmission rate. kbps is 0 when it is not known. */
+struct rtw89_glue_rate {
+    uint32_t kbps;
+    uint8_t  mode;                  /* 0: 802.11a/b/g, 1: 802.11n, 2: 802.11ac, 3: 802.11ax */
+    uint8_t  mcs;                   /* the rate's index within its mode and stream count */
+    uint8_t  nss;                   /* spatial streams */
+    uint8_t  width;                 /* MHz */
+};
+
 struct rtw89_glue_link {
     enum rtw89_glue_link_state state;
     uint8_t  bssid[6];
@@ -193,6 +202,21 @@ struct rtw89_glue_link {
     /* aggregation (BlockAck sessions): one bit per TID, in each direction */
     uint16_t tx_ba;
     uint16_t rx_ba;
+
+    /* while connected: what the firmware sends at, and how the AP's last
+     * frame to this station was sent */
+    struct rtw89_glue_rate tx_rate;
+    struct rtw89_glue_rate rx_rate;
+
+    /* keeping the connection */
+    uint32_t beacons;               /* the AP's beacons looked at */
+    uint32_t beacon_losses;         /* times the driver reported them missing */
+    uint32_t beacon_updates;        /* times a beacon changed the link's parameters */
+    uint32_t probe_acks;            /* times the AP acknowledged the probe that follows a loss */
+    bool     rejoin;                /* see rtw89_glue_set_rejoin() */
+    bool     rejoining;             /* the connection was lost; trying to get it back */
+    uint32_t rejoin_tries;          /* attempts so far */
+    uint32_t rejoins;               /* times it came back since the driver was probed */
 };
 
 void rtw89_glue_link(struct rtw89_glue_link *link);
@@ -205,6 +229,23 @@ void rtw89_glue_link(struct rtw89_glue_link *link);
  * comparing.
  */
 void rtw89_glue_set_ppdu_flush(bool on);
+
+/*
+ * A network that has been joined is joined again when the connection is lost
+ * (the AP went away, changed channel, or sent us off), with growing pauses
+ * between attempts, until rtw89_glue_leave(), rtw89_glue_down() or another
+ * join. On by default; off is for testing.
+ */
+void rtw89_glue_set_rejoin(bool on);
+
+/*
+ * For testing on the real card. rtw89_glue_probe_ap() acts as if the driver
+ * had reported missed beacons: the AP is probed, and the connection given up
+ * if it does not acknowledge. rtw89_glue_drop() acts as if the connection
+ * had been lost, which rtw89_glue_set_rejoin() then mends.
+ */
+void rtw89_glue_probe_ap(void);
+void rtw89_glue_drop(void);
 
 /*
  * Whether the next join may use 802.11ax where the network offers it (the

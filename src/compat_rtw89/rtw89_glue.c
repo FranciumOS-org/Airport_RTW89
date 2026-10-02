@@ -71,6 +71,32 @@ static struct {
     struct rtw89_glue_bss_entry bss[RTW89_GLUE_MAX_BSS];
     unsigned int n_bss;
 
+    /* The network the user asked for, kept to join it again when the
+     * connection is lost: once it has worked, so that a wrong password is
+     * not tried for ever. */
+    struct mutex cmd_lock;              /* up, down, scan, join, leave and the rejoin work */
+    struct {
+        bool valid;
+        bool proven;                    /* has been connected with these */
+        u8 ssid[IEEE80211_MAX_SSID_LEN];
+        u8 ssid_len;
+        bool have_pmk;
+        u8 pmk[32];
+    } want;
+    bool rejoin_off;                    /* rtw89_glue_set_rejoin(false) */
+    bool rejoining;                     /* trying to get back */
+    bool rejoin_scanned;                /* this attempt has had its scan */
+    unsigned int rejoin_tries;          /* attempts since the connection was lost */
+    u32 rejoins;                        /* times it came back */
+    unsigned long scan_started;
+    /* On a thread of its own: the driver's works run on the shared queue,
+     * and the scan and join started from here wait for some of them. */
+    struct workqueue_struct *rejoin_wq;
+    struct delayed_work rejoin_work;
+
+    /* the rate of the last frame the AP sent to us alone, see glue_rx_rate() */
+    u32 rx_rate;
+
     /* frames the driver holds for a PPDU status report, see rtw89_core_wrap.c */
     bool ppdu_flush;                    /* pass them on after a short wait */
     struct delayed_work ppdu_flush_work;
@@ -97,6 +123,8 @@ static void glue_deliver(const u8 *frame, size_t len);
 static void glue_tx_wake(void);
 struct rtw89_glue_bss_entry;
 static void glue_bss_describe(struct rtw89_glue_bss_entry *e);
+static void glue_rejoin_work(struct work_struct *work);
+static void glue_rejoin_queue(unsigned long delay);
 
 /* ------------------------------------------------------------------ */
 /*  PCI ops                                                             */
@@ -389,10 +417,14 @@ static void glue_teardown(void)
 {
     unsigned int leaked;
 
+    /* while the work queue machinery is still there */
+    if (glue.rejoin_wq)
+        destroy_workqueue(glue.rejoin_wq);
     rtw88_compat_exit();
 
     kfree(glue.scan_req);
     spin_lock_destroy(&glue.bss_lock);
+    mutex_destroy(&glue.cmd_lock);
 
     leaked = glue_dma_reap();
     if (leaked)
@@ -431,6 +463,9 @@ int rtw89_glue_probe(const struct rtw89_glue_platform *platform,
     glue.drv = rtw89_compat_pci_driver();
     spin_lock_init(&glue.dma_lock);
     spin_lock_init(&glue.bss_lock);
+    mutex_init(&glue.cmd_lock);
+    INIT_DELAYED_WORK(&glue.rejoin_work, glue_rejoin_work);
+    glue.rejoin_wq = alloc_ordered_workqueue("rtw89_rejoin", 0);
     for (i = 0; i < RTW89_GLUE_DMA_BUCKETS; i++)
         INIT_HLIST_HEAD(&glue.dma_hash[i]);
 
@@ -513,6 +548,76 @@ void rtw89_glue_set_ppdu_flush(bool on)
 void rtw89_glue_set_ax(bool on)
 {
     rtw89_mlme_set_he(on);
+}
+
+/*
+ * Remember how a frame was sent to us: mode, rate index, streams, width and
+ * guard interval in one word, so that readers on other threads never see half
+ * of an update. glue_rate_info() turns it back.
+ */
+static void glue_rx_rate(const struct ieee80211_rx_status *status)
+{
+    glue.rx_rate = BIT(31) | (u32)status->encoding | (u32)status->rate_idx << 4 |
+                   (u32)status->nss << 12 | (u32)status->bw << 16 | (u32)status->he_gi << 20 |
+                   (status->enc_flags & RX_ENC_FLAG_SHORT_GI ? BIT(22) : 0) |
+                   (u32)status->band << 24;
+}
+
+/* sta_set_rate_info_rx() */
+static bool glue_rate_info(u32 word, struct rate_info *ri)
+{
+    struct ieee80211_supported_band *sband;
+    unsigned int idx = (word >> 4) & 0xff;
+
+    memset(ri, 0, sizeof(*ri));
+    if (!(word & BIT(31)))
+        return false;
+    ri->bw = (word >> 16) & 0xf;
+    ri->nss = (word >> 12) & 0xf;
+    switch (word & 0xf) {
+    case RX_ENC_HE:
+        ri->flags = RATE_INFO_FLAGS_HE_MCS;
+        ri->mcs = (u8)idx;
+        ri->he_gi = (word >> 20) & 3;
+        break;
+    case RX_ENC_VHT:
+        ri->flags = RATE_INFO_FLAGS_VHT_MCS;
+        ri->mcs = (u8)idx;
+        break;
+    case RX_ENC_HT:
+        ri->flags = RATE_INFO_FLAGS_MCS;
+        ri->mcs = (u8)idx;
+        break;
+    default:
+        sband = glue_hw()->wiphy->bands[(word >> 24) & 0xf];
+        if (!sband || idx >= (unsigned int)sband->n_bitrates)
+            return false;
+        ri->legacy = sband->bitrates[idx].bitrate;
+        break;
+    }
+    if (word & BIT(22))
+        ri->flags |= RATE_INFO_FLAGS_SHORT_GI;
+    return true;
+}
+
+/* A rate for the outside: 802.11 mode, index, streams, width and the bit rate. */
+static void glue_rate_describe(const struct rate_info *ri, struct rtw89_glue_rate *out)
+{
+    static const u8 mhz[] = {
+        [RATE_INFO_BW_20] = 20, [RATE_INFO_BW_40] = 40, [RATE_INFO_BW_80] = 80,
+        [RATE_INFO_BW_160] = 160,
+    };
+
+    memset(out, 0, sizeof(*out));
+    out->kbps = cfg80211_calculate_bitrate((struct rate_info *)ri) * 100;
+    if (!out->kbps)
+        return;
+    out->mode = ri->flags & RATE_INFO_FLAGS_HE_MCS ? 3 : ri->flags & RATE_INFO_FLAGS_VHT_MCS ? 2 :
+                ri->flags & RATE_INFO_FLAGS_MCS ? 1 : 0;
+    out->mcs = out->mode ? ri->mcs : 0;
+    /* 802.11n numbers its rates through the streams: 8 to a stream */
+    out->nss = out->mode == 1 ? (u8)(ri->mcs / 8 + 1) : out->mode ? ri->nss : 1;
+    out->width = ri->bw < ARRAY_SIZE(mhz) && mhz[ri->bw] ? mhz[ri->bw] : 20;
 }
 
 /* Measure how late a frame is, by the chip's own receive timestamp. */
@@ -754,11 +859,17 @@ static void glue_rx(void *ctx, struct ieee80211_sta *sta, struct sk_buff *skb)
         ieee80211_is_probe_resp(hdr->frame_control)) {
         /* The driver leaves the FCS on (RX_INCLUDES_FCS). */
         rtw89_glue_note_bss(skb->data, len - FCS_LEN, status->freq, status->signal);
-        kfree_skb(skb);
+        /* our own AP's beacons are also the sign that it is still there */
+        if (ieee80211_is_beacon(hdr->frame_control))
+            rtw89_mlme_rx_beacon(skb);
+        else
+            kfree_skb(skb);
         return;
     }
 
     if (ieee80211_is_data(hdr->frame_control)) {
+        if (!is_multicast_ether_addr(hdr->addr1))
+            glue_rx_rate(status);
         rtw89_data_rx(skb);
         return;
     }
@@ -791,7 +902,7 @@ static void glue_link_event(void *ctx, struct ieee80211_vif *vif,
     if (event == RTW89_M80211_CONNECTION_LOSS)
         rtw89_mlme_connection_lost();
     else if (event == RTW89_M80211_BEACON_LOSS)
-        IOLog("[rtw89] the driver reports missed beacons\n");
+        rtw89_mlme_beacon_loss();
 }
 
 /*
@@ -850,6 +961,7 @@ void rtw89_glue_test_rx_parked(const u8 *frame, size_t len, u16 freq, s8 signal,
 
 static void glue_tx_status(void *ctx, struct sk_buff *skb)
 {
+    rtw89_mlme_tx_status(skb);
     kfree_skb(skb);
 }
 
@@ -858,10 +970,69 @@ static void glue_scan_done(void *ctx, bool aborted)
     glue.scanning = false;
     IOLog("[rtw89] scan %s: %u network(s) heard\n", aborted ? "aborted" : "finished",
           glue.n_bss);
+    /* the attempt to get the network back was waiting for this */
+    if (glue.rejoining)
+        glue_rejoin_queue(0);
 }
 
+/* For the userspace smoke test, whose pretend chip never finishes a scan. */
+void rtw89_glue_test_scan_done(void);
+void rtw89_glue_test_scan_done(void)
+{
+    glue_scan_done(NULL, false);
+}
+
+/* ... and never misses a beacon. */
+void rtw89_glue_test_beacon_loss(void);
+void rtw89_glue_test_beacon_loss(void)
+{
+    if (glue.up)
+        ieee80211_beacon_loss(glue.vif);
+}
+
+/* How long to wait before each attempt to get the network back, in ms. */
+static const unsigned int glue_rejoin_delay[] = { 500, 1000, 2000, 4000, 8000, 15000, 30000, 60000 };
+
+static void glue_rejoin_queue(unsigned long delay)
+{
+    if (glue.rejoin_wq)
+        queue_delayed_work(glue.rejoin_wq, &glue.rejoin_work, delay);
+}
+
+static void glue_rejoin_schedule(void)
+{
+    unsigned int i = min_t(unsigned int, glue.rejoin_tries, ARRAY_SIZE(glue_rejoin_delay) - 1);
+
+    glue_rejoin_queue(msecs_to_jiffies(glue_rejoin_delay[i]));
+}
+
+/* The MLME changed state. Called with the wiphy mutex held, from whichever
+ * thread caused the change. */
 static void glue_link_notify(void)
 {
+    struct rtw89_mlme_status st;
+
+    rtw89_mlme_get_status(&st);
+    if (st.state == RTW89_MLME_CONNECTED) {
+        if (glue.want.valid) {
+            if (glue.rejoining) {
+                glue.rejoins++;
+                IOLog("[rtw89] connected again after %u attempt(s)\n", glue.rejoin_tries);
+            }
+            glue.want.proven = true;
+        }
+        glue.rejoining = false;
+        glue.rejoin_tries = 0;
+    } else if (st.state == RTW89_MLME_IDLE && glue.up && glue.want.valid && glue.want.proven &&
+               !glue.rejoin_off) {
+        if (!glue.rejoining)
+            IOLog("[rtw89] connection lost (%d): will join \"%.*s\" again\n", st.last_error,
+                  glue.want.ssid_len, glue.want.ssid);
+        glue.rejoining = true;
+        glue.rejoin_scanned = false;
+        glue_rejoin_schedule();
+    }
+
     if (glue.plat.link_changed)
         glue.plat.link_changed(glue.plat.ctx);
 }
@@ -895,15 +1066,27 @@ bool rtw89_glue_is_up(void)
     return glue.up;
 }
 
+static int glue_up_locked(void);
+
 int rtw89_glue_up(void)
+{
+    int ret;
+
+    if (!glue.probed)
+        return -ENODEV;
+    mutex_lock(&glue.cmd_lock);
+    ret = glue_up_locked();
+    mutex_unlock(&glue.cmd_lock);
+    return ret;
+}
+
+static int glue_up_locked(void)
 {
     struct rtw89_m80211_local *local;
     struct ieee80211_hw *hw;
     unsigned int filter = 0;
     int ret;
 
-    if (!glue.probed)
-        return -ENODEV;
     if (glue.up)
         return 0;
 
@@ -950,13 +1133,29 @@ err_unlock:
     return ret;
 }
 
+static void glue_forget_network(void)
+{
+    glue.want.valid = false;
+    glue.rejoining = false;
+    memset(glue.want.pmk, 0, sizeof(glue.want.pmk));
+}
+
 void rtw89_glue_down(void)
 {
     struct rtw89_m80211_local *local;
     struct ieee80211_hw *hw;
 
-    if (!glue.up)
+    if (!glue.active)
         return;
+    /* before the lock: the work takes it too */
+    glue_forget_network();
+    cancel_delayed_work_sync(&glue.rejoin_work);
+
+    mutex_lock(&glue.cmd_lock);
+    if (!glue.up) {
+        mutex_unlock(&glue.cmd_lock);
+        return;
+    }
     glue.up = false;
     rtw88_napi_post_poll = NULL;
     cancel_delayed_work_sync(&glue.ppdu_flush_work);
@@ -981,6 +1180,7 @@ void rtw89_glue_down(void)
     glue.vif = NULL;
     /* the driver is stopped: nothing can still be using what was freed */
     rtw89_m80211_reap(hw, true);
+    mutex_unlock(&glue.cmd_lock);
 }
 
 /* ------------------------------------------------------------------ */
@@ -1001,7 +1201,21 @@ bool rtw89_glue_scanning(void)
     return glue.scanning;
 }
 
+static int glue_scan_locked(void);
+
 int rtw89_glue_scan(void)
+{
+    int ret;
+
+    if (!glue.active)
+        return -ENETDOWN;
+    mutex_lock(&glue.cmd_lock);
+    ret = glue_scan_locked();
+    mutex_unlock(&glue.cmd_lock);
+    return ret;
+}
+
+static int glue_scan_locked(void)
 {
     struct rtw89_m80211_local *local;
     struct ieee80211_scan_request *sreq;
@@ -1060,18 +1274,22 @@ int rtw89_glue_scan(void)
     sreq->ies.ies[NL80211_BAND_5GHZ] = ies + sizeof(glue_ies_2ghz);
     sreq->ies.len[NL80211_BAND_5GHZ] = sizeof(glue_ies_5ghz);
 
-    spin_lock(&glue.bss_lock);
-    glue.n_bss = 0;
-    spin_unlock(&glue.bss_lock);
-
     wiphy_lock(hw->wiphy);
     /* The previous request is no longer referenced once a new scan starts. */
     kfree(glue.scan_req);
     glue.scan_req = sreq;
     glue.scanning = true;
+    glue.scan_started = jiffies;
     ret = local->ops->hw_scan(hw, glue.vif, sreq);
-    if (ret)
+    if (ret) {
         glue.scanning = false;
+    } else {
+        /* a new list; if the scan did not start, the old one is still the
+         * best there is */
+        spin_lock(&glue.bss_lock);
+        glue.n_bss = 0;
+        spin_unlock(&glue.bss_lock);
+    }
     wiphy_unlock(hw->wiphy);
 
     if (ret > 0)    /* "do a software scan instead": the firmware lacks scan offload */
@@ -1131,28 +1349,15 @@ static int glue_derive_pmk(const u8 *ssid, size_t ssid_len,
     return 0;
 }
 
-int rtw89_glue_join(const uint8_t *ssid, size_t ssid_len,
-                    const char *passphrase, size_t passphrase_len)
+/* Join the strongest access point of the last scan that has this name. */
+static int glue_join_locked(const u8 *ssid, size_t ssid_len, const u8 *pmk)
 {
-    static u8 ies[RTW89_GLUE_MAX_IES];  /* calls are serialised by the caller */
+    static u8 ies[RTW89_GLUE_MAX_IES];  /* under cmd_lock */
     struct rtw89_glue_bss_entry *best = NULL;
     struct rtw89_mlme_bss bss = {};
     struct ieee80211_hw *hw;
-    bool have_pmk = false;
     unsigned int i;
-    u8 pmk[32];
     int ret;
-
-    if (!glue.up)
-        return -ENETDOWN;
-    if (!ssid_len || ssid_len > IEEE80211_MAX_SSID_LEN)
-        return -EINVAL;
-    if (passphrase && passphrase_len) {
-        ret = glue_derive_pmk(ssid, ssid_len, passphrase, passphrase_len, pmk);
-        if (ret)
-            return ret;
-        have_pmk = true;
-    }
 
     spin_lock(&glue.bss_lock);
     for (i = 0; i < glue.n_bss; i++) {
@@ -1181,8 +1386,65 @@ int rtw89_glue_join(const uint8_t *ssid, size_t ssid_len,
 
     hw = glue_hw();
     wiphy_lock(hw->wiphy);
-    ret = rtw89_mlme_connect(&bss, have_pmk ? pmk : NULL);
+    ret = rtw89_mlme_connect(&bss, pmk);
     wiphy_unlock(hw->wiphy);
+    return ret;
+}
+
+int rtw89_glue_join(const uint8_t *ssid, size_t ssid_len,
+                    const char *passphrase, size_t passphrase_len)
+{
+    typeof(glue.want) old;
+    bool have_pmk = false;
+    u8 pmk[32];
+    int ret;
+
+    if (!glue.up)
+        return -ENETDOWN;
+    if (!ssid_len || ssid_len > IEEE80211_MAX_SSID_LEN)
+        return -EINVAL;
+    if (passphrase && passphrase_len) {
+        ret = glue_derive_pmk(ssid, ssid_len, passphrase, passphrase_len, pmk);
+        if (ret)
+            return ret;
+        have_pmk = true;
+    }
+
+    mutex_lock(&glue.cmd_lock);
+    if (!glue.up) {
+        ret = -ENETDOWN;
+        goto out;
+    }
+    /* a new request ends the attempts to get the previous network back */
+    if (glue.rejoining) {
+        struct ieee80211_hw *hw = glue_hw();
+
+        glue_forget_network();
+        cancel_delayed_work(&glue.rejoin_work);
+        wiphy_lock(hw->wiphy);
+        rtw89_mlme_disconnect(WLAN_REASON_DEAUTH_LEAVING);
+        wiphy_unlock(hw->wiphy);
+    }
+
+    /* What to come back to, in place before the join can succeed. If the
+     * join cannot even start, what was there before stays. */
+    old = glue.want;
+    memset(&glue.want, 0, sizeof(glue.want));
+    memcpy(glue.want.ssid, ssid, ssid_len);
+    glue.want.ssid_len = (u8)ssid_len;
+    glue.want.have_pmk = have_pmk;
+    if (have_pmk)
+        memcpy(glue.want.pmk, pmk, sizeof(pmk));
+    glue.want.valid = true;
+
+    ret = glue_join_locked(ssid, ssid_len, have_pmk ? pmk : NULL);
+    if (ret)
+        glue.want = old;
+    else
+        glue.rejoin_tries = 0;
+    memset(&old, 0, sizeof(old));
+out:
+    mutex_unlock(&glue.cmd_lock);
     memset(pmk, 0, sizeof(pmk));
     return ret;
 }
@@ -1193,10 +1455,85 @@ void rtw89_glue_leave(void)
 
     if (!glue.up)
         return;
-    hw = glue_hw();
-    wiphy_lock(hw->wiphy);
-    rtw89_mlme_disconnect(WLAN_REASON_DEAUTH_LEAVING);
-    wiphy_unlock(hw->wiphy);
+    mutex_lock(&glue.cmd_lock);
+    if (glue.up) {
+        /* leaving is for good */
+        glue_forget_network();
+        cancel_delayed_work(&glue.rejoin_work);
+        hw = glue_hw();
+        wiphy_lock(hw->wiphy);
+        rtw89_mlme_disconnect(WLAN_REASON_DEAUTH_LEAVING);
+        wiphy_unlock(hw->wiphy);
+    }
+    mutex_unlock(&glue.cmd_lock);
+}
+
+/*
+ * One step of getting the network back after the connection was lost: a
+ * scan (the AP may have moved), then a join; glue_link_notify() and
+ * glue_scan_done() queue the next step.
+ */
+static void glue_rejoin_work(struct work_struct *work)
+{
+    struct rtw89_mlme_status st;
+    int ret;
+
+    mutex_lock(&glue.cmd_lock);
+    if (!glue.up || !glue.want.valid || !glue.rejoining || glue.rejoin_off)
+        goto out;
+    rtw89_mlme_get_status(&st);
+    if (st.state != RTW89_MLME_IDLE)
+        goto out;       /* an attempt is under way; its end brings us back */
+
+    if (glue.scanning) {
+        /* its results will do; look again when it is over, or after a while
+         * if it never is */
+        glue.rejoin_scanned = true;
+        if (time_before(jiffies, glue.scan_started + 15 * HZ)) {
+            glue_rejoin_queue(HZ);
+            goto out;
+        }
+    } else if (!glue.rejoin_scanned) {
+        glue.rejoin_scanned = true;
+        if (!glue_scan_locked())
+            goto out;
+        /* no scan to be had: try with what was heard before */
+    }
+
+    glue.rejoin_scanned = false;
+    glue.rejoin_tries++;
+    ret = glue_join_locked(glue.want.ssid, glue.want.ssid_len,
+                           glue.want.have_pmk ? glue.want.pmk : NULL);
+    if (ret) {
+        IOLog("[rtw89] attempt %u to join \"%.*s\" again failed: %d\n", glue.rejoin_tries,
+              glue.want.ssid_len, glue.want.ssid, ret);
+        glue_rejoin_schedule();
+    }
+out:
+    mutex_unlock(&glue.cmd_lock);
+}
+
+void rtw89_glue_probe_ap(void)
+{
+    if (glue.up)
+        rtw89_mlme_beacon_loss();
+}
+
+void rtw89_glue_drop(void)
+{
+    if (glue.up)
+        rtw89_mlme_connection_lost();
+}
+
+void rtw89_glue_set_rejoin(bool on)
+{
+    if (!glue.active)
+        return;
+    glue.rejoin_off = !on;
+    if (!on) {
+        glue.rejoining = false;
+        cancel_delayed_work(&glue.rejoin_work);
+    }
 }
 
 void rtw89_glue_link(struct rtw89_glue_link *link)
@@ -1223,10 +1560,26 @@ void rtw89_glue_link(struct rtw89_glue_link *link)
     link->rx_ppdu_flushed = glue.ppdu_flushed;
     link->ppdu_flush = glue.ppdu_flush;
     link->ax = rtw89_mlme_get_he();
+    link->rejoin = !glue.rejoin_off;
+    link->rejoins = glue.rejoins;
     if (!glue.up)
         return;
 
     rtw89_mlme_get_status(&st);
+    link->rejoining = glue.rejoining;
+    link->rejoin_tries = glue.rejoin_tries;
+    link->beacons = st.beacons;
+    link->beacon_losses = st.beacon_losses;
+    link->beacon_updates = st.beacon_updates;
+    link->probe_acks = st.probe_acks;
+    if (st.state == RTW89_MLME_CONNECTED) {
+        struct rate_info ri;
+
+        if (st.tx_rate_valid)
+            glue_rate_describe(&st.tx_rate, &link->tx_rate);
+        if (glue_rate_info(glue.rx_rate, &ri))
+            glue_rate_describe(&ri, &link->rx_rate);
+    }
     switch (st.state) {
     case RTW89_MLME_AUTHENTICATING:
     case RTW89_MLME_ASSOCIATING:

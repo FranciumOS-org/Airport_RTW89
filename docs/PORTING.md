@@ -213,16 +213,42 @@ port. During the downloads about 0.3% of frames reached the driver more than
 with 802.11ac; whether that is real delay or the timestamp of a long 802.11ax
 transmission being that of its start is not known yet.
 
+**Keeping the connection (built, not yet run on hardware).**
+
+- *Is the AP still there?* The firmware watches the beacons (the driver sets
+  CONNECTION_MONITOR) and reports when they stop. As `ieee80211_mgd_probe_ap()`
+  does, the MLME then sends a null data frame, which the AP must acknowledge;
+  the driver's transmit status says whether it did. Acknowledged, or a beacon
+  arrives: nothing happened. Not acknowledged twice, or no status within half
+  a second: the connection is given up.
+- *Beacons.* The AP's beacons heard on its own channel go to the MLME as well
+  as to the scan list. Of `ieee80211_rx_mgmt_beacon()` this does: protection,
+  preamble and slot time (`ieee80211_handle_bss_capability()`), new versions of
+  the WMM and MU EDCA parameters, and the HT operation mode. A hash of the
+  elements that matter skips beacons that say nothing new.
+- *A changed channel.* Linux follows a channel switch announcement and changes
+  width with the AP. Here the connection is dropped instead, when the announced
+  switch is due or when the beacons describe another channel than the first
+  one after the join did, and joined again.
+- *Coming back.* The glue remembers the network once a join has worked (name
+  and key). When the connection is lost for any reason other than `leave` or
+  `down`, it scans and joins again, with pauses growing from half a second to
+  a minute between attempts. A join that never worked (wrong password) is not
+  repeated. `rtw89ctl rejoin off` disables it.
+- `rtw89ctl status` shows the rate the firmware sends at, the rate of the last
+  frame received from the AP, beacon counters and how often the connection has
+  come back. `rtw89ctl probe` and `rtw89ctl drop` trigger the probe and a
+  reconnection by hand, to test them on the card.
+
 Not there yet:
-- Following the AP's beacons after the join. Changes it announces there (BSS
-  colour, MU EDCA and WMM parameters, channel switches, HT protection) are
-  missed; the MU EDCA set is taken from the scan result when the association
-  response has none.
+- Of the beacon: BSS colour changes, channel switches followed rather than
+  rejoined, the DTIM period, power constraints, and channel switch
+  announcements in action frames.
 - Target wake time, and on 5 GHz an 802.11ax AP without 802.11ac elements
   (joined as 802.11n).
 - Fragmented frames (dropped), software decryption of frames the chip did not
-  decrypt (dropped and counted), power save, roaming, and beacon-loss detection
-  beyond what the firmware reports.
+  decrypt (dropped and counted), power save, and roaming between access points
+  of one network while connected (after a loss the strongest one is joined).
 
 The reference for the IOKit side of M2/M3 is `reference/airport_rtw88/`
 (AirPort_RTW88's IO80211 controller and its own MLME, GPL-2.0, not compiled).

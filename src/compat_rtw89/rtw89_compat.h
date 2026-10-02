@@ -313,6 +313,9 @@ static inline bool __test_and_set_bit(unsigned long nr, unsigned long *addr)
 #ifndef ENETDOWN
 #define ENETDOWN 100
 #endif
+#ifndef ENETRESET
+#define ENETRESET 102
+#endif
 #ifndef ENOBUFS
 #define ENOBUFS  105
 #endif

@@ -56,7 +56,7 @@ public:
     IOReturn setMulticastList(IOEthernetAddress *addrs, UInt32 count) override;
 
     /* { "RTW89Command" = "up" | "down" | "scan" | "results" | "leave" | "flush-on" | "flush-off" |
-     *                    "ax-on" | "ax-off" }, or
+     *                    "ax-on" | "ax-off" | "rejoin-on" | "rejoin-off" | "probe" | "drop" }, or
      * { "RTW89Command" = "join", "RTW89SSID" = <data> [, "RTW89Passphrase" = <data>] }.
      * Administrators only. */
     IOReturn setProperties(OSObject *properties) override;
