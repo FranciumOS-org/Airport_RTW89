@@ -8,8 +8,10 @@ AirPort_RTW88 in [Realtek-AirPort-Family](https://github.com/xnoah222/Realtek-Ai
 as Wi-Fi in macOS, which scans and joins WPA2-PSK and open networks through its own
 menu (802.11ax or 802.11ac, up to 80 MHz, two streams, about 500 Mb/s down and
 500-670 Mb/s up). It needs the old Wi-Fi stack and a small front kext in the OpenCore
-EFI (see [efi/README.md](efi/README.md)); the driver itself is still loaded by hand.
-Not there yet: sleep and wake, AirDrop, WPA3, loading at boot.**
+EFI (see [efi/README.md](efi/README.md)). The driver can go into the EFI as well
+(`sudo efi/install_driver.sh`), and Wi-Fi then comes up at boot by itself. WPA2-Enterprise
+(PEAP) works too. Not there yet: AirDrop, WPA3, and sleep and wake (the driver handles
+it, but this machine does not really sleep, so it has not been tried on hardware).**
 
 See [docs/PORTING.md](docs/PORTING.md) for the plan and milestones.
 
