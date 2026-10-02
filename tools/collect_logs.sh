@@ -15,7 +15,7 @@ out="$here/build/log"
 mkdir -p "$out"
 # From the boot on. Not --last boot: after a wall clock adjustment that misses
 # everything since (log show warns about it), while --start does not.
-boot="$(sysctl -n kern.boottime | sed -n 's/.*sec = \([0-9]*\).*/\1/p')"
+boot="$(sysctl -n kern.boottime | sed -n 's/^{ sec = \([0-9]*\),.*/\1/p')"
 start="$(date -r "$boot" '+%Y-%m-%d %H:%M:%S')"
 /usr/bin/log show --start "$start" --style compact \
     --predicate 'process == "kernel" AND (sender == "AirPort_RTW89" OR eventMessage CONTAINS "AirPort_RTW89" OR eventMessage CONTAINS "[rtw89")' \
