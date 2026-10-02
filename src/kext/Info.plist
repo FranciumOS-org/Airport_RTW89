@@ -40,6 +40,8 @@
 	</dict>
 	<key>LSMinimumSystemVersion</key>
 	<string>13.0</string>
+	<key>OSBundleRequired</key>
+	<string>Network-Root</string>
 	<key>OSBundleLibraries</key>
 	<dict>
 		<key>com.apple.iokit.IONetworkingFamily</key>

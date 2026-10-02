@@ -98,6 +98,7 @@ private:
     void nativePost(unsigned int msg, void *data = nullptr, size_t len = 0);
     /* macOS asks again whether the radio is on */
     void nativePowerChanged();
+    static bool frontExpected();
     int nativeRequest(bool isSet, int number, void *data);
     int nativeAssociate(void *data);
     static void scanDone(void *ctx, bool aborted);

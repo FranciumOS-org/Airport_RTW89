@@ -78,3 +78,26 @@ bcdedit /set {the-id-it-printed} path \EFI\OC\OpenCore.efi
 ```
 
 and choose it from the boot menu (Esc at power-on).
+
+## The driver at boot
+
+`efi/install_front.sh` puts the front in the internal copy. Once the native
+driver is stable, the driver itself can go in too, so Wi-Fi comes up at boot
+without `tools/load.sh`:
+
+```sh
+make kext
+sudo efi/install_driver.sh
+```
+
+copies `build/out/AirPort_RTW89.kext` to `EFI/OC/Kexts` and adds it to
+`config.plist` right after the front (the previous config is kept as
+`config.plist.before-driver`). Restart for it to take effect. The driver waits
+up to 30 s at boot for the front to start, because the front waits for the
+injected Wi-Fi family; it waits only when the front's personality is in the
+catalogue, so without the front it does not hold up the boot.
+
+`sudo efi/install_driver.sh --disable` switches the entry off again, for going
+back to loading test builds by hand. Each new build needs the script run again
+and a restart. If the driver stops macOS starting, boot from the USB stick,
+which has neither the front nor the driver.
