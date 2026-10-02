@@ -22,8 +22,16 @@ for k in IOSkywalkFamily IO80211FamilyLegacy AMFIPass; do
     [ -f "$kit/$k.kext/Contents/MacOS/$k" ] || { echo "missing $kit/$k.kext (see efi/README.md)" >&2; exit 1; }
 done
 
+# a copy of the stick's config that the Windows script saved here must survive
+# (also when it is the very file this run reads)
+keep="$(mktemp -t config.from-stick)"
+if [ -f "$dest/config.from-stick.plist" ]; then
+    cp "$dest/config.from-stick.plist" "$keep"
+    [ "$config" = "$dest/config.from-stick.plist" ] && config="$keep"
+fi
 rm -rf "$dest"
 mkdir -p "$dest/Kexts"
+[ -s "$keep" ] && cp "$keep" "$dest/config.from-stick.plist"
 export COPYFILE_DISABLE=1       # no ._ files on the FAT volume
 for k in IOSkywalkFamily IO80211FamilyLegacy AMFIPass; do
     cp -R -X "$kit/$k.kext" "$dest/Kexts/"
