@@ -6,7 +6,7 @@
 breakpoint set -n Apple80211Associate2 -o true
 run
 script import lldb
-script fn = lldb.frame.GetPC()
+script fn = lldb.frame.GetSymbol().GetStartAddress().GetLoadAddress(lldb.target)
 script print("Apple80211Associate2 at 0x%x" % fn)
 script offs = [262, 1360, 2527, 2999, 3721, 3872, 4397, 4851, 5038, 5192, 6055, 7346, 7765, 8005, 8581, 8887, 9285, 9339, 9840, 10244, 10323]
 script for o in offs: lldb.debugger.HandleCommand("breakpoint set -a 0x%x -C 'script print(\"-3900 SET AT OFFSET %d\")' -G true" % (fn + o, o))
