@@ -165,7 +165,7 @@ the sequence number of the first frame held back, and lets the frames go when
 the AP has answered (or after a second without an answer). DELBA from either
 side ends a session, and all of them are torn down before the station goes.
 
-**Wide channels and 802.11ac (built, not yet run on hardware).** The channel
+**Wide channels and 802.11ac (confirmed on hardware).** The channel
 is taken from the AP's HT and VHT operation elements as
 `ieee80211_determine_ap_chan()` does: 40 MHz from the secondary channel offset,
 80 MHz from the VHT centre frequency, checked against each other and against
@@ -175,6 +175,16 @@ channel). The association request then carries the 40 MHz bits and a VHT
 capabilities element, and the station entry gets the AP's VHT capabilities,
 bandwidth and stream count for the firmware's rate control. `rtw89ctl scan`
 shows each network's mode, width and security; `status` the channel in use.
+
+On the test machine the join came up as 802.11ac, 80 MHz (centre 5210 MHz), two
+streams, at a signal of about -18 dBm. Between the card and the wired port of
+the same machine (`tools/tput_probe.py`, TCP, 5 s runs, so the internet is not
+in the way) it carried 474-509 Mb/s down and 507-527 Mb/s up, with no frames
+dropped on transmit and no reorder timeouts; 0.5-1% of received frames were
+retransmissions the driver had already seen. Internet transfers through the
+card ran at 258-360 Mb/s down and about 200 Mb/s up, which is the connection's
+limit rather than the card's (the wired port did 100 Mb/s up at that moment).
+Round trips took a median of 1.3-2.4 ms at every size (worst 10 ms).
 
 Not there yet:
 - 802.11ax (HE). Networks that offer it are joined as 802.11ac.
@@ -373,4 +383,5 @@ to boot-args so panics show symbolized backtraces.
 - `tools/hosttest/` — `make hosttest`, see Status.
 - `tools/check_kpi.py` — `make kext`: every import of the built kext must come from a declared KPI.
 - `tools/load.sh`, `tools/unload.sh` — run by a person with sudo, never automatically.
+- `tools/rtt_probe.py`, `tools/tput_probe.py` — round-trip times and TCP throughput through the card, measured against the wired port of the same machine.
 - `tools/rtw89ctl.c` — built by `make kext` as `build/out/rtw89ctl`: `up`, `scan`, `down`, `status` for a loaded kext.
