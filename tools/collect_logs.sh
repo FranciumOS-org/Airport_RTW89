@@ -23,6 +23,9 @@ start="$(date -r "$boot" '+%Y-%m-%d %H:%M:%S')"
 /usr/bin/log show --start "$start" --style compact \
     --predicate 'process == "airportd" AND (eventMessage CONTAINS[c] "join" OR eventMessage CONTAINS[c] "SAE" OR eventMessage CONTAINS[c] "WPA3" OR eventMessage CONTAINS[c] "password" OR eventMessage CONTAINS[c] "credential" OR eventMessage CONTAINS[c] "assoc" OR eventMessage CONTAINS[c] "fail")' \
     > "$out/user-airportd.log" 2>/dev/null
+# The kernel's message buffer: IOLog always lands there. Loaded from the EFI,
+# the driver's lines have not been reaching the unified log at all.
+dmesg 2>/dev/null | grep -E "AirPort_RTW89|AirPortRTW89|rtw89" > "$out/user-dmesg.log" || true
 owner="$(stat -f %u "$here")"
-chown "$owner" "$out/user-driver.log" "$out/user-airportd.log"
-echo "saved: $(wc -l < "$out/user-driver.log") driver lines, $(wc -l < "$out/user-airportd.log") airportd lines"
+chown "$owner" "$out/user-driver.log" "$out/user-airportd.log" "$out/user-dmesg.log"
+echo "saved: $(wc -l < "$out/user-driver.log") driver lines, $(wc -l < "$out/user-dmesg.log") dmesg lines, $(wc -l < "$out/user-airportd.log") airportd lines"
