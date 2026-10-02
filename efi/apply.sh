@@ -33,11 +33,16 @@ tmp="$(mktemp -t config.plist)"
 python3 "$here/prepare.py" "$oc/config.plist" "$tmp"
 plutil -lint "$tmp" >/dev/null || { echo "the new config does not parse; nothing was changed" >&2; rm -f "$tmp"; exit 1; }
 
+# about 4 MB go in (the Broadcom plugin inside IO80211FamilyLegacy is left out)
+free_kb="$(df -k "$EFI_MOUNT" | awk 'NR == 2 { print $4 }')"
+[ "$free_kb" -ge 8192 ] || { echo "only ${free_kb} KB free on the EFI partition; 8 MB wanted. Nothing was changed." >&2; rm -f "$tmp"; exit 1; }
+
 for k in IOSkywalkFamily IO80211FamilyLegacy AMFIPass; do
     if [ -d "$oc/Kexts/$k.kext" ]; then
         echo "$k.kext is already in EFI/OC/Kexts, left as it is"
     else
         cp -R "$kit/$k.kext" "$oc/Kexts/"
+        rm -rf "$oc/Kexts/$k.kext/Contents/PlugIns"
         echo "copied $k.kext"
     fi
 done
