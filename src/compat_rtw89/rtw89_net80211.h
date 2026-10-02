@@ -239,6 +239,10 @@ void rtw89_mlme_start(struct ieee80211_hw *hw, struct ieee80211_vif *vif, void (
 void rtw89_mlme_stop(void);
 /* @pmk: the 32-byte pairwise master key for a WPA2-PSK network, else NULL. */
 int rtw89_mlme_connect(const struct rtw89_mlme_bss *bss, const u8 *pmk);
+int rtw89_mlme_connect_ext(const struct rtw89_mlme_bss *bss, const u8 *rsn_ie, size_t rsn_len);
+int rtw89_mlme_set_key(bool pairwise, int idx, const u8 *key, size_t len, u64 rsc);
+bool rtw89_mlme_authorized(void);
+size_t rtw89_mlme_assoc_rsn_ie(u8 *buf, size_t max);
 /* For tests: see every management frame the MLME transmits. */
 void rtw89_mlme_set_tx_tap(void (*tap)(const u8 *frame, size_t len));
 /* The AP's beacons while associated, FCS on; takes the skb. Any context. */
@@ -293,6 +297,7 @@ void rtw89_data_attach(struct ieee80211_vif *vif, struct ieee80211_sta *sta,
                        const u8 *bssid, enum nl80211_band band, bool protect);
 void rtw89_data_detach(void);
 void rtw89_data_authorize(void);
+void rtw89_data_set_external(bool external);
 void rtw89_data_set_tx_key(struct ieee80211_key_conf *key);
 void rtw89_data_set_rx_key(int keyidx, bool valid, u64 rsc);
 /* BlockAck sessions. Receive: reorder what arrives on @tid. Transmit: hold the

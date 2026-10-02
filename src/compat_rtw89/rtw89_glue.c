@@ -1461,6 +1461,11 @@ static int glue_derive_pmk(const u8 *ssid, size_t ssid_len,
 }
 
 /* Join the strongest access point of the last scan that has this name. */
+/* When set, the next glue_join_locked() is for an outside supplicant. */
+static const u8 *glue_ext_rsn_ie;
+static size_t glue_ext_rsn_len;
+static bool glue_ext;
+
 static int glue_join_locked(const u8 *ssid, size_t ssid_len, const u8 *bssid, const u8 *pmk)
 {
     static u8 ies[RTW89_GLUE_MAX_IES];  /* under cmd_lock */
@@ -1499,7 +1504,10 @@ static int glue_join_locked(const u8 *ssid, size_t ssid_len, const u8 *bssid, co
 
     hw = glue_hw();
     wiphy_lock(hw->wiphy);
-    ret = rtw89_mlme_connect(&bss, pmk);
+    if (glue_ext)
+        ret = rtw89_mlme_connect_ext(&bss, glue_ext_rsn_ie, glue_ext_rsn_len);
+    else
+        ret = rtw89_mlme_connect(&bss, pmk);
     wiphy_unlock(hw->wiphy);
     return ret;
 }
@@ -1566,6 +1574,48 @@ int rtw89_glue_join(const uint8_t *ssid, size_t ssid_len,
     }
     ret = glue_join_request(ssid, ssid_len, NULL, have_pmk ? pmk : NULL);
     memset(pmk, 0, sizeof(pmk));
+    return ret;
+}
+
+int rtw89_glue_join_ext(const uint8_t *ssid, size_t ssid_len, const uint8_t *bssid,
+                        const uint8_t *rsn_ie, size_t rsn_len)
+{
+    int ret;
+
+    if (!glue.up)
+        return -ENETDOWN;
+    if (!ssid_len || ssid_len > IEEE80211_MAX_SSID_LEN)
+        return -EINVAL;
+    /* not remembered for coming back: the sign-in is not ours to repeat */
+    mutex_lock(&glue.cmd_lock);
+    glue_forget_network();
+    cancel_delayed_work(&glue.rejoin_work);
+    glue_ext = true;
+    glue_ext_rsn_ie = rsn_ie;
+    glue_ext_rsn_len = rsn_len;
+    ret = glue.up ? glue_join_locked(ssid, ssid_len, bssid, NULL) : -ENETDOWN;
+    glue_ext = false;
+    glue_ext_rsn_ie = NULL;
+    mutex_unlock(&glue.cmd_lock);
+    return ret;
+}
+
+size_t rtw89_glue_assoc_rsn_ie(uint8_t *buf, size_t max)
+{
+    return glue.up ? rtw89_mlme_assoc_rsn_ie(buf, max) : 0;
+}
+
+int rtw89_glue_set_key(bool pairwise, int index, const uint8_t *key, size_t len, uint64_t rsc)
+{
+    struct ieee80211_hw *hw;
+    int ret;
+
+    if (!glue.up)
+        return -ENETDOWN;
+    hw = glue_hw();
+    wiphy_lock(hw->wiphy);
+    ret = rtw89_mlme_set_key(pairwise, index, key, len, rsc);
+    wiphy_unlock(hw->wiphy);
     return ret;
 }
 
@@ -1729,6 +1779,7 @@ void rtw89_glue_link(struct rtw89_glue_link *link)
     memcpy(link->ssid, st.ssid, sizeof(link->ssid));
     link->freq = st.freq;
     link->aid = st.aid;
+    link->authorized = st.state == RTW89_MLME_CONNECTED && rtw89_mlme_authorized();
     if (st.state != RTW89_MLME_IDLE) {
         struct rtw89_glue_bss bss;
 

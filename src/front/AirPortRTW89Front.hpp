@@ -19,8 +19,9 @@ class AirPortRTW89FrontInterface : public IO80211Interface {
     OSDeclareDefaultStructors(AirPortRTW89FrontInterface)
 
 public:
-    /* Received frames are plain Ethernet by the time they get here, and the
-     * driver has its own supplicant: nothing for IO80211 to look at. */
+    /* Received frames are plain Ethernet by the time they get here. IO80211
+     * only gets to see EAPOL frames, and only while its supplicant is the
+     * one doing the key handshake. */
     UInt32 inputPacket(mbuf_t packet, UInt32 length = 0, IOOptionBits options = 0,
                        void *param = 0) override;
 };
@@ -59,7 +60,7 @@ public:
     /* IO80211Controller */
     IOReturn getHardwareAddressForInterface(IO80211Interface *iface,
                                             IOEthernetAddress *addr) override;
-    bool useAppleRSNSupplicant(IO80211Interface *) override { return false; }
+    bool useAppleRSNSupplicant(IO80211Interface *) override;
     SInt32 apple80211_ioctl(IO80211Interface *interface, IO80211VirtualInterface *vif,
                             ifnet_t net, unsigned long cmd, void *data) override;
     SInt32 apple80211_ioctl_set(IO80211Interface *interface, IO80211VirtualInterface *vif,
@@ -87,6 +88,7 @@ private:
     static int opSuperIoctl(void *ctx, void *interface, void *vif, void *ifnet,
                             unsigned long cmd, void *data);
     static int opSuperIoctlSet(void *ctx, void *interface, void *vif, void *skywalk, void *data);
+    static void opSetAppleRsn(void *ctx, bool on);
 
     IOPCIDevice *_pci = nullptr;
     IO80211WorkLoop *_workLoop = nullptr;
