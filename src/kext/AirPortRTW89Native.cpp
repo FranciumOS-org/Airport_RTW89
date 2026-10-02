@@ -13,6 +13,7 @@
 
 #include <IOKit/80211/apple80211_ioctl.h>
 #include <IOKit/80211/apple80211_var.h>
+#include <IOKit/IOCatalogue.h>
 #include <IOKit/IOLib.h>
 #include <libkern/version.h>
 #include <sys/errno.h>
@@ -293,6 +294,26 @@ void AirPort_RTW89::nativePowerChanged()
     nativePost(APPLE80211_M_POWER_CHANGED);
 }
 
+/* Whether a front personality is in the catalogue: injected by OpenCore, so it
+ * will start, if it has not already. */
+bool AirPort_RTW89::frontExpected()
+{
+    OSDictionary *matching = OSDictionary::withCapacity(1);
+    const OSString *cls = OSString::withCString(RTW89_FRONT_CLASS);
+    bool found = false;
+
+    if (matching && cls && matching->setObject(gIOClassKey, cls)) {
+        SInt32 generation = 0;
+        OSOrderedSet *drivers = gIOCatalogue->findDrivers(matching, &generation);
+
+        found = drivers && drivers->getCount() > 0;
+        OSSafeReleaseNULL(drivers);
+    }
+    OSSafeReleaseNULL(cls);
+    OSSafeReleaseNULL(matching);
+    return found;
+}
+
 /* Called from start(), after the probe. True: the front is there and now
  * ours; the kext must not publish its own interface. */
 bool AirPort_RTW89::connectFront()
@@ -304,9 +325,17 @@ bool AirPort_RTW89::connectFront()
     IOReturn ret;
 
     if (matching) {
-        /* already there if it is there at all: OpenCore injected it at boot */
-        front = waitForMatchingService(matching, 100 * 1000 * 1000ULL);
+        /* Loaded by hand, the front is already running if it is there at all.
+         * Both injected at boot, it may start after this driver: it waits for
+         * the injected Wi-Fi family. Wait for it then, but only if OpenCore
+         * put its personality in the catalogue, so the Ethernet-style mode
+         * does not hold up the boot. */
+        uint64_t wait = frontExpected() ? 30ULL * 1000 * 1000 * 1000 : 100ULL * 1000 * 1000;
+
+        front = waitForMatchingService(matching, wait);
         matching->release();
+        if (!front && wait > 100ULL * 1000 * 1000)
+            LOG("the front is installed but did not start within 30 s");
     }
     if (!front || !name) {
         OSSafeReleaseNULL(name);
