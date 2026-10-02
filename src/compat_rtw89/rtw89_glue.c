@@ -1460,6 +1460,14 @@ static int glue_derive_pmk(const u8 *ssid, size_t ssid_len,
     return 0;
 }
 
+int rtw89_glue_derive_pmk(const uint8_t *ssid, size_t ssid_len, const char *passphrase,
+                          size_t passphrase_len, uint8_t pmk[32])
+{
+    if (!ssid_len || ssid_len > IEEE80211_MAX_SSID_LEN)
+        return -EINVAL;
+    return glue_derive_pmk(ssid, ssid_len, passphrase, passphrase_len, pmk);
+}
+
 /* Join the strongest access point of the last scan that has this name. */
 /* When set, the next glue_join_locked() is for an outside supplicant. */
 static const u8 *glue_ext_rsn_ie;

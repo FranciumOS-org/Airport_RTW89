@@ -42,6 +42,10 @@ struct AirPort_RTW89::NativeState {
     bool linkUp = false;
     bool wasJoining = false;
     uint32_t deauthReason = 0;
+    /* The passphrase of the join being handed over, from the newer request
+     * form (too long for apple80211_key); wiped once the join has started. */
+    uint8_t joinPass[64] = {};
+    uint8_t joinPassLen = 0;
 };
 
 /* ------------------------------------------------------------------ */
@@ -173,8 +177,15 @@ static void fillScanResult(const struct rtw89_glue_bss &bss, const uint8_t *ies,
  */
 struct HostAssoc {
     uint32_t upper, ssidLen, keyLen, cipher;
-    uint8_t ssid[32], bssid[6], key[32];
+    uint8_t ssid[32], bssid[6], key[64];
 };
+
+/* The newer request's key type when the key is the passphrase itself: what
+ * macOS sends once the card says it does SAE (it then leaves deriving the
+ * pairwise master key to the driver). Seen with WPA2-PSK. */
+enum { kHostCipherPassphrase = 10 };
+/* Bytes of the request read: up to the end of a 64-byte key at 76. */
+enum { kHostAssocPrefix = 140 };
 
 static uint32_t le32(const uint8_t *p)
 {
@@ -187,8 +198,12 @@ static bool decodeHostAssoc(const uint8_t *p, struct HostAssoc *out)
 
     if (le32(p) != 1 || le32(p + 4) != 2 || le32(p + 8) != 1 || le32(p + 60) != 1)
         return false;
-    if ((upper != 0 && upper != 8 && !isEnterprise(upper)) || !ssidLen || ssidLen > 32 ||
-        (upper == 8 ? keyLen != 32 : keyLen != 0))
+    const uint32_t cipher = le32(p + 68);
+    const bool passphrase = upper == 8 && cipher == kHostCipherPassphrase;
+
+    if ((upper != 0 && upper != 8 && !isEnterprise(upper)) || !ssidLen || ssidLen > 32)
+        return false;
+    if (passphrase ? keyLen < 8 || keyLen > 64 : upper == 8 ? keyLen != 32 : keyLen != 0)
         return false;
     for (uint32_t i = 0; i < ssidLen; i++)
         if (!p[20 + i])
@@ -199,7 +214,7 @@ static bool decodeHostAssoc(const uint8_t *p, struct HostAssoc *out)
     out->upper = upper;
     out->ssidLen = ssidLen;
     out->keyLen = keyLen;
-    out->cipher = le32(p + 68);
+    out->cipher = cipher;
     memcpy(out->ssid, p + 20, ssidLen);
     memcpy(out->bssid, p + 52, 6);
     memcpy(out->key, p + 76, keyLen);
@@ -616,7 +631,7 @@ int AirPort_RTW89::backIoctl(void *ctx, void *interface, void *vif, void *ifnet,
     const user_addr_t reqData = (user_addr_t)req->req_data;
 
     if (isSet && reqType == APPLE80211_IOC_ASSOCIATE && (len == 900 || len == 908) && reqData) {
-        uint8_t prefix[108];
+        uint8_t prefix[kHostAssocPrefix];
         struct HostAssoc host;
 
         if (copyin(reqData, prefix, sizeof(prefix)) == 0 && decodeHostAssoc(prefix, &host)) {
@@ -632,10 +647,18 @@ int AirPort_RTW89::backIoctl(void *ctx, void *interface, void *vif, void *ifnet,
             memcpy(assoc.ad_ssid, host.ssid, host.ssidLen);
             memcpy(assoc.ad_bssid.octet, host.bssid, 6);
             assoc.ad_key.version = APPLE80211_VERSION;
-            assoc.ad_key.key_len = host.keyLen;
             assoc.ad_key.key_cipher_type = host.cipher;
-            memcpy(assoc.ad_key.key, host.key, host.keyLen);
+            if (host.cipher == kHostCipherPassphrase) {
+                /* longer than apple80211_key's buffer: carried beside it */
+                memcpy(me->_ns->joinPass, host.key, host.keyLen);
+                me->_ns->joinPassLen = (uint8_t)host.keyLen;
+            } else {
+                assoc.ad_key.key_len = host.keyLen;
+                memcpy(assoc.ad_key.key, host.key, host.keyLen);
+            }
             r = me->nativeRequest(true, APPLE80211_IOC_ASSOCIATE, &assoc);
+            bzero(me->_ns->joinPass, sizeof(me->_ns->joinPass));
+            me->_ns->joinPassLen = 0;
             bzero(&assoc, sizeof(assoc));
             bzero(&host, sizeof(host));
             bzero(prefix, sizeof(prefix));
@@ -793,7 +816,8 @@ int AirPort_RTW89::nativeAssociate(void *data)
                               APPLE80211_AUTHTYPE_SHA256_PSK;
     struct rtw89_glue_link link;
     const uint8_t *bssid, *pmk = nullptr;
-    bool secure, enterprise;
+    uint8_t derived[32];
+    bool secure, enterprise, fromPassphrase = false;
     int ret;
 
     OSIncrementAtomic(&_ns->assocRequests);
@@ -817,6 +841,14 @@ int AirPort_RTW89::nativeAssociate(void *data)
         _ns->front.set_apple_rsn(_ns->front.ctx, false);
     if (enterprise) {
         /* nothing to check: the keys come later */
+    } else if (secure && _ns->joinPassLen) {
+        /* the passphrase itself (macOS sends it so to a card that does SAE):
+         * the pairwise master key is derived here */
+        if (rtw89_glue_derive_pmk(d->ad_ssid, d->ad_ssid_len, (const char *)_ns->joinPass,
+                                  _ns->joinPassLen, derived))
+            return kIOReturnUnsupported;
+        pmk = derived;
+        fromPassphrase = true;
     } else if (secure) {
         /* IO80211 hands over the pairwise master key; the 4-way handshake is
          * the driver's */
@@ -835,6 +867,7 @@ int AirPort_RTW89::nativeAssociate(void *data)
         (!bssid || !memcmp(bssid, link.bssid, 6))) {
         /* the same request again while it is being carried out */
         IOLockUnlock(_commandLock);
+        bzero(derived, sizeof(derived));
         return kIOReturnSuccess;
     }
     if (link.state != RTW89_GLUE_LINK_DOWN)
@@ -855,8 +888,10 @@ int AirPort_RTW89::nativeAssociate(void *data)
             ret = rtw89_glue_join_pmk(d->ad_ssid, d->ad_ssid_len, nullptr, pmk);
     }
     IOLockUnlock(_commandLock);
+    bzero(derived, sizeof(derived));
     LOG("join requested by macOS (%s, upper auth 0x%x, %u-byte name): %d",
-        enterprise ? "802.1X" : secure ? "WPA2" : "open", d->ad_auth_upper, d->ad_ssid_len, ret);
+        enterprise ? "802.1X" : !secure ? "open" : fromPassphrase ? "WPA2, passphrase" : "WPA2",
+        d->ad_auth_upper, d->ad_ssid_len, ret);
     if (ret == -2)
         return ENOENT;
     return ret ? kIOReturnError : kIOReturnSuccess;
