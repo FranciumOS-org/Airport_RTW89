@@ -738,10 +738,12 @@ int AirPort_RTW89::nativeAssociate(void *data)
     if (d->ad_auth_lower != APPLE80211_AUTHTYPE_OPEN ||
         (d->ad_auth_upper != APPLE80211_AUTHTYPE_NONE && !secure && !enterprise))
         return kIOReturnUnsupported;
-    /* 802.1X sign-in and the key handshake after it are IO80211's; a shared
-     * password's handshake is the driver's */
+    /* The key handshake is the driver's, also after an 802.1X sign-in:
+     * IO80211's supplicant is only started by its own handling of this
+     * request, which newer systems' form of it never reaches. Without it
+     * IO80211 passes the sign-in's master key down (CIPHER_KEY). */
     if (_ns->front.set_apple_rsn)
-        _ns->front.set_apple_rsn(_ns->front.ctx, enterprise);
+        _ns->front.set_apple_rsn(_ns->front.ctx, false);
     if (enterprise) {
         /* nothing to check: the keys come later */
     } else if (secure) {
@@ -769,9 +771,9 @@ int AirPort_RTW89::nativeAssociate(void *data)
     _ns->authLower = d->ad_auth_lower;
     _ns->authUpper = d->ad_auth_upper;
     if (enterprise) {
-        const uint8_t *ie = d->ad_rsn_ie[0] == 48 ? d->ad_rsn_ie :
-                            _ns->rsnIeLen ? _ns->rsnIe : nullptr;
-        size_t ieLen = ie ? (size_t)ie[1] + 2 : 0;
+        /* our own RSN element: the handshake that repeats it is ours */
+        const uint8_t *ie = nullptr;
+        size_t ieLen = 0;
 
         ret = rtw89_glue_join_ext(d->ad_ssid, d->ad_ssid_len, bssid, ie, ieLen);
         if (ret == -2 && bssid)
@@ -815,10 +817,8 @@ int AirPort_RTW89::nativeRequest(bool isSet, int number, void *data)
         if (isSet) {
             _ns->authLower = d->authtype_lower;
             _ns->authUpper = d->authtype_upper;
-            /* said before the join is asked for: IO80211 decides here
-             * whether its supplicant will run */
             if (_ns->front.set_apple_rsn)
-                _ns->front.set_apple_rsn(_ns->front.ctx, isEnterprise(d->authtype_upper));
+                _ns->front.set_apple_rsn(_ns->front.ctx, false);
         } else {
             bzero(d, sizeof(*d));
             d->version = APPLE80211_VERSION;
@@ -853,8 +853,22 @@ int AirPort_RTW89::nativeRequest(bool isSet, int number, void *data)
             return kIOReturnBadArgument;
         if (key->key_cipher_type == APPLE80211_CIPHER_NONE)
             return kIOReturnSuccess;
-        if (key->key_cipher_type != APPLE80211_CIPHER_AES_CCM)
+        if (key->key_cipher_type == APPLE80211_CIPHER_PMK) {
+            /* the 802.1X sign-in is through: its master key, for our handshake */
+            if (!key->key_len)
+                return kIOReturnSuccess;
+            ret = rtw89_glue_set_pmk(key->key, key->key_len);
+            LOG("master key from the sign-in (%u bytes): %d", key->key_len, ret);
+            /* -67: nothing to use it for now; the next join brings it again */
+            return ret && ret != -67 ? kIOReturnError : kIOReturnSuccess;
+        }
+        if (key->key_cipher_type == APPLE80211_CIPHER_PMKSA)
+            return kIOReturnSuccess;        /* no cache of earlier sign-ins */
+        if (key->key_cipher_type != APPLE80211_CIPHER_AES_CCM) {
+            LOG("key of type %u from IO80211 (flags 0x%x, %u bytes): not supported",
+                key->key_cipher_type, key->key_flags, key->key_len);
             return kIOReturnUnsupported;
+        }
         /* as AirportItlwm reads them: flags 4 the pairwise key, 0 a group key */
         if (key->key_flags != 4 && key->key_flags != 0)
             return kIOReturnUnsupported;

@@ -58,6 +58,8 @@ static struct {
     bool external;
     u8 ext_rsn_ie[64];          /* the RSN element to associate with */
     u8 ext_rsn_len;
+    u8 held_m1[160];            /* handshake message 1 that came before the PMK */
+    u16 held_m1_len;
     u8 group_cipher[4];         /* group data cipher suite from the AP's RSN IE */
 
     struct ieee80211_chanctx_conf *chanctx;
@@ -1732,12 +1734,12 @@ static void mlme_send_eapol_key(const struct mlme_ptk *ptk, u8 version, u16 key_
                                 const u8 *replay, const u8 *nonce,
                                 const u8 *key_data, size_t key_data_len)
 {
-    u8 frame[EAPOL_HDR_LEN + EAPOL_KEY_FIXED_LEN + sizeof(mlme_rsn_ie)];
+    u8 frame[EAPOL_HDR_LEN + EAPOL_KEY_FIXED_LEN + sizeof(mlme.ext_rsn_ie)];
     u8 *k = frame + EAPOL_HDR_LEN;
     size_t len = EAPOL_HDR_LEN + EAPOL_KEY_FIXED_LEN + key_data_len;
     u8 mic[RTW89_SHA1_LEN];
 
-    if (key_data_len > sizeof(mlme_rsn_ie))
+    if (key_data_len > sizeof(mlme.ext_rsn_ie))
         return;
 
     memset(frame, 0, sizeof(frame));
@@ -1871,8 +1873,17 @@ static void mlme_rx_eapol(const u8 *e, size_t len)
     if ((size_t)kd_len + EAPOL_KEY_FIXED_LEN > body_len)
         return;
 
-    if (!mlme.have_pmk || !mlme.sta || mlme.sta_state < IEEE80211_STA_ASSOC)
+    if (!mlme.sta || mlme.sta_state < IEEE80211_STA_ASSOC)
         return;
+    if (!mlme.have_pmk) {
+        /* 802.1X: the AP starts the handshake as soon as the sign-in is
+         * through, the PMK reaches us a moment later */
+        if (mlme.external && !(key_info & KEY_INFO_MIC) && len <= sizeof(mlme.held_m1)) {
+            memcpy(mlme.held_m1, e, len);
+            mlme.held_m1_len = (u16)len;
+        }
+        return;
+    }
     if ((key_info & KEY_INFO_VERSION) != KEY_INFO_VER_SHA1_AES) {
         mlme_info("unsupported EAPOL-Key descriptor version %u", key_info & KEY_INFO_VERSION);
         return;
@@ -1898,8 +1909,13 @@ static void mlme_rx_eapol(const u8 *e, size_t len)
         }
         if (!mlme.tptk_valid)
             return;
-        mlme_send_eapol_key(&mlme.tptk, e[0], KEY_INFO_PAIRWISE, k + KEY_OFF_REPLAY,
-                            mlme.snonce, mlme_rsn_ie, sizeof(mlme_rsn_ie));
+        /* with the RSN element of the association request, byte for byte */
+        if (mlme.external)
+            mlme_send_eapol_key(&mlme.tptk, e[0], KEY_INFO_PAIRWISE, k + KEY_OFF_REPLAY,
+                                mlme.snonce, mlme.ext_rsn_ie, mlme.ext_rsn_len);
+        else
+            mlme_send_eapol_key(&mlme.tptk, e[0], KEY_INFO_PAIRWISE, k + KEY_OFF_REPLAY,
+                                mlme.snonce, mlme_rsn_ie, sizeof(mlme_rsn_ie));
         return;
     }
 
@@ -2995,6 +3011,35 @@ int rtw89_mlme_set_key(bool pairwise, int idx, const u8 *key, size_t len, u64 rs
     return 0;
 }
 
+/*
+ * The pairwise master key the outside supplicant's sign-in produced (802.1X:
+ * the first 32 bytes of the MSK). From here the key handshake is ours, as
+ * with a shared password. A later one (the sign-in was repeated) replaces it.
+ */
+int rtw89_mlme_set_pmk(const u8 *pmk, size_t len)
+{
+    u8 held[sizeof(mlme.held_m1)];
+    size_t held_len;
+
+    if (!mlme.running || !mlme.external || !mlme.sta || mlme.state != RTW89_MLME_CONNECTED)
+        return -ENOLINK;
+    if (len != sizeof(mlme.pmk))
+        return -EINVAL;
+    memcpy(mlme.pmk, pmk, sizeof(mlme.pmk));
+    mlme.have_pmk = true;
+    mlme.snonce_valid = false;
+    mlme_info("sign-in done, master key received%s", mlme.held_m1_len ?
+              ": answering the AP's key handshake" : "");
+
+    held_len = mlme.held_m1_len;
+    mlme.held_m1_len = 0;
+    if (held_len) {
+        memcpy(held, mlme.held_m1, held_len);
+        mlme_rx_eapol(held, held_len);
+    }
+    return 0;
+}
+
 /* The RSN element of the association request of the current or last join.
  * Returns its length, 0 for an open network. */
 size_t rtw89_mlme_assoc_rsn_ie(u8 *buf, size_t max)
@@ -3071,6 +3116,7 @@ static int mlme_connect(const struct rtw89_mlme_bss *bss, const u8 *pmk, bool ex
     elem = mlme_find_elem(WLAN_EID_RSN, mlme.ies, bss->ies_len);
     mlme.rsn = elem != NULL;
     mlme.have_pmk = false;
+    mlme.held_m1_len = 0;
     mlme.external = external && elem;
     if (elem && external) {
         ret = mlme_check_rsn(elem, true);

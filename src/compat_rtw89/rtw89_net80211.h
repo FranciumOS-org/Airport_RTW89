@@ -241,6 +241,7 @@ void rtw89_mlme_stop(void);
 int rtw89_mlme_connect(const struct rtw89_mlme_bss *bss, const u8 *pmk);
 int rtw89_mlme_connect_ext(const struct rtw89_mlme_bss *bss, const u8 *rsn_ie, size_t rsn_len);
 int rtw89_mlme_set_key(bool pairwise, int idx, const u8 *key, size_t len, u64 rsc);
+int rtw89_mlme_set_pmk(const u8 *pmk, size_t len);
 bool rtw89_mlme_authorized(void);
 size_t rtw89_mlme_assoc_rsn_ie(u8 *buf, size_t max);
 /* For tests: see every management frame the MLME transmits. */

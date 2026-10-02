@@ -440,15 +440,30 @@ static void ap_send_msg3(const uint8_t gtk[16], int gtk_idx)
     ap_send_key(0x13ca, kd, kd_len, false);
 }
 
-/* Run the 4-way handshake as the authenticator. Returns 0 if the station did
- * everything right, 1 if its message 2 does not verify (wrong password). */
-static int ap_handshake(const uint8_t gtk[16], int gtk_idx)
+/* Part of an 802.1X sign-in: an EAP request for the station's identity. */
+static void ap_send_eap(void)
+{
+    uint8_t frame[24 + 8 + 4 + 5];
+
+    memset(frame, 0, sizeof(frame));
+    frame[0] = 0x08;
+    frame[1] = 0x02;
+    memcpy(frame + 4, sta_mac, 6);
+    memcpy(frame + 10, ap_mac, 6);
+    memcpy(frame + 16, ap_mac, 6);
+    memcpy(frame + 24, "\xaa\xaa\x03\x00\x00\x00\x88\x8e", 8);
+    memcpy(frame + 32, "\x02\x00\x00\x05\x01\x01\x00\x05\x01", 9);
+    rtw89_glue_test_rx(frame, sizeof(frame), ap_freq, -40, false);
+}
+
+/* Run the 4-way handshake as the authenticator with the master key in ap.pmk.
+ * Returns 0 if the station did everything right, 1 if its message 2 does not
+ * verify (wrong key). */
+static int ap_handshake_pmk(const uint8_t gtk[16], int gtk_idx)
 {
     uint8_t data[76], ptk[48];
     int base = ap.eapol_count, info;
 
-    rtw89_pbkdf2_sha1((const uint8_t *)AP_PASSWORD, strlen(AP_PASSWORD),
-                      (const uint8_t *)ap_ssid, strlen(ap_ssid), 4096, ap.pmk, 32);
     memset(ap.anonce, 0x5a, sizeof(ap.anonce));
     ap.anonce[0] = (uint8_t)ap.replay;              /* fresh per handshake */
 
@@ -488,6 +503,14 @@ static int ap_handshake(const uint8_t gtk[16], int gtk_idx)
     if (info != 0x030a || ap.eapol_protected)       /* message 4: pairwise, mic, secure */
         return -1;
     return 0;
+}
+
+/* The same with the master key that follows from the network's password. */
+static int ap_handshake(const uint8_t gtk[16], int gtk_idx)
+{
+    rtw89_pbkdf2_sha1((const uint8_t *)AP_PASSWORD, strlen(AP_PASSWORD),
+                      (const uint8_t *)ap_ssid, strlen(ap_ssid), 4096, ap.pmk, 32);
+    return ap_handshake_pmk(gtk, gtk_idx);
 }
 
 /* A new group key, sent encrypted under the pairwise key like any data. */
@@ -1141,10 +1164,9 @@ static int test_keep(void)
         rsn = sta_assoc_ie(48);
         EXPECT(rsn && rsn[1] == 20 && rsn[2 + 17] == 1);
         EXPECT(sta_tx_test() == -100);
-        /* the AP's EAPOL frames go to the stack, not to the driver's supplicant */
+        /* the AP's sign-in frames go to the stack, not to the driver's supplicant */
         rx = sta_rx.count;
-        ap.replay = 1;
-        ap_send_key(0x008a, NULL, 0, false);
+        ap_send_eap();
         usleep(200 * 1000);
         EXPECT(sta_rx.count == rx + 1 && sta_rx.frame[12] == 0x88 && sta_rx.frame[13] == 0x8e);
         /* keys from outside: with both in place data flows */
@@ -1159,6 +1181,54 @@ static int test_keep(void)
         rtw89_glue_leave();
         EXPECT(link_state() == RTW89_GLUE_LINK_DOWN);
         EXPECT(rtw89_glue_set_key(true, 0, ptk, 16, 0) != 0);
+
+        /* the other way: the sign-in is the system's and hands over its
+         * master key, the key handshake is the driver's */
+        memset(ap.pmk, 0x3c, sizeof(ap.pmk));
+        EXPECT(rtw89_glue_set_pmk(ap.pmk, 32) != 0);
+        EXPECT(rtw89_glue_join_ext((const uint8_t *)"testnet", 7, NULL, NULL, 0) == 0);
+        ap_send_auth(0);
+        usleep(300 * 1000);
+        ap_send_assoc_resp(0);
+        EXPECT(wait_link(RTW89_GLUE_LINK_CONNECTED));
+        rx = sta_rx.count;
+        ap_send_eap();
+        usleep(200 * 1000);
+        EXPECT(sta_rx.count == rx + 1);
+        /* the AP's message 1 is early: not passed up, not answered yet */
+        n = ap.eapol_count;
+        ap.replay = 1;
+        memset(ap.anonce, 0x77, sizeof(ap.anonce));
+        ap_send_key(0x008a, NULL, 0, false);
+        usleep(200 * 1000);
+        EXPECT(sta_rx.count == rx + 1 && ap.eapol_count == n);
+        EXPECT(rtw89_glue_set_pmk(ap.pmk, 31) != 0);
+        /* with the master key it is answered, and the handshake goes through */
+        EXPECT(rtw89_glue_set_pmk(ap.pmk, 32) == 0);
+        EXPECT(ap_wait_eapol(n + 1));
+        EXPECT(ap_handshake_pmk(gtk, 1) == 0);
+        usleep(200 * 1000);
+        rtw89_glue_link(&link);
+        EXPECT(link.authorized && link.state == RTW89_GLUE_LINK_CONNECTED);
+        EXPECT(sta_tx_test() == 0);
+        EXPECT(sta_rx.count == rx + 1);
+        /* a wrong master key gets nowhere */
+        rtw89_glue_leave();
+        EXPECT(link_state() == RTW89_GLUE_LINK_DOWN);
+        EXPECT(rtw89_glue_join_ext((const uint8_t *)"testnet", 7, NULL, NULL, 0) == 0);
+        ap_send_auth(0);
+        usleep(300 * 1000);
+        ap_send_assoc_resp(0);
+        EXPECT(wait_link(RTW89_GLUE_LINK_CONNECTED));
+        EXPECT(rtw89_glue_set_pmk(gtk, 16) != 0);
+        memset(ap.pmk, 0x3d, sizeof(ap.pmk));
+        EXPECT(rtw89_glue_set_pmk(ap.pmk, 32) == 0);
+        memset(ap.pmk, 0x3c, sizeof(ap.pmk));
+        EXPECT(ap_handshake_pmk(gtk, 1) == 1);
+        rtw89_glue_link(&link);
+        EXPECT(!link.authorized);
+        rtw89_glue_leave();
+        EXPECT(link_state() == RTW89_GLUE_LINK_DOWN);
         ap_ies[AP_RSN_AKM] = 2;
         ap_send_beacon();
     }
