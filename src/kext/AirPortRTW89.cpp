@@ -318,6 +318,11 @@ void AirPort_RTW89::txWake(void *ctx)
 {
     AirPort_RTW89 *me = static_cast<AirPort_RTW89 *>(ctx);
 
+    if (me->_native) {
+        if (me->_dataReady)
+            me->nativeTxWake();
+        return;
+    }
     if (me->_dataReady && me->_netifEnabled)
         me->_netif->signalOutputThread();
 }
@@ -328,6 +333,11 @@ void AirPort_RTW89::rxFrame(void *ctx, const uint8_t *frame, size_t len)
     AirPort_RTW89 *me = static_cast<AirPort_RTW89 *>(ctx);
     mbuf_t m;
 
+    if (me->_native) {
+        if (me->_dataReady)
+            me->nativeRxFrame(frame, len);
+        return;
+    }
     if (!me->_dataReady || !me->_netifEnabled)
         return;
 
@@ -456,6 +466,7 @@ bool AirPort_RTW89::start(IOService *provider)
     platform.link_changed = linkChanged;
     platform.rx_frame = rxFrame;
     platform.tx_wake = txWake;
+    platform.scan_done = scanDone;
 
     LOG("probing");
     ret = rtw89_glue_probe(&platform, &device);
@@ -471,7 +482,16 @@ bool AirPort_RTW89::start(IOService *provider)
     /* The interrupt source stays disabled: probe leaves the chip powered down.
      * The glue enables it (irqEnable) when the radio is brought up. */
 
-    if (!setupInterface()) {
+    /* With the front in the registry this is the Wi-Fi device's driver;
+     * without it, an Ethernet-style interface of our own. */
+    if (connectFront()) {
+        /* Wi-Fi is on until macOS says otherwise */
+        int up = rtw89_glue_up();
+
+        if (up)
+            LOG("could not start the radio: %d", up);
+        publishLink();
+    } else if (!setupInterface()) {
         LOG("could not create the network interface");
         teardown();
         return false;
@@ -655,6 +675,9 @@ void AirPort_RTW89::publishLink()
     /* The stack starts DHCP when the link comes up and forgets its addresses
      * when it goes down. */
     bool active = link.state == RTW89_GLUE_LINK_CONNECTED;
+    setProperty("RTW89 Native", _native);
+    if (_native)
+        nativeNotify(1);        /* kNativeEventLink; handled off this thread */
     if (_medium && active != _linkActive) {
         /* the best rate of the mode and width, two streams: what Wi-Fi
          * settings would call the link speed */
@@ -747,6 +770,8 @@ void AirPort_RTW89::teardown()
     _dataReady = false;
     while (_txBusy)
         IOSleep(1);
+    /* the front stops calling before anything it calls into goes away */
+    disconnectFront();
 
     if (_commandLock)
         IOLockLock(_commandLock);

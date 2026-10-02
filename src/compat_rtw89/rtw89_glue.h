@@ -51,6 +51,10 @@ struct rtw89_glue_platform {
     /* Optional: rtw89_glue_tx_room() returned zero earlier and there is room
      * again. Called from a driver thread; may call rtw89_glue_tx*(). */
     void (*tx_wake)(void *ctx);
+
+    /* Optional: a scan has ended (or was given up). Called from a driver
+     * thread with driver locks held: only the scan result calls are safe. */
+    void (*scan_done)(void *ctx, bool aborted);
 };
 
 struct rtw89_glue_device {
@@ -140,6 +144,34 @@ struct rtw89_glue_bss {
 unsigned int rtw89_glue_scan_results(struct rtw89_glue_bss *out, unsigned int max);
 
 /*
+ * One network of that list, with what a caller needs to describe it fully:
+ * the elements of its last beacon or probe response (up to @ies_max bytes,
+ * *@ies_len says how many) and its beacon interval. @index counts as in
+ * rtw89_glue_scan_results(); returns false past the end. rtw89_glue_find_bss()
+ * looks one up by address instead.
+ */
+bool rtw89_glue_scan_entry(unsigned int index, struct rtw89_glue_bss *out, uint8_t *ies,
+                           size_t ies_max, size_t *ies_len, uint16_t *beacon_int);
+bool rtw89_glue_find_bss(const uint8_t bssid[6], struct rtw89_glue_bss *out, uint8_t *ies,
+                         size_t ies_max, size_t *ies_len, uint16_t *beacon_int);
+
+/* The channels the card and the regulatory domain allow. */
+struct rtw89_glue_channel {
+    uint16_t freq;              /* MHz */
+    uint8_t  channel;
+    bool     passive;           /* listen only: no probe requests */
+    bool     radar;
+};
+unsigned int rtw89_glue_channels(struct rtw89_glue_channel *out, unsigned int max);
+
+/*
+ * Use @mac as the station's address instead of the card's own (macOS gives
+ * each network a private address). Takes the radio down and up again if it is
+ * up, which ends any connection. Returns 0 or a negative errno.
+ */
+int rtw89_glue_set_mac(const uint8_t mac[6]);
+
+/*
  * Join the strongest network heard under @ssid in the last scan. @passphrase
  * is the WPA2 password (8 to 63 characters, or 64 hex digits for a raw key);
  * NULL or empty for an open network. Returns 0 once the attempt has started;
@@ -150,6 +182,10 @@ unsigned int rtw89_glue_scan_results(struct rtw89_glue_bss *out, unsigned int ma
  */
 int rtw89_glue_join(const uint8_t *ssid, size_t ssid_len,
                     const char *passphrase, size_t passphrase_len);
+/* The same with the 32-byte pairwise master key already derived (NULL: an
+ * open network), and optionally one access point picked by @bssid. */
+int rtw89_glue_join_pmk(const uint8_t *ssid, size_t ssid_len, const uint8_t *bssid,
+                        const uint8_t *pmk);
 void rtw89_glue_leave(void);
 
 enum rtw89_glue_link_state {
@@ -178,6 +214,7 @@ struct rtw89_glue_link {
     uint16_t center_freq;           /* centre of the whole channel, MHz */
     uint8_t  mode;                  /* 0: 802.11a/b/g, 1: 802.11n, 2: 802.11ac, 3: 802.11ax */
     uint8_t  nss;                   /* spatial streams */
+    int8_t   signal;                /* dBm, of the access point's beacons; 0 if unknown */
     int      last_error;            /* 0, -errno, -1000-status or -2000-reason */
     uint32_t eapol_rx;
 
