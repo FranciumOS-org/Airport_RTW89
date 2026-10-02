@@ -90,6 +90,21 @@ static uint8_t ap5_ies[] = {
     0x42, 0x43, 0x5e, 0x00, 0x62, 0x32, 0x2f, 0x00,
 };
 
+/* What an 802.11ax AP adds to either network. */
+static uint8_t ap_he_ies[] = {
+    0xff, 0x16, 0x23,                                                /* HE capabilities: */
+    0x01, 0x00, 0x00, 0x00, 0x00, 0x00,                              /* MAC: HT control field */
+    0x06, 0x20, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, /* PHY: 40 and 80 MHz, LDPC */
+    0xfa, 0xff, 0xfa, 0xff,                                          /* 2 streams, MCS 0-11 */
+#define AP_HE_OPER 24                                                /* offset of the next element */
+    0xff, 0x07, 0x24, 0xf4, 0x3f, 0x00, 0x05,                        /* HE operation: colour 5, */
+    0xfc, 0xff,                                                      /* MCS 0-7 on 1 stream required */
+    0xff, 0x0e, 0x26, 0x01,                                          /* MU EDCA parameters */
+    0x03, 0xa4, 0x08, 0x27, 0xa4, 0x08, 0x42, 0x43, 0x08, 0x62, 0x32, 0x08,
+};
+static bool ap_he;              /* the beacon has them */
+static bool ap_he_resp;         /* ... and the association response */
+
 /* Which network the pretend AP is at the moment. */
 static const uint8_t *ap_cur_ies = ap_ies;
 static size_t ap_cur_ies_len = sizeof(ap_ies);
@@ -135,8 +150,14 @@ static void ap_send_beacon(void)
 {
     uint8_t body[12 + 400] = { 0, 0, 0, 0, 0, 0, 0, 0, 0x64, 0x00, 0x11, 0x04 };
 
+    size_t len = 12 + ap_cur_ies_len;
+
     memcpy(body + 12, ap_cur_ies, ap_cur_ies_len);
-    ap_send(0x80, body, 12 + ap_cur_ies_len);
+    if (ap_he) {
+        memcpy(body + len, ap_he_ies, sizeof(ap_he_ies));
+        len += sizeof(ap_he_ies);
+    }
+    ap_send(0x80, body, len);
 }
 
 static void ap_send_auth(uint16_t status)
@@ -149,11 +170,15 @@ static void ap_send_auth(uint16_t status)
 static void ap_send_assoc_resp(uint16_t status)
 {
     uint8_t body[6 + 400] = { 0x11, 0x04, (uint8_t)status, (uint8_t)(status >> 8), 0x05, 0xc0 };
-    size_t ssid = 2 + ap_cur_ies[1];
+    size_t ssid = 2 + ap_cur_ies[1], len = 6 + ap_cur_ies_len - ssid;
 
     /* an association response carries the same elements minus the SSID */
     memcpy(body + 6, ap_cur_ies + ssid, ap_cur_ies_len - ssid);
-    ap_send(0x10, body, 6 + ap_cur_ies_len - ssid);
+    if (ap_he && ap_he_resp) {
+        memcpy(body + len, ap_he_ies, sizeof(ap_he_ies));
+        len += sizeof(ap_he_ies);
+    }
+    ap_send(0x10, body, len);
 }
 
 static void ap_send_deauth(uint16_t reason)
@@ -189,11 +214,13 @@ static struct {
         volatile int count;
         uint8_t dialog;
         uint16_t ssn, capab;
+        int ext;                /* the ADDBA extension element's byte, -1 without one */
     } addba_req[16];
     struct {
         volatile int count;
         uint8_t dialog;
         uint16_t status, capab;
+        int ext;
     } addba_resp[16];
     struct {
         volatile int count;
@@ -240,6 +267,8 @@ static void ap_tx_tap(const uint8_t *frame, size_t len)
     }
     if (frame[0] == 0xd0 && len >= 24 + 6 && frame[24] == 3) {
         const uint8_t *b = frame + 26;      /* after category and action code */
+        /* both ADDBA frames have 7 more fixed bytes, then elements */
+        int ext = len >= 24 + 9 + 3 && frame[33] == 159 && frame[34] == 1 ? frame[35] : -1;
         int tid;
 
         if (frame[25] == 0 && len >= 24 + 9) {          /* ADDBA request */
@@ -247,12 +276,14 @@ static void ap_tx_tap(const uint8_t *frame, size_t len)
             ap.addba_req[tid].dialog = b[0];
             ap.addba_req[tid].capab = (uint16_t)(b[1] | b[2] << 8);
             ap.addba_req[tid].ssn = (uint16_t)((b[5] | b[6] << 8) >> 4);
+            ap.addba_req[tid].ext = ext;
             ap.addba_req[tid].count++;
         } else if (frame[25] == 1 && len >= 24 + 9) {   /* ADDBA response */
             tid = (b[3] >> 2) & 0x0f;
             ap.addba_resp[tid].dialog = b[0];
             ap.addba_resp[tid].status = (uint16_t)(b[1] | b[2] << 8);
             ap.addba_resp[tid].capab = (uint16_t)(b[3] | b[4] << 8);
+            ap.addba_resp[tid].ext = ext;
             ap.addba_resp[tid].count++;
         } else if (frame[25] == 2) {                    /* DELBA */
             tid = b[1] >> 4;
@@ -876,6 +907,16 @@ static const uint8_t *sta_assoc_ie(uint8_t eid)
     return off + 2 <= ap.assoc_req_len ? ap.assoc_req + off : NULL;
 }
 
+/* An extension element of the last association request, from its extension id. */
+static const uint8_t *sta_assoc_ext_ie(uint8_t ext_eid)
+{
+    size_t off = 24 + 4;
+
+    while (off + 3 <= ap.assoc_req_len && !(ap.assoc_req[off] == 255 && ap.assoc_req[off + 2] == ext_eid))
+        off += 2 + ap.assoc_req[off + 1];
+    return off + 3 <= ap.assoc_req_len ? ap.assoc_req + off : NULL;
+}
+
 /* Authenticate and associate with the pretend AP answering. */
 static int join_testnet(const char *password, uint16_t assoc_status)
 {
@@ -1042,6 +1083,7 @@ static int test_join(void)
     /* the request says so: 40 MHz in the HT element, and a VHT element */
     EXPECT(sta_assoc_ie(45) && (sta_assoc_ie(45)[2] & 0x02));
     EXPECT(sta_assoc_ie(191) && sta_assoc_ie(191)[1] == 12);
+    EXPECT(!sta_assoc_ext_ie(35));
     EXPECT(ap_handshake(gtk1, 1) == 0);
     EXPECT(wait_link(RTW89_GLUE_LINK_CONNECTED));
     EXPECT(sta_tx_test() == 0);
@@ -1071,6 +1113,112 @@ static int test_join(void)
     EXPECT(!sta_assoc_ie(191));
     rtw89_glue_leave();
     ap5_ies[AP5_VHT_OPER + 3] = 42;
+
+    /* ---- the same network with 802.11ax ---- */
+    ap_he = true;
+    ap_he_resp = true;
+    ap_send_beacon();
+    {
+        struct rtw89_glue_bss list[8];
+        unsigned int i, n = rtw89_glue_scan_results(list, 8), found = 0;
+
+        for (i = 0; i < n; i++)
+            if (!strcmp(list[i].ssid, "testnet5")) {
+                found++;
+                EXPECT(list[i].mode == 3 && list[i].width == 80);
+            }
+        EXPECT(found == 1);
+    }
+    EXPECT(join_testnet(AP_PASSWORD, 0));
+    EXPECT(wait_link(RTW89_GLUE_LINK_ASSOCIATED));
+    rtw89_glue_link(&link);
+    EXPECT(link.width == 80 && link.center_freq == 5210 && link.mode == 3 && link.nss == 2);
+    {
+        /* our HE capabilities: no PPE thresholds, rates for 80 MHz only, and
+         * of the widths 40/80 MHz on 5 GHz alone */
+        const uint8_t *he = sta_assoc_ext_ie(35);
+
+        EXPECT(he && he[1] == 22 && he[3 + 6] == 0x04);
+        EXPECT(he && he[3 + 17] == 0xfa && he[3 + 18] == 0xff);
+        EXPECT(sta_assoc_ie(191) != NULL);
+    }
+    EXPECT(ap_handshake(gtk1, 1) == 0);
+    EXPECT(wait_link(RTW89_GLUE_LINK_CONNECTED));
+    EXPECT(sta_tx_test() == 0);
+    {
+        /* The AP wants to send aggregates of 256 frames on TID 1 (start 1),
+         * with the extension element. The card takes 64 and answers with
+         * the element too. */
+        static const uint8_t addba[] = { 3, 0, 11, 0x07, 0x40, 0x00, 0x00, 0x10, 0x00, 159, 1, 0x01 };
+        int n = ap.addba_resp[1].count;
+
+        ap_send(0xd0, addba, sizeof(addba));
+        EXPECT(wait_count(&ap.addba_resp[1].count, n));
+        EXPECT(ap.addba_resp[1].dialog == 11 && ap.addba_resp[1].status == 0);
+        EXPECT(ap.addba_resp[1].capab == 0x1007 && ap.addba_resp[1].ext == 0x01);
+
+        /* and our own request: 128 frames (what the chip sends), with the element */
+        n = ap.addba_req[2].count;
+        EXPECT(sta_tx_tid(2) == 0);
+        EXPECT(wait_count(&ap.addba_req[2].count, n));
+        EXPECT((ap.addba_req[2].capab & 0xffc0) == 128 << 6 && ap.addba_req[2].ext == 0x01);
+    }
+    rtw89_glue_leave();
+    EXPECT(link_state() == RTW89_GLUE_LINK_DOWN);
+
+    /* an AP whose association response leaves the HE elements out: 802.11ac */
+    ap_he_resp = false;
+    EXPECT(join_testnet(AP_PASSWORD, 0));
+    EXPECT(wait_link(RTW89_GLUE_LINK_ASSOCIATED));
+    rtw89_glue_link(&link);
+    EXPECT(sta_assoc_ext_ie(35) != NULL);
+    EXPECT(link.width == 80 && link.mode == 2 && link.nss == 2);
+    rtw89_glue_leave();
+    ap_he_resp = true;
+
+    /* 802.11ax switched off (rtw89ctl ax off): the same AP as 802.11ac */
+    rtw89_glue_set_ax(false);
+    EXPECT(join_testnet(AP_PASSWORD, 0));
+    EXPECT(wait_link(RTW89_GLUE_LINK_ASSOCIATED));
+    rtw89_glue_link(&link);
+    EXPECT(!sta_assoc_ext_ie(35) && sta_assoc_ie(191));
+    EXPECT(link.width == 80 && link.mode == 2 && !link.ax);
+    rtw89_glue_leave();
+    rtw89_glue_set_ax(true);
+    rtw89_glue_link(&link);
+    EXPECT(link.ax);
+
+    /* an AP that requires MCS 0-7 on three streams of every station: not
+     * with this card, so it is joined as 802.11ac and HE is not offered */
+    ap_he_ies[AP_HE_OPER + 7] = 0xc0;
+    ap_send_beacon();
+    EXPECT(join_testnet(AP_PASSWORD, 0));
+    EXPECT(wait_link(RTW89_GLUE_LINK_ASSOCIATED));
+    rtw89_glue_link(&link);
+    EXPECT(!sta_assoc_ext_ie(35) && sta_assoc_ie(191));
+    EXPECT(link.width == 80 && link.mode == 2);
+    rtw89_glue_leave();
+    ap_he_ies[AP_HE_OPER + 7] = 0xfc;
+
+    /* 802.11ax on 2.4 GHz: 20 MHz here, and no 802.11ac involved */
+    ap_select(false);
+    ap_send_beacon();
+    EXPECT(join_testnet(AP_PASSWORD, 0));
+    EXPECT(wait_link(RTW89_GLUE_LINK_ASSOCIATED));
+    rtw89_glue_link(&link);
+    EXPECT(link.width == 20 && link.center_freq == 2437 && link.mode == 3 && link.nss == 2);
+    /* the widths left in our capabilities: 40 MHz on 2.4 GHz, as the AP's
+     * channel being narrower does not limit what we can do */
+    EXPECT(sta_assoc_ext_ie(35) && sta_assoc_ext_ie(35)[3 + 6] == 0x02 && !sta_assoc_ie(191));
+    EXPECT(ap_handshake(gtk1, 1) == 0);
+    EXPECT(wait_link(RTW89_GLUE_LINK_CONNECTED));
+    EXPECT(sta_tx_test() == 0);
+    rtw89_glue_leave();
+    ap_he = false;
+    ap_send_beacon();
+    ap_select(true);
+    ap_send_beacon();
+
     ap_select(false);
 #undef EXPECT
     printf("== join test: %d failure(s)\n", failures);

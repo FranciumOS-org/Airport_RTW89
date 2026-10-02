@@ -620,6 +620,7 @@ void AirPort_RTW89::publishLink()
     setProperty("RTW89 RX Late Max", link.rx_late_max_ms, 32);
     setProperty("RTW89 RX Status Flushed", link.rx_ppdu_flushed, 32);
     setProperty("RTW89 RX Status Flush", link.ppdu_flush);
+    setProperty("RTW89 AX Allowed", link.ax);
     setProperty("RTW89 TX Aggregation", link.tx_ba, 32);
     setProperty("RTW89 RX Aggregation", link.rx_ba, 32);
 
@@ -629,7 +630,8 @@ void AirPort_RTW89::publishLink()
     if (_medium && active != _linkActive) {
         /* the best rate of the mode and width, two streams: what Wi-Fi
          * settings would call the link speed */
-        UInt64 mbit = link.mode >= 2 ? (link.width >= 80 ? 866 : link.width >= 40 ? 400 : 173) :
+        UInt64 mbit = link.mode >= 3 ? (link.width >= 80 ? 1201 : link.width >= 40 ? 574 : 287) :
+                      link.mode == 2 ? (link.width >= 80 ? 866 : link.width >= 40 ? 400 : 173) :
                       link.mode == 1 ? (link.width >= 40 ? 300 : 144) : 54;
 
         _linkActive = active;
@@ -683,6 +685,8 @@ IOReturn AirPort_RTW89::setProperties(OSObject *properties)
         }
     } else if (command->isEqualTo("flush-on") || command->isEqualTo("flush-off")) {
         rtw89_glue_set_ppdu_flush(command->isEqualTo("flush-on"));
+    } else if (command->isEqualTo("ax-on") || command->isEqualTo("ax-off")) {
+        rtw89_glue_set_ax(command->isEqualTo("ax-on"));
     } else if (command->isEqualTo("leave")) {
         rtw89_glue_leave();
     } else if (command->isEqualTo("results")) {

@@ -510,6 +510,11 @@ void rtw89_glue_set_ppdu_flush(bool on)
     glue.ppdu_flush = on;
 }
 
+void rtw89_glue_set_ax(bool on)
+{
+    rtw89_mlme_set_he(on);
+}
+
 /* Measure how late a frame is, by the chip's own receive timestamp. */
 static void glue_rx_timing(const struct ieee80211_rx_status *status)
 {
@@ -1217,6 +1222,7 @@ void rtw89_glue_link(struct rtw89_glue_link *link)
     link->rx_late_max_ms = glue.rx_late_max;
     link->rx_ppdu_flushed = glue.ppdu_flushed;
     link->ppdu_flush = glue.ppdu_flush;
+    link->ax = rtw89_mlme_get_he();
     if (!glue.up)
         return;
 

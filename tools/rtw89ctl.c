@@ -10,7 +10,9 @@
  *   sudo rtw89ctl down      stop the radio
  *        rtw89ctl status    print what the kext has published
  *   sudo rtw89ctl flush on|off   pass on received frames whose status report
- *                           from the chip is missing after 2 ms (default on)
+ *                           from the chip is missing after 1 ms (default on)
+ *   sudo rtw89ctl ax on|off use 802.11ax where the network offers it (default
+ *                           on); takes effect at the next join
  *
  * Once a network is joined, traffic flows through the Ethernet-style
  * interface the kext publishes (the "interface" line of status, e.g. en7):
@@ -203,17 +205,18 @@ static void print_link(io_service_t service)
         return;
     printf("%-10s %s\n", "link", state);
     if (strcmp(state, "down")) {
-        static const char *const modes[] = { "802.11a/b/g", "802.11n", "802.11ac" };
+        static const char *const modes[] = { "802.11a/b/g", "802.11n", "802.11ac", "802.11ax" };
         long mode = get_long(service, CFSTR("RTW89 Link Mode"));
 
         printf("%-10s %s, %ld MHz, AID %ld\n", "network", bssid,
                get_long(service, CFSTR("RTW89 Link Frequency")),
                get_long(service, CFSTR("RTW89 Link AID")));
-        printf("%-10s %s, %ld MHz wide (centre %ld MHz), %ld stream(s)\n", "channel",
-               mode >= 0 && mode <= 2 ? modes[mode] : "?",
+        printf("%-10s %s, %ld MHz wide (centre %ld MHz), %ld stream(s)%s\n", "channel",
+               mode >= 0 && mode <= 3 ? modes[mode] : "?",
                get_long(service, CFSTR("RTW89 Link Width")),
                get_long(service, CFSTR("RTW89 Link Center")),
-               get_long(service, CFSTR("RTW89 Link Streams")));
+               get_long(service, CFSTR("RTW89 Link Streams")),
+               get_bool(service, CFSTR("RTW89 AX Allowed")) ? "" : " (802.11ax switched off)");
         printf("%-10s %ld EAPOL frame(s) from the AP\n", "handshake",
                get_long(service, CFSTR("RTW89 Link EAPOL Frames")));
     }
@@ -375,10 +378,22 @@ int main(int argc, char **argv)
         return 0;
     }
 
+    if (!strcmp(command, "ax") && argc >= 3 &&
+        (!strcmp(argv[2], "on") || !strcmp(argv[2], "off"))) {
+        kr = send_command(service, !strcmp(argv[2], "on") ? "ax-on" : "ax-off");
+        if (kr != KERN_SUCCESS) {
+            fprintf(stderr, "ax failed: 0x%x%s\n", kr,
+                    kr == kIOReturnNotPrivileged ? " (run with sudo)" : "");
+            return 1;
+        }
+        printf("802.11ax %s from the next join\n", argv[2]);
+        return 0;
+    }
+
     if ((strcmp(command, "up") && strcmp(command, "down") && strcmp(command, "scan") &&
          strcmp(command, "join") && strcmp(command, "leave")) ||
         (!strcmp(command, "join") && argc < 3)) {
-        fprintf(stderr, "usage: rtw89ctl up|down|scan|join SSID|leave|status|flush on|off\n");
+        fprintf(stderr, "usage: rtw89ctl up|down|scan|join SSID|leave|status|flush on|off|ax on|off\n");
         return 2;
     }
 

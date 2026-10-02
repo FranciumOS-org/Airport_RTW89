@@ -6,10 +6,11 @@
  * ieee80211_auth, ieee80211_send_assoc, ieee80211_assoc_success,
  * ieee80211_set_associated, ieee80211_set_disassoc).
  *
- * Scope so far: open-system authentication and association, 802.11n on a
- * 20 MHz channel, and WPA2-PSK with CCMP: the supplicant side of the 4-way
- * and group key handshakes (IEEE 802.11 12.7.6/12.7.7) and installing the
- * keys in the driver. The data path is not here yet.
+ * Scope so far: open-system authentication and association; 802.11n, 802.11ac
+ * and 802.11ax on channels up to 80 MHz wide; WPA2-PSK with CCMP: the
+ * supplicant side of the 4-way and group key handshakes (IEEE 802.11
+ * 12.7.6/12.7.7) and installing the keys in the driver; BlockAck sessions.
+ * Data frames are rtw89_data.c's. Beacons are not followed after the join.
  *
  * Everything runs under the wiphy mutex, as in mac80211: commands take it,
  * received frames are queued and handled from a wiphy work.
@@ -41,6 +42,8 @@ static struct {
     struct ieee80211_supported_band *sband;
     bool ht;                    /* AP and card both do 802.11n */
     bool vht;                   /* ... and 802.11ac */
+    bool he;                    /* ... and 802.11ax */
+    unsigned int bw_limit;      /* MHz: the widest channel we may claim to the AP */
     struct cfg80211_chan_def chandef;   /* the channel and width we operate on */
     bool wmm;
     bool rsn;
@@ -114,6 +117,9 @@ static void mlme_set_state(enum rtw89_mlme_state state)
 
 #define mlme_info(fmt, ...) IOLog("[rtw89 mlme] " fmt "\n", ##__VA_ARGS__)
 
+/* Not in mlme: it holds across stopping and starting the radio. */
+static bool mlme_he_off;
+
 /* ------------------------------------------------------------------ */
 /*  Helpers                                                             */
 /* ------------------------------------------------------------------ */
@@ -149,6 +155,43 @@ static const struct element *mlme_wmm_param(const u8 *ies, size_t len)
             return elem;
     }
     return NULL;
+}
+
+/* The payload of an extension element (after the extension id), if there is
+ * one of at least @min bytes. */
+static const u8 *mlme_ext_elem(u8 ext_eid, const u8 *ies, size_t len, size_t min, u8 *out_len)
+{
+    const struct element *elem = ies ? cfg80211_find_ext_elem(ext_eid, ies, len) : NULL;
+
+    if (!elem || (size_t)elem->datalen - 1 < min)
+        return NULL;
+    if (out_len)
+        *out_len = (u8)(elem->datalen - 1);
+    return elem->data + 1;
+}
+
+/* The 802.11ax elements, accepted on the conditions ieee802_11_parse_elems() sets. */
+static const u8 *mlme_he_cap_ie(const u8 *ies, size_t len, u8 *cap_len)
+{
+    const u8 *cap = mlme_ext_elem(WLAN_EID_EXT_HE_CAPABILITY, ies, len,
+                                  sizeof(struct ieee80211_he_cap_elem), cap_len);
+
+    return cap && ieee80211_he_capa_size_ok(cap, *cap_len) ? cap : NULL;
+}
+
+static const struct ieee80211_he_operation *mlme_he_oper_ie(const u8 *ies, size_t len)
+{
+    u8 oper_len;
+    const u8 *oper = mlme_ext_elem(WLAN_EID_EXT_HE_OPERATION, ies, len,
+                                   sizeof(struct ieee80211_he_operation), &oper_len);
+
+    /* ieee80211_he_oper_size() counts the extension id as well */
+    return oper && oper_len >= ieee80211_he_oper_size(oper) - 1 ? (const void *)oper : NULL;
+}
+
+static const struct ieee80211_sta_he_cap *mlme_own_he_cap(void)
+{
+    return ieee80211_get_he_iftype_cap_vif(mlme.sband, mlme.vif);
 }
 
 /*
@@ -439,6 +482,16 @@ static void mlme_teardown(u16 deauth_reason)
         mlme.sta = NULL;
     }
 
+    /* set while the association response was being taken in, which can fail
+     * before the interface counts as associated */
+    conf->he_support = false;
+    conf->twt_requester = false;
+    conf->twt_broadcast = false;
+    conf->uora_exists = false;
+    memset(&conf->he_bss_color, 0, sizeof(conf->he_bss_color));
+    memset(&conf->he_oper, 0, sizeof(conf->he_oper));
+    memset(&conf->he_obss_pd, 0, sizeof(conf->he_obss_pd));
+
     if (was_assoc) {
         mlme.vif->cfg.assoc = false;
         mlme.vif->cfg.aid = 0;
@@ -504,7 +557,6 @@ static void mlme_send_auth(void)
 /*  Association                                                         */
 /* ------------------------------------------------------------------ */
 
-/* Our HT capabilities as advertised for a 20 MHz association (ieee80211_add_ht_ie). */
 /* ------------------------------------------------------------------ */
 /*  Channel width (ieee80211_determine_ap_chan() and what it calls)     */
 /* ------------------------------------------------------------------ */
@@ -535,8 +587,8 @@ static bool mlme_chandef_valid(const struct cfg80211_chan_def *def)
            !((def->chan->center_freq - first) % 20);
 }
 
-/* ... and every one of them exists and may be used. */
-static bool mlme_chandef_usable(const struct cfg80211_chan_def *def)
+/* ... and every one of them exists and has none of the flags @prohibited. */
+static bool mlme_chandef_usable(const struct cfg80211_chan_def *def, u32 prohibited)
 {
     unsigned int width = mlme_chandef_mhz(def), freq;
     unsigned int first = def->center_freq1 - width / 2 + 10;
@@ -548,7 +600,7 @@ static bool mlme_chandef_usable(const struct cfg80211_chan_def *def)
 
     for (freq = first; freq <= last; freq += 20) {
         chan = ieee80211_get_channel(mlme.hw->wiphy, (int)freq);
-        if (!chan || (chan->flags & IEEE80211_CHAN_DISABLED))
+        if (!chan || (chan->flags & prohibited))
             return false;
     }
     return true;
@@ -580,26 +632,37 @@ static void mlme_chandef_downgrade(struct cfg80211_chan_def *def)
 }
 
 /*
- * The channel the AP operates on, from its HT and VHT operation elements, cut
- * down to what this card and the regulatory domain allow.
+ * The channel the AP operates on, from its HT, VHT and HE operation elements,
+ * cut down to what this card and the regulatory domain allow. Also settles
+ * which of 802.11n/ac/ax the join uses: mlme.ht, mlme.vht and mlme.he go in
+ * as "both sides have the elements" and come out as what holds up.
  */
 static void mlme_determine_chandef(struct cfg80211_chan_def *def)
 {
+    const struct ieee80211_sta_he_cap *own_he = mlme_own_he_cap();
     const struct ieee80211_ht_operation *ht_oper = NULL;
-    const struct ieee80211_vht_operation *vht_oper = NULL;
+    const struct ieee80211_vht_operation *vht_oper;
+    const struct ieee80211_he_operation *he_oper;
+    struct ieee80211_vht_operation he_vht;
     const struct element *elem;
     struct cfg80211_chan_def wide;
     unsigned int max = 20;
+    bool from_he;
 
     cfg80211_chandef_create(def, mlme.chan, mlme.ht ? NL80211_CHAN_HT20 : NL80211_CHAN_NO_HT);
-    if (!mlme.ht)
-        return;
+    mlme.bw_limit = 20;
 
     elem = mlme_find_elem(WLAN_EID_HT_OPERATION, mlme.bss.ies, mlme.bss.ies_len);
-    if (elem && elem->datalen >= sizeof(*ht_oper))
+    if (mlme.ht && elem && elem->datalen >= sizeof(*ht_oper))
         ht_oper = (const void *)elem->data;
-    if (!ht_oper)
+    if (!ht_oper) {
+        /* everything newer builds on 802.11n */
+        cfg80211_chandef_create(def, mlme.chan, NL80211_CHAN_NO_HT);
+        mlme.ht = false;
+        mlme.vht = false;
+        mlme.he = false;
         return;
+    }
 
     /* ieee80211_chandef_ht_oper(): a secondary channel above or below */
     if (mlme.sband->ht_cap.cap & IEEE80211_HT_CAP_SUP_WIDTH_20_40) {
@@ -614,9 +677,25 @@ static void mlme_determine_chandef(struct cfg80211_chan_def *def)
         }
     }
 
+again:
+    /* The wide channel: from the VHT operation element, or for an 802.11ax
+     * AP from the copy of its fields in the HE operation element. */
+    vht_oper = NULL;
+    from_he = false;
+    he_oper = mlme.he ? mlme_he_oper_ie(mlme.bss.ies, mlme.bss.ies_len) : NULL;
     elem = mlme_find_elem(WLAN_EID_VHT_OPERATION, mlme.bss.ies, mlme.bss.ies_len);
-    if (mlme.vht && elem && elem->datalen >= sizeof(*vht_oper))
+    if (mlme.vht && he_oper &&
+        (le32_to_cpu(he_oper->he_oper_params) & IEEE80211_HE_OPERATION_VHT_OPER_INFO)) {
+        memset(&he_vht, 0, sizeof(he_vht));
+        memcpy(&he_vht, he_oper->optional, 3);
+        vht_oper = &he_vht;
+        from_he = true;
+    } else if (mlme.vht && elem && elem->datalen >= sizeof(*vht_oper)) {
         vht_oper = (const void *)elem->data;
+    } else {
+        mlme.vht = false;
+    }
+
     if (vht_oper) {
         /* ieee80211_chandef_vht_oper(), for a card without 160 MHz: the first
          * centre frequency is that of the 80 MHz channel the control channel
@@ -647,6 +726,12 @@ static void mlme_determine_chandef(struct cfg80211_chan_def *def)
         if (mlme_chandef_mhz(&wide) > mlme_chandef_mhz(def)) {
             struct cfg80211_chan_def narrow = wide;
 
+            if (!mlme_chandef_valid(&wide) && from_he) {
+                /* look again as an 802.11ac station */
+                mlme_info("the AP's 802.11ax channel information is invalid: not using 802.11ax");
+                mlme.he = false;
+                goto again;
+            }
             /* the 40 MHz channel of the HT element must be part of it */
             while (mlme_chandef_valid(&wide) && mlme_chandef_mhz(&narrow) > mlme_chandef_mhz(def))
                 mlme_chandef_downgrade(&narrow);
@@ -661,11 +746,90 @@ static void mlme_determine_chandef(struct cfg80211_chan_def *def)
         }
     }
 
-    while (mlme_chandef_mhz(def) > max || !mlme_chandef_usable(def)) {
-        if (def->width == NL80211_CHAN_WIDTH_20 || def->width == NL80211_CHAN_WIDTH_20_NOHT)
-            break;
-        mlme_chandef_downgrade(def);
+    /* 802.11ax is 802.11ac and more on 5 GHz (an AP with HE but without VHT
+     * elements there is joined as 802.11n); on 2.4 GHz it follows 802.11n. */
+    if (mlme.chan->band != NL80211_BAND_2GHZ && !mlme.vht)
+        mlme.he = false;
+
+    /* ieee80211_determine_our_sta_mode(): the widths the 802.11ax side of the
+     * card does */
+    if (mlme.he) {
+        u8 widths = own_he->he_cap_elem.phy_cap_info[0];
+
+        if (!(widths & (mlme.chan->band == NL80211_BAND_2GHZ ?
+                        IEEE80211_HE_PHY_CAP0_CHANNEL_WIDTH_SET_40MHZ_IN_2G :
+                        IEEE80211_HE_PHY_CAP0_CHANNEL_WIDTH_SET_40MHZ_80MHZ_IN_5G)))
+            max = 20;
     }
+    mlme.bw_limit = max;
+
+    while (mlme_chandef_mhz(def) > max)
+        mlme_chandef_downgrade(def);
+    /* narrower where the regulatory domain rules out part of the channel;
+     * then that is also all we claim to be able to do */
+    while (!mlme_chandef_usable(def, IEEE80211_CHAN_DISABLED) &&
+           def->width != NL80211_CHAN_WIDTH_20 && def->width != NL80211_CHAN_WIDTH_20_NOHT) {
+        mlme_chandef_downgrade(def);
+        mlme.bw_limit = mlme_chandef_mhz(def);
+    }
+    if (mlme.he && !mlme_chandef_usable(def, IEEE80211_CHAN_NO_HE)) {
+        mlme_info("802.11ax is not allowed on this channel");
+        mlme.he = false;
+    }
+}
+
+/*
+ * ieee80211_verify_peer_he_mcs_support() and ieee80211_verify_sta_he_mcs_support():
+ * the AP's 802.11ax rates are consistent, and we can do the ones it requires
+ * of every station.
+ */
+static bool mlme_he_mcs_ok(const u8 *cap_ie, const struct ieee80211_he_operation *oper)
+{
+    const u8 *ap = cap_ie + sizeof(struct ieee80211_he_cap_elem);   /* rx, tx for 80 MHz */
+    const u8 *own = (const u8 *)&mlme_own_he_cap()->he_mcs_nss_supp;
+    u16 ap_rx = get_unaligned_le16(ap), ap_tx = get_unaligned_le16(ap + 2);
+    u16 required = le16_to_cpu(oper->he_mcs_nss_set);
+    int nss, i;
+
+    /* every 802.11ax station does MCS 0-7 on one stream, both ways */
+    if ((ap_tx & 3) == IEEE80211_HE_MCS_NOT_SUPPORTED ||
+        (ap_rx & 3) == IEEE80211_HE_MCS_NOT_SUPPORTED)
+        return false;
+
+    /* all zero would mean eight streams; some APs (iPhones) send it anyway */
+    if (!required)
+        return true;
+
+    for (nss = 0; nss < 8; nss++) {
+        u8 need = (required >> 2 * nss) & 3;
+        u8 rx = (ap_rx >> 2 * nss) & 3, tx = (ap_tx >> 2 * nss) & 3;
+
+        if (need == IEEE80211_HE_MCS_NOT_SUPPORTED)
+            continue;
+        if (rx == IEEE80211_HE_MCS_NOT_SUPPORTED || tx == IEEE80211_HE_MCS_NOT_SUPPORTED ||
+            rx < need || tx < need)
+            return false;
+    }
+
+    /* our side: one of 80 MHz, 160 MHz and 80+80 MHz must cover the set */
+    for (i = 0; i < 3; i++) {
+        u16 own_rx = get_unaligned_le16(own + 4 * i), own_tx = get_unaligned_le16(own + 4 * i + 2);
+        bool ok = true;
+
+        for (nss = 0; nss < 8 && ok; nss++) {
+            u8 need = (required >> 2 * nss) & 3;
+            u8 rx = (own_rx >> 2 * nss) & 3, tx = (own_tx >> 2 * nss) & 3;
+
+            if (need == IEEE80211_HE_MCS_NOT_SUPPORTED)
+                continue;
+            if (rx == IEEE80211_HE_MCS_NOT_SUPPORTED || tx == IEEE80211_HE_MCS_NOT_SUPPORTED ||
+                need > rx || need > tx)
+                ok = false;
+        }
+        if (ok)
+            return true;
+    }
+    return false;
 }
 
 static void mlme_own_ht_cap(struct ieee80211_sta_ht_cap *own)
@@ -680,6 +844,47 @@ static void mlme_own_ht_cap(struct ieee80211_sta_ht_cap *own)
     own->cap |= WLAN_HT_CAP_SM_PS_DISABLED << IEEE80211_HT_CAP_SM_PS_SHIFT;
 }
 
+/* ieee80211_put_he_cap(): our 802.11ax capabilities, without what goes beyond
+ * the widest channel we may use (ieee80211_get_adjusted_he_cap()). */
+static void mlme_put_he_cap(struct sk_buff *skb)
+{
+    const struct ieee80211_sta_he_cap *own = mlme_own_he_cap();
+    struct ieee80211_he_cap_elem elem = own->he_cap_elem;
+    u8 ru_limit, max_ru, *len;
+
+    ru_limit = mlme.bw_limit >= 160 ? IEEE80211_HE_PHY_CAP8_DCM_MAX_RU_2x996 :
+               mlme.bw_limit >= 80 ? IEEE80211_HE_PHY_CAP8_DCM_MAX_RU_996 :
+               mlme.bw_limit >= 40 ? IEEE80211_HE_PHY_CAP8_DCM_MAX_RU_484 :
+               IEEE80211_HE_PHY_CAP8_DCM_MAX_RU_242;
+    max_ru = elem.phy_cap_info[8] & IEEE80211_HE_PHY_CAP8_DCM_MAX_RU_MASK;
+    elem.phy_cap_info[8] &= ~IEEE80211_HE_PHY_CAP8_DCM_MAX_RU_MASK;
+    elem.phy_cap_info[8] |= min(max_ru, ru_limit);
+
+    if (mlme.bw_limit < 40) {
+        elem.phy_cap_info[0] &= ~(IEEE80211_HE_PHY_CAP0_CHANNEL_WIDTH_SET_40MHZ_80MHZ_IN_5G |
+                                  IEEE80211_HE_PHY_CAP0_CHANNEL_WIDTH_SET_40MHZ_IN_2G);
+        elem.phy_cap_info[9] &= ~IEEE80211_HE_PHY_CAP9_LONGER_THAN_16_SIGB_OFDM_SYM;
+    }
+    if (mlme.bw_limit < 160) {
+        elem.phy_cap_info[0] &= ~(IEEE80211_HE_PHY_CAP0_CHANNEL_WIDTH_SET_160MHZ_IN_5G |
+                                  IEEE80211_HE_PHY_CAP0_CHANNEL_WIDTH_SET_80PLUS80_MHZ_IN_5G);
+        elem.phy_cap_info[5] &= ~IEEE80211_HE_PHY_CAP5_BEAMFORMEE_NUM_SND_DIM_ABOVE_80MHZ_MASK;
+        elem.phy_cap_info[7] &= ~(IEEE80211_HE_PHY_CAP7_STBC_TX_ABOVE_80MHZ |
+                                  IEEE80211_HE_PHY_CAP7_STBC_RX_ABOVE_80MHZ);
+    }
+
+    *(u8 *)skb_put(skb, 1) = WLAN_EID_EXTENSION;
+    len = skb_put(skb, 1);
+    *(u8 *)skb_put(skb, 1) = WLAN_EID_EXT_HE_CAPABILITY;
+    skb_put_data(skb, &elem, sizeof(elem));
+    /* the rate maps for 80 MHz, and for the wider channels still claimed */
+    skb_put_data(skb, &own->he_mcs_nss_supp, ieee80211_he_mcs_nss_size(&elem));
+    if (own->he_cap_elem.phy_cap_info[6] & IEEE80211_HE_PHY_CAP6_PPE_THRESHOLD_PRESENT)
+        skb_put_data(skb, own->ppe_thres,
+                     ieee80211_he_ppe_size(own->ppe_thres[0], own->he_cap_elem.phy_cap_info));
+    *len = (u8)(skb_tail_pointer(skb) - len - 1);
+}
+
 static void mlme_send_assoc(void)
 {
     static const u8 wmm_info[] = {
@@ -692,7 +897,7 @@ static void mlme_send_assoc(void)
     u8 *pos, *count;
     int i, n;
 
-    skb = mlme_alloc_frame(offsetof(struct ieee80211_mgmt, u.assoc_req.variable) + 256);
+    skb = mlme_alloc_frame(offsetof(struct ieee80211_mgmt, u.assoc_req.variable) + 512);
     if (!skb)
         return;
 
@@ -778,6 +983,9 @@ static void mlme_send_assoc(void)
         vht->vht_cap_info = cpu_to_le32(cap);
         memcpy(&vht->supp_mcs, &mlme.sband->vht_cap.vht_mcs, sizeof(vht->supp_mcs));
     }
+
+    if (mlme.he)
+        mlme_put_he_cap(skb);
 
     if (mlme.wmm)
         skb_put_data(skb, wmm_info, sizeof(wmm_info));
@@ -942,31 +1150,151 @@ static void mlme_set_sta_vht_cap(const struct ieee80211_vht_cap *ie)
     }
 }
 
+/* ieee80211_he_mcs_intersection(): per stream, the rates one side sends and
+ * the other receives. */
+static void mlme_he_mcs_intersect(u16 own_rx, u16 own_tx, u16 *peer_rx_map, u16 *peer_tx_map)
+{
+    int i;
+
+    for (i = 0; i < 8; i++) {
+        u16 o_rx = (own_rx >> i * 2) & 3, o_tx = (own_tx >> i * 2) & 3;
+        u16 p_rx = (*peer_rx_map >> i * 2) & 3, p_tx = (*peer_tx_map >> i * 2) & 3;
+
+        if (p_tx != IEEE80211_HE_MCS_NOT_SUPPORTED) {
+            if (o_rx == IEEE80211_HE_MCS_NOT_SUPPORTED)
+                p_tx = IEEE80211_HE_MCS_NOT_SUPPORTED;
+            else if (o_rx < p_tx)
+                p_tx = o_rx;
+        }
+        if (p_rx != IEEE80211_HE_MCS_NOT_SUPPORTED) {
+            if (o_tx == IEEE80211_HE_MCS_NOT_SUPPORTED)
+                p_rx = IEEE80211_HE_MCS_NOT_SUPPORTED;
+            else if (o_tx < p_rx)
+                p_rx = o_tx;
+        }
+        *peer_rx_map = (u16)((*peer_rx_map & ~(3u << i * 2)) | (p_rx << i * 2));
+        *peer_tx_map = (u16)((*peer_tx_map & ~(3u << i * 2)) | (p_tx << i * 2));
+    }
+}
+
+#define MLME_HE_INTERSECT(own, peer, bw) do {                                       \
+        u16 rx_ = le16_to_cpu((peer)->rx_mcs_##bw), tx_ = le16_to_cpu((peer)->tx_mcs_##bw); \
+        mlme_he_mcs_intersect(le16_to_cpu((own)->rx_mcs_##bw),                      \
+                              le16_to_cpu((own)->tx_mcs_##bw), &rx_, &tx_);         \
+        (peer)->rx_mcs_##bw = cpu_to_le16(rx_);                                     \
+        (peer)->tx_mcs_##bw = cpu_to_le16(tx_);                                     \
+    } while (0)
+
+/* ieee80211_he_cap_ie_to_sta_he_cap(): the same for 802.11ax. @ie is the
+ * element's payload as mlme_he_cap_ie() returns it. */
+static void mlme_set_sta_he_cap(const u8 *ie, u8 ie_len)
+{
+    struct ieee80211_link_sta *link_sta = &mlme.sta->deflink;
+    const struct ieee80211_sta_he_cap *own = mlme_own_he_cap();
+    struct ieee80211_sta_he_cap *he_cap = &link_sta->he_cap;
+    const struct ieee80211_he_cap_elem *elem = (const void *)ie;
+    struct ieee80211_he_mcs_nss_supp *peer = &he_cap->he_mcs_nss_supp;
+    u8 mcs_nss_size, ppe_size = 0;
+    bool own_wide, peer_wide;
+
+    memset(he_cap, 0, sizeof(*he_cap));
+    if (!ie || !own || !own->has_he)
+        return;
+
+    mcs_nss_size = ieee80211_he_mcs_nss_size(elem);
+    if (ie_len < sizeof(*elem) + mcs_nss_size)
+        return;
+    if (elem->phy_cap_info[6] & IEEE80211_HE_PHY_CAP6_PPE_THRESHOLD_PRESENT) {
+        if (ie_len < sizeof(*elem) + mcs_nss_size + 1)
+            return;
+        ppe_size = ieee80211_he_ppe_size(ie[sizeof(*elem) + mcs_nss_size], elem->phy_cap_info);
+        if (ie_len < sizeof(*elem) + mcs_nss_size + ppe_size || ppe_size > sizeof(he_cap->ppe_thres))
+            return;
+    }
+
+    memcpy(&he_cap->he_cap_elem, ie, sizeof(*elem));
+    memcpy(peer, ie + sizeof(*elem), mcs_nss_size);
+    memcpy(he_cap->ppe_thres, ie + sizeof(*elem) + mcs_nss_size, ppe_size);
+    he_cap->has_he = true;
+
+    MLME_HE_INTERSECT(&own->he_mcs_nss_supp, peer, 80);
+
+    /* the wider channels: both sides, or not at all */
+    own_wide = own->he_cap_elem.phy_cap_info[0] & IEEE80211_HE_PHY_CAP0_CHANNEL_WIDTH_SET_160MHZ_IN_5G;
+    peer_wide = he_cap->he_cap_elem.phy_cap_info[0] &
+                IEEE80211_HE_PHY_CAP0_CHANNEL_WIDTH_SET_160MHZ_IN_5G;
+    if (peer_wide && own_wide) {
+        MLME_HE_INTERSECT(&own->he_mcs_nss_supp, peer, 160);
+    } else if (peer_wide) {
+        peer->rx_mcs_160 = cpu_to_le16(0xffff);
+        peer->tx_mcs_160 = cpu_to_le16(0xffff);
+        he_cap->he_cap_elem.phy_cap_info[0] &= ~IEEE80211_HE_PHY_CAP0_CHANNEL_WIDTH_SET_160MHZ_IN_5G;
+    }
+
+    own_wide = own->he_cap_elem.phy_cap_info[0] &
+               IEEE80211_HE_PHY_CAP0_CHANNEL_WIDTH_SET_80PLUS80_MHZ_IN_5G;
+    peer_wide = he_cap->he_cap_elem.phy_cap_info[0] &
+                IEEE80211_HE_PHY_CAP0_CHANNEL_WIDTH_SET_80PLUS80_MHZ_IN_5G;
+    if (peer_wide && own_wide) {
+        MLME_HE_INTERSECT(&own->he_mcs_nss_supp, peer, 80p80);
+    } else if (peer_wide) {
+        peer->rx_mcs_80p80 = cpu_to_le16(0xffff);
+        peer->tx_mcs_80p80 = cpu_to_le16(0xffff);
+        he_cap->he_cap_elem.phy_cap_info[0] &=
+            ~IEEE80211_HE_PHY_CAP0_CHANNEL_WIDTH_SET_80PLUS80_MHZ_IN_5G;
+    }
+}
+
+/* The highest stream with a rate in an 802.11ac/ax rate map (2 bits a stream). */
+static u8 mlme_mcs_map_nss(u16 map)
+{
+    int i;
+
+    for (i = 7; i >= 0; i--)
+        if (((map >> i * 2) & 3) != IEEE80211_VHT_MCS_NOT_SUPPORTED)
+            return (u8)(i + 1);
+    return 0;
+}
+
 /* ieee80211_sta_init_nss_bw_capa(): how many streams and how wide a channel
  * we may use towards the AP. */
 static void mlme_set_sta_nss_bw(void)
 {
     struct ieee80211_link_sta *link_sta = &mlme.sta->deflink;
+    const struct ieee80211_sta_he_cap *he_cap = &link_sta->he_cap;
+    u8 ht_nss = 0, vht_nss = 0, he_nss = 0;
     unsigned int cap_mhz = 20, mhz;
     int i;
 
-    link_sta->rx_nss = 1;
+    /* ieee80211_sta_nss_capability() */
     for (i = 0; link_sta->ht_cap.ht_supported && i < 4; i++)
         if (link_sta->ht_cap.mcs.rx_mask[i])
-            link_sta->rx_nss = (u8)(i + 1);
-    for (i = 7; link_sta->vht_cap.vht_supported && i >= 0; i--) {
-        if (((le16_to_cpu(link_sta->vht_cap.vht_mcs.rx_mcs_map) >> i * 2) & 3) !=
-            IEEE80211_VHT_MCS_NOT_SUPPORTED) {
-            if (i + 1 > link_sta->rx_nss)
-                link_sta->rx_nss = (u8)(i + 1);
-            break;
-        }
-    }
-
+            ht_nss++;
     if (link_sta->vht_cap.vht_supported)
+        vht_nss = mlme_mcs_map_nss(le16_to_cpu(link_sta->vht_cap.vht_mcs.rx_mcs_map));
+    if (he_cap->has_he) {
+        he_nss = mlme_mcs_map_nss(le16_to_cpu(he_cap->he_mcs_nss_supp.rx_mcs_80));
+        if (he_cap->he_cap_elem.phy_cap_info[0] & IEEE80211_HE_PHY_CAP0_CHANNEL_WIDTH_SET_160MHZ_IN_5G)
+            he_nss = min(he_nss, mlme_mcs_map_nss(le16_to_cpu(he_cap->he_mcs_nss_supp.rx_mcs_160)));
+    }
+    link_sta->rx_nss = max_t(u8, 1, max(he_nss, max(vht_nss, ht_nss)));
+
+    /* ieee80211_sta_bw_capability(), then no wider than the channel */
+    if (he_cap->has_he) {
+        u8 info = he_cap->he_cap_elem.phy_cap_info[0];
+
+        if (mlme.sband->band == NL80211_BAND_2GHZ)
+            cap_mhz = info & IEEE80211_HE_PHY_CAP0_CHANNEL_WIDTH_SET_40MHZ_IN_2G ? 40 : 20;
+        else if (info & (IEEE80211_HE_PHY_CAP0_CHANNEL_WIDTH_SET_160MHZ_IN_5G |
+                         IEEE80211_HE_PHY_CAP0_CHANNEL_WIDTH_SET_80PLUS80_MHZ_IN_5G))
+            cap_mhz = 160;
+        else if (info & IEEE80211_HE_PHY_CAP0_CHANNEL_WIDTH_SET_40MHZ_80MHZ_IN_5G)
+            cap_mhz = 80;
+    } else if (link_sta->vht_cap.vht_supported) {
         cap_mhz = 80;
-    else if (link_sta->ht_cap.cap & IEEE80211_HT_CAP_SUP_WIDTH_20_40)
+    } else if (link_sta->ht_cap.cap & IEEE80211_HT_CAP_SUP_WIDTH_20_40) {
         cap_mhz = 40;
+    }
     mhz = min(cap_mhz, mlme_chandef_mhz(&mlme.chandef));
     link_sta->bandwidth = mhz >= 80 ? IEEE80211_STA_RX_BW_80 :
                           mhz >= 40 ? IEEE80211_STA_RX_BW_40 : IEEE80211_STA_RX_BW_20;
@@ -974,8 +1302,82 @@ static void mlme_set_sta_nss_bw(void)
     ieee80211_sta_recalc_aggregates(mlme.sta);
 }
 
+/*
+ * The 802.11ax settings of the network, from the association response
+ * (ieee80211_assoc_config_link()). Returns the BSS_CHANGED_* bits for them.
+ */
+static u64 mlme_set_bss_he(const struct ieee80211_he_operation *oper, const u8 *ies, size_t ies_len)
+{
+    struct ieee80211_bss_conf *conf = &mlme.vif->bss_conf;
+    const struct ieee80211_sta_he_cap *he_cap = &mlme.sta->deflink.he_cap;
+    const struct ieee80211_sta_he_cap *own = mlme_own_he_cap();
+    const struct element *ext_capab = mlme_find_elem(WLAN_EID_EXT_CAPABILITY, ies, ies_len);
+    const u8 *uora, *spr;
+    u64 changed = 0;
+    u32 params;
+    u8 spr_len;
+
+    conf->he_support = oper && he_cap->has_he;
+
+    /* target wake times: only what both sides offer (this card: neither) */
+    conf->twt_requester = conf->he_support && ext_capab && ext_capab->datalen >= 10 &&
+        (ext_capab->data[9] & WLAN_EXT_CAPA10_TWT_RESPONDER_SUPPORT) &&
+        (he_cap->he_cap_elem.mac_cap_info[0] & IEEE80211_HE_MAC_CAP0_TWT_RES) &&
+        (own->he_cap_elem.mac_cap_info[0] & IEEE80211_HE_MAC_CAP0_TWT_REQ);
+    conf->twt_protected = false;
+    conf->twt_broadcast = conf->he_support &&
+        (he_cap->he_cap_elem.mac_cap_info[2] & IEEE80211_HE_MAC_CAP2_BCAST_TWT) &&
+        (own->he_cap_elem.mac_cap_info[2] & IEEE80211_HE_MAC_CAP2_BCAST_TWT);
+
+    memset(&conf->he_bss_color, 0, sizeof(conf->he_bss_color));
+    memset(&conf->he_oper, 0, sizeof(conf->he_oper));
+    memset(&conf->he_obss_pd, 0, sizeof(conf->he_obss_pd));
+    conf->uora_exists = false;
+    if (!conf->he_support)
+        return 0;
+
+    params = le32_to_cpu(oper->he_oper_params);
+    conf->he_bss_color.color = (u8)FIELD_GET(IEEE80211_HE_OPERATION_BSS_COLOR_MASK, params);
+    conf->he_bss_color.partial = !!(params & IEEE80211_HE_OPERATION_PARTIAL_BSS_COLOR);
+    conf->he_bss_color.enabled = !(params & IEEE80211_HE_OPERATION_BSS_COLOR_DISABLED);
+    if (conf->he_bss_color.enabled)
+        changed |= BSS_CHANGED_HE_BSS_COLOR;
+
+    conf->htc_trig_based_pkt_ext = (u8)FIELD_GET(IEEE80211_HE_OPERATION_DFLT_PE_DURATION_MASK, params);
+    conf->frame_time_rts_th = (u16)FIELD_GET(IEEE80211_HE_OPERATION_RTS_THRESHOLD_MASK, params);
+
+    /* random access for uplink OFDMA */
+    uora = mlme_ext_elem(WLAN_EID_EXT_UORA, ies, ies_len, 1, NULL);
+    conf->uora_exists = uora != NULL;
+    if (uora)
+        conf->uora_ocw_range = uora[0];
+
+    /* ieee80211_he_op_ie_to_bss_conf() */
+    conf->he_oper.params = params;
+    conf->he_oper.nss_set = le16_to_cpu(oper->he_mcs_nss_set);
+
+    /* ieee80211_he_spr_ie_to_bss_conf(): spatial reuse */
+    spr = mlme_ext_elem(WLAN_EID_EXT_HE_SPR, ies, ies_len, sizeof(struct ieee80211_he_spr), &spr_len);
+    if (spr && spr_len >= ieee80211_he_spr_size(spr) - 1) {
+        const u8 *data = spr + 1;
+
+        conf->he_obss_pd.sr_ctrl = spr[0];
+        if (spr[0] & IEEE80211_HE_SPR_NON_SRG_OFFSET_PRESENT)
+            conf->he_obss_pd.non_srg_max_offset = *data++;
+        if (spr[0] & IEEE80211_HE_SPR_SRG_INFORMATION_PRESENT) {
+            conf->he_obss_pd.min_offset = *data++;
+            conf->he_obss_pd.max_offset = *data++;
+            memcpy(conf->he_obss_pd.bss_color_bitmap, data, 8);
+            data += 8;
+            memcpy(conf->he_obss_pd.partial_bssid_bitmap, data, 8);
+            conf->he_obss_pd.enable = true;
+        }
+    }
+    return changed;
+}
+
 /* EDCA parameters per access category (ieee80211_sta_wmm_params / set_wmm_default). */
-static void mlme_conf_tx(const struct element *wmm)
+static void mlme_conf_tx(const struct element *wmm, const struct ieee80211_mu_edca_param_set *mu_edca)
 {
     /* WMM ACI (BE, BK, VI, VO) to mac80211 AC index */
     static const u8 aci_to_ac[4] = {
@@ -1009,6 +1411,13 @@ static void mlme_conf_tx(const struct element *wmm)
             params[ac].cw_min = ecw2cw(p->cw & 0x0f);
             params[ac].txop = get_unaligned_le16(&p->txop_limit);
             params[ac].acm = (p->aci_aifsn >> 4) & 1;
+            /* 802.11ax: the parameters to contend with for a while after the
+             * AP has scheduled our uplink itself */
+            params[ac].mu_edca = mu_edca != NULL;
+            if (mu_edca)
+                params[ac].mu_edca_param_rec = aci == 1 ? mu_edca->ac_bk :
+                                               aci == 2 ? mu_edca->ac_vi :
+                                               aci == 3 ? mu_edca->ac_vo : mu_edca->ac_be;
         }
     }
 
@@ -1026,7 +1435,10 @@ static void mlme_rx_assoc_resp(const struct ieee80211_mgmt *mgmt, size_t len)
     const u8 *ies;
     size_t ies_len;
     u32 rates, basic;
+    const struct ieee80211_he_operation *he_oper;
+    const u8 *he_cap, *mu_edca = NULL;
     u16 capab, status, aid;
+    u8 he_cap_len = 0;
     u64 changed;
 
     if (mlme.state != RTW89_MLME_ASSOCIATING || len < fixed)
@@ -1062,6 +1474,10 @@ static void mlme_rx_assoc_resp(const struct ieee80211_mgmt *mgmt, size_t len)
     elem = mlme.vht ? mlme_elem(WLAN_EID_VHT_CAPABILITY, ies, ies_len) : NULL;
     mlme_set_sta_vht_cap(elem && elem->datalen >= sizeof(struct ieee80211_vht_cap) ?
                          (const void *)elem->data : NULL);
+    /* 802.11ax needs both elements in the response itself */
+    he_oper = mlme.he ? mlme_he_oper_ie(ies, ies_len) : NULL;
+    he_cap = he_oper ? mlme_he_cap_ie(ies, ies_len, &he_cap_len) : NULL;
+    mlme_set_sta_he_cap(he_cap, he_cap_len);
     mlme_set_sta_nss_bw();
 
     mlme.sta->aid = aid;
@@ -1086,8 +1502,18 @@ static void mlme_rx_assoc_resp(const struct ieee80211_mgmt *mgmt, size_t len)
     changed = BSS_CHANGED_ERP_CTS_PROT | BSS_CHANGED_ERP_PREAMBLE | BSS_CHANGED_ERP_SLOT |
               BSS_CHANGED_HT | BSS_CHANGED_BASIC_RATES | BSS_CHANGED_QOS |
               BSS_CHANGED_BEACON_INFO;
+    changed |= mlme_set_bss_he(he_cap ? he_oper : NULL, ies, ies_len);
 
-    mlme_conf_tx(wmm);
+    /* Linux takes the MU EDCA set from the response and then from every
+     * beacon; beacons are not followed here, so the one from the scan stands in */
+    if (conf->he_support) {
+        mu_edca = mlme_ext_elem(WLAN_EID_EXT_HE_MU_EDCA, ies, ies_len,
+                                sizeof(struct ieee80211_mu_edca_param_set), NULL);
+        if (!mu_edca)
+            mu_edca = mlme_ext_elem(WLAN_EID_EXT_HE_MU_EDCA, mlme.bss.ies, mlme.bss.ies_len,
+                                    sizeof(struct ieee80211_mu_edca_param_set), NULL);
+    }
+    mlme_conf_tx(wmm, (const void *)mu_edca);
 
     /* ieee80211_assoc_success(): the station is associated; without RSN it
      * may pass data straight away */
@@ -1119,7 +1545,10 @@ static void mlme_rx_assoc_resp(const struct ieee80211_mgmt *mgmt, size_t len)
     mlme_info("associated with %02x:%02x:%02x:%02x:%02x:%02x on %u MHz, AID %u, %s%s%s",
               mlme.bss.bssid[0], mlme.bss.bssid[1], mlme.bss.bssid[2],
               mlme.bss.bssid[3], mlme.bss.bssid[4], mlme.bss.bssid[5],
-              mlme.bss.freq, aid, mlme.sta->deflink.ht_cap.ht_supported ? "HT" : "legacy",
+              mlme.bss.freq, aid,
+              mlme.sta->deflink.he_cap.has_he ? "802.11ax" :
+              mlme.sta->deflink.vht_cap.vht_supported ? "802.11ac" :
+              mlme.sta->deflink.ht_cap.ht_supported ? "802.11n" : "802.11a/b/g",
               wmm ? ", WMM" : "", mlme.rsn ? ", waiting for the key handshake" : "");
 }
 
@@ -1512,6 +1941,24 @@ static void mlme_send_delba(u16 tid, bool initiator, u16 reason)
     mlme_tx_mgmt(skb);
 }
 
+/* ieee80211_add_addbaext(): the extension element 802.11ax stations add to
+ * their ADDBA frames. @req_data: the element of the request being answered,
+ * or 0. No fragments inside aggregates; the high bits of a buffer size above
+ * 1023 are not for us. */
+static void mlme_put_addba_ext(struct sk_buff *skb, u8 req_data, u16 buf_size)
+{
+    u8 *pos = skb_put_zero(skb, 2 + sizeof(struct ieee80211_addba_ext_ie));
+    u8 data = IEEE80211_ADDBA_EXT_NO_FRAG;
+
+    if (req_data)
+        data &= req_data;
+    data |= u8_encode_bits((u8)(buf_size >> IEEE80211_ADDBA_EXT_BUF_SIZE_SHIFT),
+                           IEEE80211_ADDBA_EXT_BUF_SIZE_MASK);
+    *pos++ = WLAN_EID_ADDBA_EXT;
+    *pos++ = sizeof(struct ieee80211_addba_ext_ie);
+    *pos = data;
+}
+
 /* ---- receive side: the AP sends us aggregates ---- */
 
 static void mlme_rx_ba_stop(u16 tid)
@@ -1527,13 +1974,22 @@ static void mlme_rx_ba_stop(u16 tid)
 static void mlme_rx_addba_req(const struct ieee80211_mgmt *req, size_t len)
 {
     const size_t resp_len = IEEE80211_MIN_ACTION_SIZE(addba_resp);
+    const size_t req_len = IEEE80211_MIN_ACTION_SIZE(addba_req);
+    bool he = mlme.sta->deflink.he_cap.has_he;
+    u16 max_buf_size = he ? IEEE80211_MAX_AMPDU_BUF_HE : IEEE80211_MAX_AMPDU_BUF_HT;
     u16 capab, tid, buf_size, ssn, status = WLAN_STATUS_SUCCESS;
+    const struct element *ext;
     struct ieee80211_mgmt *mgmt;
     struct sk_buff *skb;
+    u8 ext_data = 0;
     bool amsdu;
 
-    if (len < IEEE80211_MIN_ACTION_SIZE(addba_req))
+    if (len < req_len)
         return;
+    /* ieee80211_retrieve_addba_ext_data() */
+    ext = he ? mlme_find_elem(WLAN_EID_ADDBA_EXT, (const u8 *)req + req_len, len - req_len) : NULL;
+    if (ext && ext->datalen >= sizeof(struct ieee80211_addba_ext_ie))
+        ext_data = ext->data[0];
     capab = le16_to_cpu(req->u.action.addba_req.capab);
     tid = (capab & IEEE80211_ADDBA_PARAM_TID_MASK) >> 2;
     buf_size = (capab & IEEE80211_ADDBA_PARAM_BUF_SIZE_MASK) >> 6;
@@ -1542,8 +1998,8 @@ static void mlme_rx_addba_req(const struct ieee80211_mgmt *req, size_t len)
             ieee80211_hw_check(mlme.hw, SUPPORTS_AMSDU_IN_AMPDU);
 
     /* zero means "as many as you can take" */
-    if (!buf_size || buf_size > IEEE80211_MAX_AMPDU_BUF_HT)
-        buf_size = IEEE80211_MAX_AMPDU_BUF_HT;
+    if (!buf_size || buf_size > max_buf_size)
+        buf_size = max_buf_size;
     if (buf_size > mlme.sta->max_rx_aggregation_subframes)
         buf_size = mlme.sta->max_rx_aggregation_subframes;
 
@@ -1561,7 +2017,7 @@ static void mlme_rx_addba_req(const struct ieee80211_mgmt *req, size_t len)
             mlme.rx_ba |= BIT(tid);
     }
 
-    skb = mlme_alloc_frame(resp_len);
+    skb = mlme_alloc_frame(resp_len + 2 + sizeof(struct ieee80211_addba_ext_ie));
     if (!skb)
         return;
     mgmt = mlme_mgmt_header(skb, IEEE80211_STYPE_ACTION, resp_len);
@@ -1573,6 +2029,8 @@ static void mlme_rx_addba_req(const struct ieee80211_mgmt *req, size_t len)
         cpu_to_le16((amsdu ? IEEE80211_ADDBA_PARAM_AMSDU_MASK : 0) |
                     IEEE80211_ADDBA_PARAM_POLICY_MASK | (u16)(tid << 2) | (u16)(buf_size << 6));
     mgmt->u.action.addba_resp.timeout = req->u.action.addba_req.timeout;
+    if (he)
+        mlme_put_addba_ext(skb, ext_data, buf_size);
     mlme_tx_mgmt(skb);
 }
 
@@ -1610,9 +2068,11 @@ static void mlme_tx_ba_stop(u16 tid, bool send_delba, bool destroy)
 static void mlme_tx_ba_start(u16 tid)
 {
     const size_t len = IEEE80211_MIN_ACTION_SIZE(addba_req);
+    bool he = mlme.sta && mlme.sta->deflink.he_cap.has_he;
     struct mlme_tx_ba *ba = &mlme.tx_ba[tid];
     struct ieee80211_mgmt *mgmt;
     struct sk_buff *skb;
+    u16 buf_size;
 
     if (mlme.state != RTW89_MLME_CONNECTED || ba->state != MLME_BA_NONE)
         return;
@@ -1633,19 +2093,25 @@ static void mlme_tx_ba_start(u16 tid)
         mlme.dialog_token = 1;
     ba->dialog = mlme.dialog_token;
 
-    skb = mlme_alloc_frame(len);
+    /* Towards an 802.11ax AP, what the card can send (up to 256). Otherwise
+     * the HT maximum whatever the driver will really send: mac80211 does the
+     * same because some APs mishandle smaller ones. */
+    buf_size = he ? min_t(u16, mlme.hw->max_tx_aggregation_subframes, IEEE80211_MAX_AMPDU_BUF_HE) :
+                    IEEE80211_MAX_AMPDU_BUF_HT;
+
+    skb = mlme_alloc_frame(len + 2 + sizeof(struct ieee80211_addba_ext_ie));
     if (skb) {
         mgmt = mlme_mgmt_header(skb, IEEE80211_STYPE_ACTION, len);
         mgmt->u.action.category = WLAN_CATEGORY_BACK;
         mgmt->u.action.action_code = WLAN_ACTION_ADDBA_REQ;
         mgmt->u.action.addba_req.dialog_token = ba->dialog;
-        /* The size is the HT maximum whatever the driver will really send:
-         * mac80211 does the same because some APs mishandle smaller ones. */
         mgmt->u.action.addba_req.capab =
             cpu_to_le16(IEEE80211_ADDBA_PARAM_AMSDU_MASK | IEEE80211_ADDBA_PARAM_POLICY_MASK |
-                        (u16)(tid << 2) | (u16)(IEEE80211_MAX_AMPDU_BUF_HT << 6));
+                        (u16)(tid << 2) | (u16)(buf_size << 6));
         mgmt->u.action.addba_req.timeout = 0;
         mgmt->u.action.addba_req.start_seq_num = cpu_to_le16((u16)(ba->ssn << 4));
+        if (he)
+            mlme_put_addba_ext(skb, 0, buf_size);
         mlme_tx_mgmt(skb);
     }
     /* without an answer (or without the request) the timeout cleans up */
@@ -1936,6 +2402,16 @@ static void mlme_timeout_work(struct wiphy *wiphy, struct wiphy_work *work)
 /*  Commands                                                            */
 /* ------------------------------------------------------------------ */
 
+void rtw89_mlme_set_he(bool on)
+{
+    mlme_he_off = !on;
+}
+
+bool rtw89_mlme_get_he(void)
+{
+    return !mlme_he_off;
+}
+
 void rtw89_mlme_set_tx_tap(void (*tap)(const u8 *frame, size_t len))
 {
     mlme.tx_tap = tap;
@@ -1995,7 +2471,13 @@ void rtw89_mlme_get_status(struct rtw89_mlme_status *status)
     if (status->state != RTW89_MLME_IDLE) {
         status->width = (u8)mlme_chandef_mhz(&mlme.chandef);
         status->center_freq = (u16)mlme.chandef.center_freq1;
-        status->mode = mlme.vht ? 2 : mlme.ht ? 1 : 0;
+        /* once associated, what the AP's answer really gave us */
+        if (mlme.sta && status->state >= RTW89_MLME_ASSOCIATED)
+            status->mode = mlme.sta->deflink.he_cap.has_he ? 3 :
+                           mlme.sta->deflink.vht_cap.vht_supported ? 2 :
+                           mlme.sta->deflink.ht_cap.ht_supported ? 1 : 0;
+        else
+            status->mode = mlme.he ? 3 : mlme.vht ? 2 : mlme.ht ? 1 : 0;
         status->nss = mlme.sta ? mlme.sta->deflink.rx_nss : 0;
     }
     if (status->state >= RTW89_MLME_ASSOCIATED) {
@@ -2019,9 +2501,12 @@ int rtw89_mlme_connect(const struct rtw89_mlme_bss *bss, const u8 *pmk)
 {
     const struct ieee80211_ops *ops = mlme.local->ops;
     struct ieee80211_bss_conf *conf = &mlme.vif->bss_conf;
+    const struct ieee80211_he_operation *he_oper;
     struct cfg80211_chan_def chandef;
     const struct element *elem;
+    const u8 *he_cap;
     u32 rates, basic;
+    u8 he_cap_len;
     int ret;
 
     if (!mlme.running)
@@ -2056,7 +2541,15 @@ int rtw89_mlme_connect(const struct rtw89_mlme_bss *bss, const u8 *pmk)
     mlme.vht = mlme.ht && mlme.sband->vht_cap.vht_supported &&
                elem && elem->datalen >= sizeof(struct ieee80211_vht_cap) &&
                mlme_find_elem(WLAN_EID_VHT_OPERATION, mlme.ies, bss->ies_len);
+    /* 802.11ax: on top of those */
+    he_cap = mlme_he_cap_ie(mlme.ies, bss->ies_len, &he_cap_len);
+    he_oper = mlme_he_oper_ie(mlme.ies, bss->ies_len);
+    mlme.he = mlme.ht && !mlme_he_off && mlme_own_he_cap() && he_cap && he_oper;
     mlme_determine_chandef(&mlme.chandef);
+    if (mlme.he && !mlme_he_mcs_ok(he_cap, he_oper)) {
+        mlme_info("the AP's 802.11ax rates are inconsistent or beyond this card: not using 802.11ax");
+        mlme.he = false;
+    }
 
     elem = mlme_find_elem(WLAN_EID_RSN, mlme.ies, bss->ies_len);
     mlme.rsn = elem != NULL;
@@ -2088,7 +2581,7 @@ int rtw89_mlme_connect(const struct rtw89_mlme_bss *bss, const u8 *pmk)
               bss->ssid_len, bss->ssid, bss->bssid[0], bss->bssid[1], bss->bssid[2],
               bss->bssid[3], bss->bssid[4], bss->bssid[5], bss->freq,
               mlme_chandef_mhz(&mlme.chandef),
-              mlme.vht ? ", 802.11ac" : mlme.ht ? ", 802.11n" : "",
+              mlme.he ? ", 802.11ax" : mlme.vht ? ", 802.11ac" : mlme.ht ? ", 802.11n" : "",
               mlme.rsn ? ", WPA2" : ", open");
 
     /* the station entry for the AP, with what is known before association */
