@@ -24,8 +24,10 @@ only when diagnosing (verbose is very slow without GPU acceleration).
 csr-active-config `0xA03` (unsigned kexts allowed). **`ACPI/SSDT-Disable_Network_GPP6.aml`
 must stay disabled**: it makes `\_SB.PCI0.GPP6.WLAN` (the RTL8852BE) report
 vendor/device 0xFFFF, so our kext could never match. Check with
-`ioreg -l | grep -i 'b852'`. Sonoma+ legacy Wi-Fi stack (IO80211FamilyLegacy,
-IOSkywalkFamily block, AMFIPass) is only needed from M2.
+`ioreg -l | grep -i 'b852'`. The user chose native Wi-Fi through the old stack
+(IO80211FamilyLegacy + Ventura's IOSkywalkFamily + AMFIPass, Apple's IOSkywalkFamily
+blocked): see efi/README.md. EFI changes go in through `sudo efi/apply.sh`, run by the
+user (undo: `sudo efi/revert.sh`); Claude prepares, never edits the EFI.
 
 ## Workflow
 
