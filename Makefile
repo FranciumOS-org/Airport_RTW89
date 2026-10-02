@@ -116,7 +116,7 @@ ALL_OBJS      := $(DRIVER_OBJS) $(COMPAT_OBJS) $(COMPAT89_OBJS) $(FW_OBJS)
 # Targets                                                              #
 # ------------------------------------------------------------------ #
 
-.PHONY: deptest all compile errors link hosttest kext fetch-firmware clean
+.PHONY: front deptest all compile errors link hosttest kext fetch-firmware clean
 
 all: compile
 
@@ -225,6 +225,24 @@ $(BUILD_DIR)/kext/%.o: $(KEXT_SRC)/%.c
 	@mkdir -p $(dir $@)
 	@echo "  CC   kext/$*.c"
 	@$(CC) $(FW_CFLAGS) -c $< -o $@
+
+# The front: the IO80211Controller, injected by OpenCore (src/front/rtw89_front_api.h).
+FRONT_SRC    := $(PROJ_ROOT)/src/front
+FRONT_BUNDLE := $(BUILD_DIR)/out/AirPortRTW89Front.kext
+front:
+	@rm -rf $(FRONT_BUNDLE)
+	@mkdir -p $(FRONT_BUNDLE)/Contents/MacOS $(BUILD_DIR)/front
+	@cp $(FRONT_SRC)/Info.plist $(FRONT_BUNDLE)/Contents/Info.plist
+	@echo "  CXX  front/AirPortRTW89Front.cpp"
+	@$(CXX) $(KEXT_CXXFLAGS) -D__IO80211_TARGET=__MAC_13_0 -Wno-inconsistent-missing-override \
+	    -c $(FRONT_SRC)/AirPortRTW89Front.cpp -o $(BUILD_DIR)/front/AirPortRTW89Front.o
+	@$(CC) $(FW_CFLAGS) -c $(FRONT_SRC)/kmod_info.c -o $(BUILD_DIR)/front/kmod_info.o
+	@$(CXX) $(ARCH) $(MINOS) -isysroot $(SDK) -nostdlib -Xlinker -kext \
+	    -L$(MKSDK)/Library/x86_64 $(BUILD_DIR)/front/AirPortRTW89Front.o \
+	    $(BUILD_DIR)/front/kmod_info.o -lkmod -lcc_kext \
+	    -o $(FRONT_BUNDLE)/Contents/MacOS/AirPortRTW89Front
+	@codesign --force --sign - $(FRONT_BUNDLE) 2>/dev/null || true
+	@echo "  KEXT $(FRONT_BUNDLE)"
 
 # A kext that does nothing but depend on IO80211FamilyLegacy, for tools/deptest.sh.
 DEPTEST_BUNDLE := $(BUILD_DIR)/out/RTW89DepTest.kext
