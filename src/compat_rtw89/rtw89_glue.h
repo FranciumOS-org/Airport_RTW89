@@ -167,7 +167,7 @@ struct rtw89_glue_link {
     uint16_t aid;
     uint8_t  width;                 /* channel width in MHz */
     uint16_t center_freq;           /* centre of the whole channel, MHz */
-    uint8_t  mode;                  /* 0: 802.11a/b/g, 1: 802.11n, 2: 802.11ac */
+    uint8_t  mode;                  /* 0: 802.11a/b/g, 1: 802.11n, 2: 802.11ac, 3: 802.11ax */
     uint8_t  nss;                   /* spatial streams */
     int      last_error;            /* 0, -errno, -1000-status or -2000-reason */
     uint32_t eapol_rx;
@@ -188,6 +188,7 @@ struct rtw89_glue_link {
     uint32_t rx_late_max_ms;
     uint32_t rx_ppdu_flushed;       /* frames passed on without their PPDU status report */
     bool     ppdu_flush;            /* see rtw89_glue_set_ppdu_flush() */
+    bool     ax;                    /* see rtw89_glue_set_ax() */
 
     /* aggregation (BlockAck sessions): one bit per TID, in each direction */
     uint16_t tx_ba;
@@ -200,10 +201,17 @@ void rtw89_glue_link(struct rtw89_glue_link *link);
  * The driver holds each received data frame until the chip's status report
  * for the same transmission arrives. When the report does not come, the frame
  * would wait for the next reception (often the next beacon, 100 ms later);
- * with this on (the default) it is passed on after 2 ms instead. Off is for
+ * with this on (the default) it is passed on after 1 ms instead. Off is for
  * comparing.
  */
 void rtw89_glue_set_ppdu_flush(bool on);
+
+/*
+ * Whether the next join may use 802.11ax where the network offers it (the
+ * default) or stops at 802.11ac/n: for comparing, and for access points that
+ * do not get on with this card's 802.11ax.
+ */
+void rtw89_glue_set_ax(bool on);
 
 /*
  * Transmit one Ethernet frame (destination, source, type, payload; no FCS) of

@@ -223,7 +223,7 @@ struct rtw89_mlme_status {
     u16 tx_ba, rx_ba;           /* TID bits: BlockAck sessions in each direction */
     u8 width;                   /* MHz */
     u16 center_freq;            /* MHz, of the whole channel */
-    u8 mode;                    /* 0: 802.11a/b/g, 1: n, 2: ac */
+    u8 mode;                    /* 0: 802.11a/b/g, 1: n, 2: ac, 3: ax */
     u8 nss;                     /* spatial streams towards the AP */
 };
 
@@ -235,6 +235,9 @@ void rtw89_mlme_stop(void);
 int rtw89_mlme_connect(const struct rtw89_mlme_bss *bss, const u8 *pmk);
 /* For tests: see every management frame the MLME transmits. */
 void rtw89_mlme_set_tx_tap(void (*tap)(const u8 *frame, size_t len));
+/* Whether joins may use 802.11ax (default: yes). Any context. */
+void rtw89_mlme_set_he(bool on);
+bool rtw89_mlme_get_he(void);
 void rtw89_mlme_disconnect(u16 reason);
 void rtw89_mlme_get_status(struct rtw89_mlme_status *status);
 /* A received management frame that is not a beacon or probe response; takes

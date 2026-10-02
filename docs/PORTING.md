@@ -147,8 +147,8 @@ than by a report, and round trips with 1000-byte replies went from a 15-22 ms
 median (up to 98 ms) to 3.3 ms (worst 9 ms). Why the reports are missing is
 not known; beacons and other low-rate frames get theirs.
 `src/compat_rtw89/rtw89_core_wrap.c` compiles the driver's
-core.c unchanged and adds a flush the glue runs 2 ms after a poll that left
-frames parked (`rtw89ctl flush off` disables it, for comparison). Timing
+core.c unchanged and adds a flush the glue runs 1 ms (at first 2 ms) after a
+poll that left frames parked (`rtw89ctl flush off` disables it, for comparison). Timing
 counters in `rtw89ctl status`, based on the chip's receive timestamps, show
 how many frames reached the driver late and whether the chip had interrupted
 when they arrived. Also fixed on the way: the stand-in left the RTS threshold
@@ -186,8 +186,29 @@ card ran at 258-360 Mb/s down and about 200 Mb/s up, which is the connection's
 limit rather than the card's (the wired port did 100 Mb/s up at that moment).
 Round trips took a median of 1.3-2.4 ms at every size (worst 10 ms).
 
+**802.11ax (built, not yet run on hardware).** A network that has the HE
+capabilities and HE operation elements is joined as 802.11ax, on 5 GHz on top
+of 802.11ac and on 2.4 GHz on top of 802.11n, after the checks
+`ieee80211_determine_chan_mode()` makes: the AP's HE rates are consistent, the
+card can do the rates the AP requires of every station, the channel is not
+flagged NO_HE. The association request carries the card's HE capabilities
+(`ieee80211_put_he_cap()`, cut to the width in use). From the response the
+station entry gets the AP's HE capabilities (`ieee80211_he_cap_ie_to_sta_he_cap()`)
+and the link its BSS colour, default packet extension, RTS duration threshold,
+UORA and spatial reuse parameters, and the MU EDCA parameters go to the driver
+with the WMM ones. Both HE elements must be in the association response, as in
+Linux; otherwise the join stays 802.11ac. BlockAck: requests to an 802.11ax AP
+ask for 128 frames (the chip's limit) instead of 64 and carry the ADDBA
+extension element; the receive window stays at 64 frames, the chip's limit.
+`rtw89ctl ax off` makes the next join stop at 802.11ac, for comparing.
+
 Not there yet:
-- 802.11ax (HE). Networks that offer it are joined as 802.11ac.
+- Following the AP's beacons after the join. Changes it announces there (BSS
+  colour, MU EDCA and WMM parameters, channel switches, HT protection) are
+  missed; the MU EDCA set is taken from the scan result when the association
+  response has none.
+- Target wake time, and on 5 GHz an 802.11ax AP without 802.11ac elements
+  (joined as 802.11n).
 - Fragmented frames (dropped), software decryption of frames the chip did not
   decrypt (dropped and counted), power save, roaming, and beacon-loss detection
   beyond what the firmware reports.
@@ -384,4 +405,4 @@ to boot-args so panics show symbolized backtraces.
 - `tools/check_kpi.py` — `make kext`: every import of the built kext must come from a declared KPI.
 - `tools/load.sh`, `tools/unload.sh` — run by a person with sudo, never automatically.
 - `tools/rtt_probe.py`, `tools/tput_probe.py` — round-trip times and TCP throughput through the card, measured against the wired port of the same machine.
-- `tools/rtw89ctl.c` — built by `make kext` as `build/out/rtw89ctl`: `up`, `scan`, `down`, `status` for a loaded kext.
+- `tools/rtw89ctl.c` — built by `make kext` as `build/out/rtw89ctl`: `up`, `scan`, `join`, `leave`, `down`, `status`, `flush on|off`, `ax on|off` for a loaded kext.
