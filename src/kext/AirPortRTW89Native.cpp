@@ -45,6 +45,22 @@ struct AirPort_RTW89::NativeState {
 /*  Small helpers                                                       */
 /* ------------------------------------------------------------------ */
 
+/*
+ * Working memory from the heap. IO80211 calls back into the controller from
+ * inside its own requests (a power change makes it ask for the BSSID before
+ * the first call has returned), on a kernel stack of 16 KB: buffers on the
+ * stack of the request handler overflowed it.
+ */
+struct Scratch {
+    void *p;
+    size_t n;
+    explicit Scratch(size_t size) : p(IOMallocZero(size)), n(size) {}
+    ~Scratch() { if (p) { bzero(p, n); IOFree(p, n); } }
+    uint8_t *bytes() const { return static_cast<uint8_t *>(p); }
+    Scratch(const Scratch &) = delete;
+    Scratch &operator=(const Scratch &) = delete;
+};
+
 static unsigned int channelOfFreq(unsigned int freq)
 {
     if (freq == 2484)
@@ -524,7 +540,8 @@ int AirPort_RTW89::backIoctl(void *ctx, void *interface, void *vif, void *ifnet,
         struct HostAssoc host;
 
         if (copyin(reqData, prefix, sizeof(prefix)) == 0 && decodeHostAssoc(prefix, &host)) {
-            struct apple80211_assoc_data assoc = {};
+            Scratch assocBuf(sizeof(struct apple80211_assoc_data));
+            struct apple80211_assoc_data &assoc = *static_cast<struct apple80211_assoc_data *>(assocBuf.p);
             SInt32 r;
 
             assoc.version = APPLE80211_VERSION;
@@ -562,7 +579,8 @@ int AirPort_RTW89::backIoctl(void *ctx, void *interface, void *vif, void *ifnet,
         if (isSet && reqType == APPLE80211_IOC_ASSOCIATE && (sr == ENOTSUP || sr == EOPNOTSUPP) &&
             me->_ns->assocRequests == before && len >= sizeof(struct apple80211_assoc_data) &&
             len <= 64U * 1024U && reqData) {
-            struct apple80211_assoc_data assoc = {};
+            Scratch assocBuf(sizeof(struct apple80211_assoc_data));
+            struct apple80211_assoc_data &assoc = *static_cast<struct apple80211_assoc_data *>(assocBuf.p);
 
             if (copyin(reqData, &assoc, sizeof(assoc)) == 0 && assocLooksValid(&assoc))
                 sr = errnoOf(me->nativeRequest(true, APPLE80211_IOC_ASSOCIATE, &assoc));
@@ -666,7 +684,8 @@ int AirPort_RTW89::backIoctlSet(void *ctx, void *interface, void *vif, void *sky
     if (req->req_type == APPLE80211_IOC_ASSOCIATE &&
         req->req_len >= sizeof(struct apple80211_assoc_data) && req->req_len <= 64U * 1024U &&
         req->req_data) {
-        struct apple80211_assoc_data assoc = {};
+        Scratch assocBuf(sizeof(struct apple80211_assoc_data));
+            struct apple80211_assoc_data &assoc = *static_cast<struct apple80211_assoc_data *>(assocBuf.p);
 
         if (copyin((user_addr_t)req->req_data, &assoc, sizeof(assoc)) == 0 &&
             assocLooksValid(&assoc))
@@ -790,13 +809,14 @@ int AirPort_RTW89::nativeRequest(bool isSet, int number, void *data)
     case APPLE80211_IOC_RSN_IE:
     case APPLE80211_IOC_AP_IE_LIST: {
         struct rtw89_glue_bss bss;
-        uint8_t ies[1024];
+        Scratch iesBuf(1024);
+        uint8_t *ies = iesBuf.bytes();
         size_t len = 0;
 
         if (isSet)
             return number == APPLE80211_IOC_RSN_IE ? kIOReturnSuccess : kIOReturnUnsupported;
         if (link.state == RTW89_GLUE_LINK_DOWN ||
-            !rtw89_glue_find_bss(link.bssid, &bss, ies, sizeof(ies), &len, nullptr))
+            !rtw89_glue_find_bss(link.bssid, &bss, ies, 1024, &len, nullptr))
             return kIOReturnNotFound;
         for (size_t pos = 0; pos + 2 <= len; pos += (size_t)ies[pos + 1] + 2) {
             size_t n = (size_t)ies[pos + 1] + 2;
@@ -865,7 +885,8 @@ int AirPort_RTW89::nativeRequest(bool isSet, int number, void *data)
     case APPLE80211_IOC_SCAN_RESULT: {
         struct apple80211_scan_result **out = static_cast<struct apple80211_scan_result **>(data);
         struct rtw89_glue_bss bss;
-        uint8_t ies[1024];
+        Scratch iesBuf(1024);
+        uint8_t *ies = iesBuf.bytes();
         uint16_t beaconInt = 100;
         size_t len = 0;
 
@@ -873,7 +894,7 @@ int AirPort_RTW89::nativeRequest(bool isSet, int number, void *data)
             return kIOReturnUnsupported;
         *out = nullptr;
         /* hidden networks have no name to show */
-        while (rtw89_glue_scan_entry(_ns->scanCursor, &bss, ies, sizeof(ies), &len, &beaconInt)) {
+        while (rtw89_glue_scan_entry(_ns->scanCursor, &bss, ies, 1024, &len, &beaconInt)) {
             _ns->scanCursor++;
             if (!bss.ssid_len)
                 continue;
@@ -905,7 +926,8 @@ int AirPort_RTW89::nativeRequest(bool isSet, int number, void *data)
     }
     case APPLE80211_IOC_CURRENT_NETWORK: {
         struct rtw89_glue_bss bss = {};
-        uint8_t ies[1024];
+        Scratch iesBuf(1024);
+        uint8_t *ies = iesBuf.bytes();
         uint16_t beaconInt = 100;
         size_t len = 0;
 
@@ -913,7 +935,7 @@ int AirPort_RTW89::nativeRequest(bool isSet, int number, void *data)
             return kIOReturnUnsupported;
         if (!isConnected(link))
             return kIOReturnNotReady;
-        if (!rtw89_glue_find_bss(link.bssid, &bss, ies, sizeof(ies), &len, &beaconInt)) {
+        if (!rtw89_glue_find_bss(link.bssid, &bss, ies, 1024, &len, &beaconInt)) {
             /* not in the list any more: from what the connection itself knows */
             memcpy(bss.bssid, link.bssid, 6);
             bss.ssid_len = (uint8_t)strnlen(link.ssid, 32);
@@ -1011,13 +1033,14 @@ int AirPort_RTW89::nativeRequest(bool isSet, int number, void *data)
     case APPLE80211_IOC_RATE_SET: {
         struct apple80211_rate_set_data *d = static_cast<struct apple80211_rate_set_data *>(data);
         struct rtw89_glue_bss bss;
-        uint8_t ies[1024];
+        Scratch iesBuf(1024);
+        uint8_t *ies = iesBuf.bytes();
         size_t len = 0;
 
         if (isSet)
             return kIOReturnUnsupported;
         if (!isConnected(link) ||
-            !rtw89_glue_find_bss(link.bssid, &bss, ies, sizeof(ies), &len, nullptr))
+            !rtw89_glue_find_bss(link.bssid, &bss, ies, 1024, &len, nullptr))
             return ENXIO;
         bzero(d, sizeof(*d));
         d->version = APPLE80211_VERSION;
@@ -1198,7 +1221,8 @@ int AirPort_RTW89::nativeRequest(bool isSet, int number, void *data)
     case APPLE80211_IOC_HW_SUPPORTED_CHANNELS: {
         struct apple80211_sup_channel_data *d =
             static_cast<struct apple80211_sup_channel_data *>(data);
-        struct rtw89_glue_channel channels[APPLE80211_MAX_CHANNELS];
+        Scratch channelBuf(sizeof(struct rtw89_glue_channel) * APPLE80211_MAX_CHANNELS);
+        struct rtw89_glue_channel *channels = static_cast<struct rtw89_glue_channel *>(channelBuf.p);
         unsigned int n;
 
         if (isSet)
@@ -1216,7 +1240,8 @@ int AirPort_RTW89::nativeRequest(bool isSet, int number, void *data)
     }
     case APPLE80211_IOC_CHANNELS_INFO: {
         struct apple80211_channels_info *d = static_cast<struct apple80211_channels_info *>(data);
-        struct rtw89_glue_channel channels[APPLE80211_MAX_CHANNELS];
+        Scratch channelBuf(sizeof(struct rtw89_glue_channel) * APPLE80211_MAX_CHANNELS);
+        struct rtw89_glue_channel *channels = static_cast<struct rtw89_glue_channel *>(channelBuf.p);
         unsigned int n;
 
         if (isSet)

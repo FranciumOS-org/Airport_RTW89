@@ -207,7 +207,8 @@ hosttest: link
 # src/compat_rtw89/rtw89_glue.h and never sees the compat headers.
 KEXT_SRC      := $(PROJ_ROOT)/src/kext
 KEXT_CXXFLAGS := $(ARCH) $(MINOS) -isysroot $(SDK) -nostdinc \
-                 -std=gnu++17 -mkernel -fapple-kext -fno-rtti -fno-exceptions \
+                 -std=gnu++17 -O2 -fno-strict-aliasing -mkernel -fapple-kext -fno-rtti \
+                 -fno-exceptions \
                  -fno-builtin -fno-common -fno-stack-protector \
                  -DKERNEL -DKERNEL_PRIVATE -DDRIVER_PRIVATE -DAPPLE -DNeXT \
                  -D__PRIVATE_SPI__ -D__IO80211_TARGET=__MAC_13_0 \
