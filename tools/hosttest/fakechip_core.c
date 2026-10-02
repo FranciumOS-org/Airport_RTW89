@@ -53,6 +53,12 @@ void rtw89_core_stop(struct rtw89_dev *rtwdev)
     clear_bit(RTW89_FLAG_RUNNING, rtwdev->flags);
     wiphy_delayed_work_cancel(wiphy, &rtwdev->track_work);
     wiphy_delayed_work_cancel(wiphy, &rtwdev->track_ps_work);
+    cancel_delayed_work_sync(&rtwdev->txq_reinvoke_work);
+    /* As the real stop does: frames the chip never reported as sent are
+     * released and the rings start from zero. The pretend chip reports none,
+     * so without this a second start (Wi-Fi off and on, sleep and wake)
+     * finds no transmit room left. */
+    rtw89_hci_reset(rtwdev);
     clear_bit(RTW89_FLAG_POWERON, rtwdev->flags);
 }
 

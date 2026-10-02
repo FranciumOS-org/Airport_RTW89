@@ -288,6 +288,11 @@ void AirPort_RTW89::nativePost(unsigned int msg, void *data, size_t len)
         _ns->front.post_message(_ns->front.ctx, msg, data, len);
 }
 
+void AirPort_RTW89::nativePowerChanged()
+{
+    nativePost(APPLE80211_M_POWER_CHANGED);
+}
+
 /* Called from start(), after the probe. True: the front is there and now
  * ours; the kext must not publish its own interface. */
 bool AirPort_RTW89::connectFront()
