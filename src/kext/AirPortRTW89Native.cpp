@@ -1391,6 +1391,14 @@ int AirPort_RTW89::nativeRequest(bool isSet, int number, void *data)
          * the SAE key management suite.
          */
         static_cast<uint8_t *>(d->capabilities)[9] |= 0x08 | 0x10;
+        /*
+         * Byte 6, bit 0x01 (capability 48): protected management frames.
+         * __getMFPCaps tests byte 6 & 0x11, and Apple80211Associate2 takes
+         * the SAE suite only from a card that has it, so without it a WPA3
+         * network (MFP required) is refused with -3900 before any request
+         * leaves macOS (traced with tools/assoctrace.py).
+         */
+        d->capabilities[6] |= 0x01;
         return kIOReturnSuccess;
     }
     case APPLE80211_IOC_POWER: {
