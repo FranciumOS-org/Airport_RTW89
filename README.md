@@ -106,6 +106,11 @@ it publicly. [TESTING.md](TESTING.md) says what to try and send.
 the TX power tables, and what the driver hears around it. `sudo tools/rtw89ctl log`
 prints the driver's log.
 
+## Reporting
+
+Issues and test reports: <https://github.com/FranciumOS-org/Airport_RTW89/issues>. The source, including everything
+the release is built from, is at <https://github.com/FranciumOS-org/Airport_RTW89>.
+
 ## Building from source
 
 On macOS with the Command Line Tools:
