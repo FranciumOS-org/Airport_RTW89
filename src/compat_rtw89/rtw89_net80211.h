@@ -43,6 +43,10 @@ static inline struct rtw89_cfg80211_rdev *wiphy_to_rdev(struct wiphy *wiphy)
     return container_of(wiphy, struct rtw89_cfg80211_rdev, wiphy);
 }
 
+/* The access point's country (its Country element) while connected, or
+ * NULL once not: rtw89's TX power tables follow it. */
+void rtw89_cfg80211_country_ie(struct wiphy *wiphy, const u8 *alpha2);
+
 /* ------------------------------------------------------------------ */
 /*  mac80211 side: what Linux keeps in ieee80211_local / sdata / sta    */
 /* ------------------------------------------------------------------ */

@@ -9,6 +9,7 @@
 #include "rtw89_crypto.h"
 #include "core.h"
 #include "coex.h"
+#include "phy.h"
 
 void rtw88_trigger_interrupt(void);
 void rtw89_compat_debug_init(void);
@@ -1832,6 +1833,22 @@ void rtw89_glue_link(struct rtw89_glue_link *link)
     link->ax = rtw89_mlme_get_he();
     link->rejoin = !glue.rejoin_off;
     link->rejoins = glue.rejoins;
+    {
+        struct rtw89_dev *rtwdev = glue_hw()->priv;
+
+        if (rtwdev->regulatory.regd)
+            memcpy(link->country, rtwdev->regulatory.regd->alpha2, 2);
+        if (glue.up && glue.vif && glue.vif->cfg.assoc) {
+            const struct rtw89_chan *chan = rtw89_chan_get(rtwdev, RTW89_CHANCTX_0);
+
+            link->txpwr_limit[0] = rtw89_phy_read_txpwr_limit(rtwdev, chan->band_type,
+                RTW89_CHANNEL_WIDTH_20, RTW89_1TX, RTW89_RS_MCS, RTW89_NONBF,
+                chan->primary_channel);
+            link->txpwr_limit[1] = rtw89_phy_read_txpwr_limit(rtwdev, chan->band_type,
+                RTW89_CHANNEL_WIDTH_20, RTW89_2TX, RTW89_RS_MCS, RTW89_NONBF,
+                chan->primary_channel);
+        }
+    }
     if (!glue.up)
         return;
 

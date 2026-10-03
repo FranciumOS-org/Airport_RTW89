@@ -55,6 +55,7 @@ static uint8_t ap_ies[] = {
     0x01, 0x08, 0x82, 0x84, 0x8b, 0x96, 0x0c, 0x12, 0x18, 0x24,      /* rates */
     0x03, 0x01, 0x06,                                                /* channel 6 */
     0x05, 0x04, 0x00, 0x02, 0x00, 0x00,                              /* TIM, DTIM period 2 */
+    0x07, 0x06, 'C', 'A', ' ', 0x01, 0x0b, 0x1e,                     /* Country: Canada */
     0x2a, 0x01, 0x00,                                                /* ERP */
     0x30, 0x14, 0x01, 0x00, 0x00, 0x0f, 0xac, 0x04, 0x01, 0x00,      /* RSN: CCMP/PSK */
     0x00, 0x0f, 0xac, 0x04, 0x01, 0x00, 0x00, 0x0f, 0xac, 0x02, 0x00, 0x00,
@@ -69,7 +70,7 @@ static uint8_t ap_ies[] = {
     0x03, 0xa4, 0x00, 0x00, 0x27, 0xa4, 0x00, 0x00,
     0x42, 0x43, 0x5e, 0x00, 0x62, 0x32, 0x2f, 0x00,
 };
-#define AP_RSN_AKM      50      /* the key management type in the RSN element */
+#define AP_RSN_AKM      58      /* the key management type in the RSN element */
 #define AP_DS_CHANNEL   21      /* offsets into ap_ies: the channel in the DS element, */
 #define AP_HT_CHANNEL   (sizeof(ap_ies) - 26 - 22)      /* in the HT operation element, */
 #define AP_WMM_COUNT    (sizeof(ap_ies) - 26 + 8)       /* and the WMM parameter set count */
@@ -1021,6 +1022,16 @@ static int test_keep(void)
     EXPECT(ap_handshake(gtk1, 1) == 0);
     EXPECT(wait_link(RTW89_GLUE_LINK_CONNECTED));
 
+    /* ---- the AP's country picks the TX power tables (reg_work) ---- */
+    usleep(100 * 1000);
+    rtw89_glue_link(&link);
+    EXPECT(!strcmp(link.country, "CA"));
+    /* Canada's limit on channel 6 at 20 MHz, one antenna: 19 dBm; above
+     * the worldwide one, 14.5 */
+    printf("== TX power: %s, limit %d/%d half-dB\n", link.country, link.txpwr_limit[0],
+           link.txpwr_limit[1]);
+    EXPECT(link.txpwr_limit[0] > 29);
+
     /* ---- beacons ---- */
     {
         uint32_t seen, updates;
@@ -1148,6 +1159,8 @@ static int test_keep(void)
     usleep(1500 * 1000);
     rtw89_glue_link(&link);
     EXPECT(link.state == RTW89_GLUE_LINK_DOWN && !link.rejoining && ap.auth_count == n);
+    /* and off the network, the worldwide tables again */
+    EXPECT(!strcmp(link.country, "00"));
 
     /* ---- 802.1X sign-in: the handshake is an outside supplicant's ---- */
     {

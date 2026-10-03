@@ -269,6 +269,20 @@ static void print_link(io_service_t service)
            "latest took %ld ms\n", "scans", get_long(service, CFSTR("RTW89 Scans Connected")),
            get_long(service, CFSTR("RTW89 Scan ms Connected")),
            get_long(service, CFSTR("RTW89 Last Scan ms")));
+    {
+        char country[8];
+
+        get_string(service, CFSTR("RTW89 Country"), country, sizeof(country));
+        if (country[0])
+            printf("%-10s tables of %s%s", "TX power", country,
+                   !strcmp(country, "00") ? " (worldwide)" : "");
+        if (country[0] && strcmp(state, "down"))
+            printf("; limit here %.1f dBm on one antenna, %.1f on each of two",
+                   (signed char)get_long(service, CFSTR("RTW89 TX Power Limit 1TX")) / 2.0,
+                   (signed char)get_long(service, CFSTR("RTW89 TX Power Limit 2TX")) / 2.0);
+        if (country[0])
+            printf("\n");
+    }
     printf("%-10s %s; the connection has come back %ld time(s)\n", "rejoin",
            get_bool(service, CFSTR("RTW89 Rejoin")) ? "on" : "off",
            get_long(service, CFSTR("RTW89 Rejoins")));

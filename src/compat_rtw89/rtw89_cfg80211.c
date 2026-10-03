@@ -344,6 +344,35 @@ int regulatory_hint(struct wiphy *wiphy, const char *alpha2)
     return 0;
 }
 
+/*
+ * regulatory_hint_country_ie() on association, restore_regulatory_settings()
+ * on leaving (@alpha2 NULL): as in Linux, the access point's Country element
+ * says which country the station is in while it is connected, and the driver's
+ * notifier picks its TX power tables for it. Without it rtw89 stays on its
+ * worldwide tables, 4.5 dB below the Canadian or US ones on 2.4 GHz.
+ * Under the wiphy mutex; the notifier runs from reg_work.
+ */
+void rtw89_cfg80211_country_ie(struct wiphy *wiphy, const u8 *alpha2)
+{
+    struct rtw89_cfg80211_rdev *rdev = wiphy_to_rdev(wiphy);
+    struct regulatory_request *req = &rdev->reg_request;
+    char a0 = alpha2 ? alpha2[0] : '0', a1 = alpha2 ? alpha2[1] : '0';
+
+    if (wiphy->regulatory_flags & REGULATORY_COUNTRY_IE_IGNORE)
+        return;
+    /* "XX" and the like: not a country the tables know */
+    if (alpha2 && (a0 < 'A' || a0 > 'Z' || a1 < 'A' || a1 > 'Z'))
+        return;
+    if (req->alpha2[0] == a0 && req->alpha2[1] == a1)
+        return;
+    req->alpha2[0] = a0;
+    req->alpha2[1] = a1;
+    req->alpha2[2] = '\0';
+    req->initiator = alpha2 ? NL80211_REGDOM_SET_BY_COUNTRY_IE : NL80211_REGDOM_SET_BY_CORE;
+    req->dfs_region = NL80211_DFS_UNSET;
+    queue_work(rdev->wq, &rdev->reg_work);
+}
+
 /* ------------------------------------------------------------------ */
 /*  rfkill: no hardware kill switch handling on macOS                   */
 /* ------------------------------------------------------------------ */
