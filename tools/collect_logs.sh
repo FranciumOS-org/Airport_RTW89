@@ -15,8 +15,9 @@
 # No passwords: the driver never logs key material, and the daemon's lines are
 # filtered to joins and failures. MAC addresses (the card's, access points')
 # are cut to their first three bytes, the maker's part, since a full address
-# can be looked up to a location. Network names can still appear: read the
-# files before posting them anywhere public.
+# can be looked up to a location; the account's and computer's names become
+# <user>. Network names can still appear: read the files before posting them
+# anywhere public.
 set -eu
 [ "$(id -u)" = 0 ] || { echo "run with sudo: sudo $0" >&2; exit 1; }
 here="$(cd "$(dirname "$0")/.." && pwd)"
@@ -27,8 +28,18 @@ for c in "$here/tools/rtw89ctl" "$here/build/out/rtw89ctl"; do
     [ -x "$c" ] && { ctl="$c"; break; }
 done
 
-# aa:bb:cc:dd:ee:ff -> aa:bb:cc:xx:xx:xx
-mask() { sed -E 's/([0-9a-fA-F]{2}:[0-9a-fA-F]{2}:[0-9a-fA-F]{2}):[0-9a-fA-F]{2}:[0-9a-fA-F]{2}:[0-9a-fA-F]{2}/\1:xx:xx:xx/g'; }
+# aa:bb:cc:dd:ee:ff -> aa:bb:cc:xx:xx:xx, and the account's name, the words of
+# its full name (as in "Name's iPhone") and the computer's name -> <user>
+user="${SUDO_USER:-$(stat -f %Su "$here")}"
+MASK_NAMES="$({ echo "$user"; id -F "$user" 2>/dev/null | tr -s ' \t' '\n'
+                scutil --get ComputerName 2>/dev/null; } |
+              awk 'length($0) >= 3' | sort -u | tr '\n' '\t')"
+export MASK_NAMES
+mask() {
+    perl -pe 'BEGIN { @n = grep { length } split /\t/, $ENV{MASK_NAMES} }
+              s/([0-9a-fA-F]{2}:[0-9a-fA-F]{2}:[0-9a-fA-F]{2})(?::[0-9a-fA-F]{2}){3}/$1:xx:xx:xx/g;
+              for my $w (sort { length $b <=> length $a } @n) { s/\Q$w\E/<user>/gi }'
+}
 
 # From the boot on. Not --last boot: after a wall clock adjustment that misses
 # everything since (log show warns about it), while --start does not.
