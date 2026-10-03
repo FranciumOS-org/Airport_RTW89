@@ -128,8 +128,7 @@ static uint32_t channelFlags(unsigned int channel, unsigned int width)
 }
 
 /* A network of the scan list in the form IO80211 wants. @fullIes: all of its
- * elements (the current network), else only the RSN element, which is what
- * the scan list of the reference drivers carries. */
+ * elements (up to the field's 1024 bytes), else only the RSN element. */
 static void fillScanResult(const struct rtw89_glue_bss &bss, const uint8_t *ies, size_t iesLen,
                            uint16_t beaconInt, struct apple80211_scan_result *d, bool fullIes)
 {
@@ -137,7 +136,8 @@ static void fillScanResult(const struct rtw89_glue_bss &bss, const uint8_t *ies,
     d->version = APPLE80211_VERSION;
     d->asr_channel.version = APPLE80211_VERSION;
     d->asr_channel.channel = bss.channel;
-    d->asr_channel.flags = channelFlags(bss.channel, 20);
+    /* the AP's own width: macOS weighs it when it picks between networks */
+    d->asr_channel.flags = channelFlags(bss.channel, bss.width ? bss.width : 20);
     d->asr_noise = -95;
     d->asr_rssi = bss.signal;
     d->asr_snr = (int16_t)(bss.signal - d->asr_noise);
@@ -148,8 +148,12 @@ static void fillScanResult(const struct rtw89_glue_bss &bss, const uint8_t *ies,
     memcpy(d->asr_ssid, bss.ssid, d->asr_ssid_len);
 
     if (fullIes) {
-        size_t n = iesLen > sizeof(d->asr_ie_data) ? sizeof(d->asr_ie_data) : iesLen;
+        /* whole elements only: a cut one could trip macOS's parser */
+        size_t n = 0;
 
+        while (n + 2 <= iesLen && n + 2 + ies[n + 1] <= iesLen &&
+               n + 2 + ies[n + 1] <= sizeof(d->asr_ie_data))
+            n += 2 + ies[n + 1];
         memcpy(d->asr_ie_data, ies, n);
         d->asr_ie_len = (int16_t)n;
     }
@@ -1133,7 +1137,9 @@ int AirPort_RTW89::nativeRequest(bool isSet, int number, void *data)
             _ns->scanCursor++;
             if (!bss.ssid_len)
                 continue;
-            fillScanResult(bss, ies, len, beaconInt, &_ns->scanResult, false);
+            /* all elements: without HT/VHT/HE ones macOS takes every network
+             * for 802.11a/g */
+            fillScanResult(bss, ies, len, beaconInt, &_ns->scanResult, true);
             *out = &_ns->scanResult;
             return kIOReturnSuccess;
         }
