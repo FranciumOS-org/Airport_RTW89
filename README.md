@@ -76,19 +76,31 @@ Realtek PCI devices, the Wi-Fi card as `WLAN` or similar with `device-id=b852`
 1. **Keep a way back.** Copy your current OpenCore EFI to a USB stick and make
    sure you can boot from it. If macOS ever fails to start after installing,
    boot from the stick.
-2. Download the three kexts of the old Wi-Fi stack and unpack them into
-   `efi/kit/` ([efi/README.md](efi/README.md)).
-3. From the folder of this release:
-   ```sh
-   sudo efi/install.sh
-   ```
-   It finds your OpenCore EFI (if there are several it asks which), saves your
-   config as `config.plist.pre-airport-rtw89`, copies the kexts and adds their
-   entries. Nothing else in your config is changed.
+2. Get the three kexts of the old Wi-Fi stack ([efi/README.md](efi/README.md)
+   says where).
+3. Put them in, one way or the other:
+   - **By hand**, as with any kext: copy `AirPort_RTW89.kext` (the release's
+     `AirPort_RTW89-<version>.zip`) and the three into `EFI/OC/Kexts`, and in
+     `config.plist` add `Kernel -> Add` entries in this order, after Lilu:
+     `IOSkywalkFamily.kext`, `IO80211FamilyLegacy.kext`, `AMFIPass.kext`,
+     `AirPort_RTW89.kext`, then its plugin
+     `AirPort_RTW89.kext/Contents/PlugIns/AirPortRTW89Front.kext` (ProperTree's
+     OC Snapshot adds the plugin by itself). Leave out the `AirPortBrcmNIC`
+     plugin inside IO80211FamilyLegacy. Add a `Kernel -> Block` entry for
+     `com.apple.iokit.IOSkywalkFamily`, strategy `Exclude`. Give all of these
+     MinKernel `23.0.0`.
+   - **With the installer**, from `AirPort_RTW89-<version>-tools.zip`: put the
+     three kexts in its `efi/kit/` and `AirPort_RTW89.kext` in the folder
+     itself, then
+     ```sh
+     sudo efi/install.sh
+     ```
+     It finds your OpenCore EFI (if there are several it asks which), checks
+     there is room, saves your config as `config.plist.pre-airport-rtw89`,
+     copies the kexts and adds the entries above. Nothing else in your config
+     is changed. `sudo efi/uninstall.sh` switches it all off again.
 4. Restart. Wi-Fi appears in the menu bar within about 30 seconds of the
    desktop.
-
-`sudo efi/uninstall.sh` switches it all off again.
 
 ## When something goes wrong
 
@@ -96,7 +108,7 @@ Realtek PCI devices, the Wi-Fi card as `WLAN` or similar with `device-id=b852`
 sudo tools/collect_logs.sh
 ```
 
-saves your machine, macOS version, card, the driver's log and macOS's Wi-Fi
+(from the tools zip) saves your machine, macOS version, card, the driver's log and macOS's Wi-Fi
 log of this boot into `logs/`, and packs them into one zip to attach to a
 report (with what you did). There are no passwords in it, and MAC addresses
 are cut to their first half; network names can appear, so look before posting
@@ -118,7 +130,9 @@ On macOS with the Command Line Tools:
 ```sh
 make fetch-firmware   # once: Realtek's firmware for each chip, from linux-firmware
 make kext front       # build/out/AirPort_RTW89.kext and AirPortRTW89Front.kext
-make release          # the download: build/release/AirPort_RTW89-<version>.zip
+make bundle           # the two as one: build/out/bundle/AirPort_RTW89.kext
+make release          # the downloads: build/release/AirPort_RTW89-<version>.zip
+                      # (the kext) and AirPort_RTW89-<version>-tools.zip
 ```
 
 `make kext` first runs `make hosttest`: the same driver code in userspace

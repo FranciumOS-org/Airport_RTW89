@@ -9,14 +9,17 @@ first boot on a new card to go wrong in some way: that is useful too.
 1. **Make sure you can boot without it.** Copy your working OpenCore EFI to a
    USB stick and boot from it once. If macOS does not start after installing,
    boot from the stick: it does not have this driver.
-2. Run, from this folder:
+2. Download both zips of the release, `AirPort_RTW89-<version>.zip` (the
+   kext) and `AirPort_RTW89-<version>-tools.zip`; unpack the tools and put
+   `AirPort_RTW89.kext` in that folder. From it, run
    ```sh
    sudo tools/collect_logs.sh
    ```
    `logs/system.txt` now shows your card's PCI ID (`device-id=...` on the
    Wi-Fi line) and your macOS version. Check the card is in the table in the
    [README](README.md#cards).
-3. Install as the README says (`sudo efi/install.sh`) and restart.
+3. Install as the [README](README.md#installing) says (by hand or with
+   `sudo efi/install.sh`) and restart.
 
 ## What to try
 

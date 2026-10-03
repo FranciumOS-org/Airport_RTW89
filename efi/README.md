@@ -3,7 +3,7 @@
 For the card to show up as Wi-Fi in macOS (menu, System Settings), the driver
 has to work with Apple's IO80211 family as it was up to Ventura. Sonoma and
 later ship a different one, so OpenCore puts the old one back, and with it
-this project's two kexts:
+this project's kext:
 
 | What | Where it goes | From |
 |---|---|---|
@@ -11,8 +11,8 @@ this project's two kexts:
 | `IO80211FamilyLegacy.kext` | `EFI/OC/Kexts`, `Kernel -> Add` | same folder, `IO80211FamilyLegacy-v1.0.0.zip` |
 | `AMFIPass.kext` 1.4.1 | `EFI/OC/Kexts`, `Kernel -> Add`, after Lilu | `payloads/Kexts/Acidanthera/AMFIPass-v1.4.1-RELEASE.zip` |
 | block of `com.apple.iokit.IOSkywalkFamily` | `Kernel -> Block`, strategy Exclude | |
-| `AirPortRTW89Front.kext` | `EFI/OC/Kexts`, `Kernel -> Add`, after IO80211FamilyLegacy | this project |
-| `AirPort_RTW89.kext` | `EFI/OC/Kexts`, `Kernel -> Add` | this project |
+| `AirPort_RTW89.kext` | `EFI/OC/Kexts`, `Kernel -> Add`, after AMFIPass | this project |
+| its plugin `Contents/PlugIns/AirPortRTW89Front.kext` | an entry of its own, right after the driver's | (inside the driver) |
 
 All entries have MinKernel 23.0.0 (Sonoma). The `AirPortBrcmNIC.kext` plugin
 inside `IO80211FamilyLegacy.kext` is for Broadcom cards and is left out.
@@ -58,9 +58,10 @@ waits up to 30 s at boot for the front, which waits for the injected family.
 
 ## Development
 
-`sudo efi/install_driver.sh` and `sudo efi/install_front.sh` put a new build
-of one kext in (`EFI=<UUID or path>` picks the volume if there are several);
-`--disable` switches its entry off, to go back to loading test builds by hand
-with `tools/load.sh`. A change to the front always needs a restart.
+`make bundle` puts the driver and the front together
+(`build/out/bundle/AirPort_RTW89.kext`) and `sudo efi/install.sh` installs it
+(`efi/install_driver.sh` and `efi/install_front.sh` are the same thing now).
+Early builds had the front as a kext of its own, `AirPortRTW89Front.kext`;
+install.sh switches that entry off and removes it.
 
 `efi/tuf-a15/` holds scripts for the machine this port is developed on only.

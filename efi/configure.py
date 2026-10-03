@@ -5,11 +5,14 @@ Usage: python3 efi/configure.py install|uninstall IN_CONFIG OUT_CONFIG
 
 install: Kernel -> Add gets, in load order and after Lilu,
     IOSkywalkFamily.kext, IO80211FamilyLegacy.kext, AMFIPass.kext  (the old Wi-Fi stack)
-    AirPortRTW89Front.kext  (the IO80211 controller, links against the family)
     AirPort_RTW89.kext      (the driver)
+    AirPort_RTW89.kext/Contents/PlugIns/AirPortRTW89Front.kext
+                            (the IO80211 controller, links against the family)
 and Kernel -> Block gets an entry that keeps Apple's own IOSkywalkFamily out,
 all from Darwin 23 (Sonoma) on. Entries already there are switched on and
-otherwise left alone, so running it twice changes nothing.
+otherwise left alone, so running it twice changes nothing. An entry for the
+front as a kext of its own (AirPortRTW89Front.kext, as early builds had it) is
+switched off: it is inside the driver now.
 
 uninstall: the same entries are switched off (not removed), so the config is
 as before as far as OpenCore is concerned, and install can switch them on.
@@ -26,10 +29,12 @@ STACK = [
     ('IO80211FamilyLegacy.kext', 'IO80211FamilyLegacy', 'Wi-Fi: IO80211Family from Ventura'),
     ('AMFIPass.kext', 'AMFIPass', 'Wi-Fi: AMFIPass'),
 ]
+FRONT = 'AirPort_RTW89.kext/Contents/PlugIns/AirPortRTW89Front.kext'
 OURS = [
-    ('AirPortRTW89Front.kext', 'AirPortRTW89Front', 'Wi-Fi: RTL8852BE front (AirPort_RTW89)'),
-    ('AirPort_RTW89.kext', 'AirPort_RTW89', 'Wi-Fi: RTL8852BE driver (AirPort_RTW89)'),
+    ('AirPort_RTW89.kext', 'AirPort_RTW89', 'Wi-Fi: rtw89 driver (AirPort_RTW89)'),
+    (FRONT, 'AirPortRTW89Front', 'Wi-Fi: rtw89 front (AirPort_RTW89)'),
 ]
+OLD_FRONT = 'AirPortRTW89Front.kext'     # the front as a kext of its own
 BLOCK_ID = 'com.apple.iokit.IOSkywalkFamily'
 
 
@@ -65,10 +70,16 @@ def install(config, changes):
     # (the driver waits for the front at boot)
     for before, later in (('Lilu.kext', 'AMFIPass.kext'),
                           ('IOSkywalkFamily.kext', 'IO80211FamilyLegacy.kext'),
-                          ('IO80211FamilyLegacy.kext', 'AirPortRTW89Front.kext')):
+                          ('IO80211FamilyLegacy.kext', FRONT),
+                          ('AirPort_RTW89.kext', FRONT)):
         if paths.index(later) < paths.index(before):
             sys.exit('%s comes before %s in Kernel -> Add; it links against it: '
                      'fix the order by hand' % (later, before))
+
+    for e in add:
+        if e.get('BundlePath') == OLD_FRONT and e.get('Enabled'):
+            e['Enabled'] = False
+            changes.append('switched off ' + OLD_FRONT + ' (the front is inside the driver now)')
 
     for e in block:
         if e.get('Identifier') == BLOCK_ID:
@@ -92,7 +103,7 @@ def install(config, changes):
 
 def uninstall(config, changes):
     kernel = config['Kernel']
-    names = {b for b, _, _ in STACK + OURS}
+    names = {b for b, _, _ in STACK + OURS} | {OLD_FRONT}
     for e in kernel['Add']:
         if e.get('BundlePath') in names and e.get('Enabled'):
             e['Enabled'] = False
