@@ -76,19 +76,32 @@ Realtek PCI devices, the Wi-Fi card as `WLAN` or similar with `device-id=b852`
 1. **Keep a way back.** Copy your current OpenCore EFI to a USB stick and make
    sure you can boot from it. If macOS ever fails to start after installing,
    boot from the stick.
-2. Get the three kexts of the old Wi-Fi stack ([efi/README.md](efi/README.md)
-   says where).
+2. Get the three kexts of the old Wi-Fi stack: the links are in the first
+   way below, and [efi/README.md](efi/README.md) says more about them.
 3. Put them in, one way or the other:
-   - **By hand**, as with any kext: copy `AirPort_RTW89.kext` (the release's
-     `AirPort_RTW89-<version>.zip`) and the three into `EFI/OC/Kexts`, and in
-     `config.plist` add `Kernel -> Add` entries in this order, after Lilu:
-     `IOSkywalkFamily.kext`, `IO80211FamilyLegacy.kext`, `AMFIPass.kext`,
-     `AirPort_RTW89.kext`, then its plugin
-     `AirPort_RTW89.kext/Contents/PlugIns/AirPortRTW89Front.kext` (ProperTree's
-     OC Snapshot adds the plugin by itself). Leave out the `AirPortBrcmNIC`
-     plugin inside IO80211FamilyLegacy. Add a `Kernel -> Block` entry for
-     `com.apple.iokit.IOSkywalkFamily`, strategy `Exclude`. Give all of these
-     MinKernel `23.0.0`.
+   - **By hand**, as with any kext:
+     1. Download `AirPort_RTW89.kext` (the release's `AirPort_RTW89-<version>.zip`)
+        and the three kexts of the old Wi-Fi stack from OpenCore Legacy
+        Patcher, where they are published (they are Apple's and Dhinak G's,
+        so this project does not re-upload them):
+        [IOSkywalkFamily](https://github.com/dortania/OpenCore-Legacy-Patcher/raw/main/payloads/Kexts/Wifi/IOSkywalkFamily-v1.2.0.zip),
+        [IO80211FamilyLegacy](https://github.com/dortania/OpenCore-Legacy-Patcher/raw/main/payloads/Kexts/Wifi/IO80211FamilyLegacy-v1.0.0.zip),
+        [AMFIPass](https://github.com/dortania/OpenCore-Legacy-Patcher/raw/main/payloads/Kexts/Acidanthera/AMFIPass-v1.4.1-RELEASE.zip).
+     2. Copy the four `.kext`s into `EFI/OC/Kexts`. Delete
+        `IO80211FamilyLegacy.kext/Contents/PlugIns/AirPortBrcmNIC.kext`
+        (it is for Broadcom cards).
+     3. In ProperTree, **OC Snapshot**. Check that `Kernel -> Add` has, after
+        Lilu, `IOSkywalkFamily`, `IO80211FamilyLegacy`, `AMFIPass`,
+        `AirPort_RTW89` and its plugin
+        `AirPort_RTW89.kext/Contents/PlugIns/AirPortRTW89Front.kext`, in that
+        order.
+     4. Add one entry to `Kernel -> Block` by hand (Snapshot does not):
+        `Identifier` `com.apple.iokit.IOSkywalkFamily`, `Strategy` `Exclude`,
+        `Arch` `x86_64`, `MinKernel` `23.0.0`, `Enabled` true. It keeps
+        macOS's own IOSkywalkFamily out so that Ventura's takes its place.
+     5. If the same EFI also boots Ventura or older, give the four kexts
+        `MinKernel` `23.0.0` too.
+     6. `Misc -> Security -> SecureBootModel` must be `Disabled`.
    - **With the installer**, from `AirPort_RTW89-<version>-tools.zip`: put the
      three kexts in its `efi/kit/` and `AirPort_RTW89.kext` in the folder
      itself, then
