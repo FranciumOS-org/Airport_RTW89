@@ -10,6 +10,7 @@
  * OpenCore puts back on later systems.
  */
 #include "AirPortRTW89.hpp"
+#include "rtw89_chips.h"
 
 #include <IOKit/80211/apple80211_ioctl.h>
 #include <IOKit/80211/apple80211_var.h>
@@ -1539,9 +1540,12 @@ int AirPort_RTW89::nativeRequest(bool isSet, int number, void *data)
             return kIOReturnUnsupported;
         bzero(d, sizeof(*d));
         d->version = APPLE80211_VERSION;
-        d->string_len = (uint16_t)strlcpy(d->string, number == APPLE80211_IOC_DRIVER_VERSION ?
-                                          "RTL8852BE (AirPort_RTW89 0.1.0)" : "RTL8852BE",
-                                          sizeof(d->string));
+        if (number == APPLE80211_IOC_DRIVER_VERSION)
+            snprintf(d->string, sizeof(d->string), "%s (AirPort_RTW89 0.1.0)",
+                     rtw89_chip_name(_deviceID));
+        else
+            strlcpy(d->string, rtw89_chip_name(_deviceID), sizeof(d->string));
+        d->string_len = (uint16_t)strlen(d->string);
         return kIOReturnSuccess;
     }
     case APPLE80211_IOC_RADIO_INFO: {

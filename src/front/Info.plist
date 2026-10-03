@@ -20,7 +20,7 @@
 	<string>0.1.0</string>
 	<key>IOKitPersonalities</key>
 	<dict>
-		<key>RTL8852BE</key>
+		<key>RTW89</key>
 		<dict>
 			<key>CFBundleIdentifier</key>
 			<string>com.rtw89.front</string>
@@ -29,7 +29,7 @@
 			<key>IOMatchCategory</key>
 			<string>AirPortRTW89Front</string>
 			<key>IOPCIMatch</key>
-			<string>0xb85210ec 0xb85b10ec</string>
+			<string>0xb85110ec 0x885210ec 0xa85a10ec 0xb85210ec 0xb85b10ec 0xb52010ec 0xc85210ec 0x892210ec 0x892b10ec 0x892d10ec 0x882d10ec 0x895d10ec</string>
 			<key>IOProviderClass</key>
 			<string>IOPCIDevice</string>
 		</dict>

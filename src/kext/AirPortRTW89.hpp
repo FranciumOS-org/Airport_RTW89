@@ -138,6 +138,7 @@ private:
     NativeState *_ns = nullptr;
 
     IOPCIDevice *_pci = nullptr;
+    uint16_t _deviceID = 0;            /* PCI device ID, for the chip name (rtw89_chips.h) */
     IOMemoryMap *_mmio = nullptr;
     IOWorkLoop *_workLoop = nullptr;    /* the interrupt's own thread */
     IOInterruptEventSource *_interrupt = nullptr;
