@@ -338,13 +338,22 @@ kext: hosttest $(KEXT_OBJS) $(KEXT_SRC)/Info.plist
 	@cc -O2 -Wall -o $(BUILD_DIR)/out/rtw89ctl tools/rtw89ctl.c -framework IOKit -framework CoreFoundation
 	@echo "  TOOL $(BUILD_DIR)/out/rtw89ctl"
 
-FW_NAME := rtw8852b_fw-2.bin
-FW_URL  := https://git.kernel.org/pub/scm/linux/kernel/git/firmware/linux-firmware.git/plain/rtw89/$(FW_NAME)
+# Realtek's firmware for each chip, the newest format its driver takes, and
+# Realtek's terms for redistributing it; linux-firmware at a fixed commit.
+FW_COMMIT := d947e4e8e314e9254a1242dc1a5d9cede2cce33d
+FW_NAMES  := rtw8851b_fw-1.bin rtw8852a_fw-1.bin rtw8852b_fw-2.bin rtw8852bt_fw.bin \
+             rtw8852c_fw-2.bin rtw8922a_fw-4.bin rtw8922d_fw.bin rtw8922ds_fw.bin
+FW_BASE   := https://git.kernel.org/pub/scm/linux/kernel/git/firmware/linux-firmware.git/plain
+
 fetch-firmware:
 	@mkdir -p $(FIRMWARE_DIR)
-	curl -fL --output $(FIRMWARE_DIR)/$(FW_NAME) $(FW_URL)
-	@cd $(FIRMWARE_DIR) && if [ -f SHA256SUMS ]; then shasum -a 256 -c SHA256SUMS; \
-	    else shasum -a 256 $(FW_NAME) | tee SHA256SUMS; fi
+	@for f in $(FW_NAMES); do \
+	    echo "  GET  rtw89/$$f"; \
+	    curl -fsSL -m 300 --output $(FIRMWARE_DIR)/$$f "$(FW_BASE)/rtw89/$$f?id=$(FW_COMMIT)" || exit 1; \
+	done
+	@curl -fsSL -m 60 --output $(FIRMWARE_DIR)/LICENCE.rtlwifi_firmware.txt \
+	    "$(FW_BASE)/LICENSES/LICENCE.rtlwifi_firmware.txt?id=$(FW_COMMIT)"
+	@cd $(FIRMWARE_DIR) && shasum -a 256 -c SHA256SUMS
 
 clean:
 	rm -rf $(BUILD_DIR)
