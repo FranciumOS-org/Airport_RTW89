@@ -2,7 +2,8 @@
 /*
  * The cryptography WPA2-PSK key management needs (IEEE 802.11 12.7): SHA-1,
  * HMAC-SHA1, PBKDF2 for the passphrase, the 802.11 PRF for the pairwise keys,
- * and AES key wrap for the group key. Plain C with no Linux or kernel types,
+ * and AES key wrap for the group key. For WPA3 (SAE, AKM 8): SHA-256,
+ * HMAC-SHA256, the 802.11 KDF and AES-CMAC. Plain C with no Linux or kernel types,
  * so the userspace smoke test can use the same code to play the authenticator.
  *
  * Frame encryption itself (CCMP) is done by the hardware.
@@ -19,6 +20,7 @@ extern "C" {
 #endif
 
 #define RTW89_SHA1_LEN 20
+#define RTW89_SHA256_LEN 32
 
 void rtw89_sha1(const uint8_t *data, size_t len, uint8_t out[RTW89_SHA1_LEN]);
 
@@ -38,6 +40,18 @@ void rtw89_pbkdf2_sha1(const uint8_t *password, size_t password_len,
 void rtw89_sha1_prf(const uint8_t *key, size_t key_len, const char *label,
                     const uint8_t *data, size_t data_len, uint8_t *out, size_t out_len);
 
+void rtw89_sha256(const uint8_t *data, size_t len, uint8_t out[RTW89_SHA256_LEN]);
+void rtw89_hmac_sha256_vector(const uint8_t *key, size_t key_len, size_t num,
+                              const uint8_t *const pieces[], const size_t lens[],
+                              uint8_t out[RTW89_SHA256_LEN]);
+void rtw89_hmac_sha256(const uint8_t *key, size_t key_len, const uint8_t *data, size_t len,
+                       uint8_t out[RTW89_SHA256_LEN]);
+/* IEEE 802.11 KDF-SHA-256 (12.7.1.6.2): HMAC-SHA256(key, i || label || context ||
+ * Length), i and Length in bits as 16-bit little-endian, the label without
+ * its NUL; @out_len bytes. */
+void rtw89_kdf_sha256(const uint8_t *key, size_t key_len, const char *label,
+                      const uint8_t *context, size_t context_len, uint8_t *out, size_t out_len);
+
 void rtw89_aes128_encrypt(const uint8_t key[16], const uint8_t in[16], uint8_t out[16]);
 void rtw89_aes128_decrypt(const uint8_t key[16], const uint8_t in[16], uint8_t out[16]);
 
@@ -48,6 +62,11 @@ void rtw89_aes_wrap(const uint8_t kek[16], const uint8_t *plain, size_t plain_le
                     uint8_t *wrapped);
 bool rtw89_aes_unwrap(const uint8_t kek[16], const uint8_t *wrapped, size_t wrapped_len,
                       uint8_t *plain);
+
+/* AES-CMAC (RFC 4493) over the concatenation of @num pieces. */
+void rtw89_aes_cmac_vector(const uint8_t key[16], size_t num, const uint8_t *const pieces[],
+                           const size_t lens[], uint8_t mac[16]);
+void rtw89_aes_cmac(const uint8_t key[16], const uint8_t *data, size_t len, uint8_t mac[16]);
 
 /* Compare without leaking where the difference is. */
 bool rtw89_crypto_equal(const uint8_t *a, const uint8_t *b, size_t len);

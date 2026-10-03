@@ -216,6 +216,72 @@ static void test_crypto(void)
     CHECK(rtw89_aes_unwrap(key, wrapped, 24, out) && !memcmp(out, in, 16));
     wrapped[5] ^= 0x01;
     CHECK(!rtw89_aes_unwrap(key, wrapped, 24, out));
+
+    /* SHA-256: FIPS 180-4 examples, and a message over several blocks */
+    rtw89_sha256((const u8 *)"abc", 3, out);
+    CHECK(hex_is(out, "ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad", 32));
+    rtw89_sha256((const u8 *)"abcdbcdecdefdefgefghfghighijhijkijkljklmklmnlmnomnopnopq", 56, out);
+    CHECK(hex_is(out, "248d6a61d20638b8e5c026930c3e6039a33ce45964ff2167f6ecedd419db06c1", 32));
+    {
+        static u8 a1000[1000];
+
+        memset(a1000, 'a', sizeof(a1000));
+        rtw89_sha256(a1000, sizeof(a1000), out);
+        CHECK(hex_is(out, "41edece42d63e8d9bf515a9ba6932e1c20cbc9f5a5d134645adb5db1b9737ea3", 32));
+    }
+
+    /* HMAC-SHA256: RFC 4231 test cases 1 and 2 */
+    memset(key, 0x0b, 20);
+    rtw89_hmac_sha256(key, 20, (const u8 *)"Hi There", 8, out);
+    CHECK(hex_is(out, "b0344c61d8db38535ca8afceaf0bf12b881dc200c9833da726e9376c2e32cff7", 32));
+    rtw89_hmac_sha256((const u8 *)"Jefe", 4, (const u8 *)"what do ya want for nothing?", 28, out);
+    CHECK(hex_is(out, "5bdcc146bf60754e6a042426089575c75a003f089d2739839dec58b964ec3843", 32));
+
+    /* KDF-SHA-256 (IEEE 802.11 12.7.1.6.2), against Python's hmac/hashlib */
+    {
+        u8 k32[32], ctx[32];
+
+        for (i = 0; i < 32; i++) {
+            k32[i] = (u8)i;
+            ctx[i] = (u8)(32 + i);
+        }
+        rtw89_kdf_sha256(k32, 32, "SAE KCK and PMK", ctx, 32, out, 64);
+        CHECK(hex_is(out, "ced4f66be71c033c714c7ee12190fb6ad0af16af84cfd5295459a1a92e629f39"
+                          "bbd19d36640a76f845075c52bac62ac9559a9b3a03e0377b223aced14d17593e", 64));
+        rtw89_kdf_sha256((const u8 *)"key", 3, "Pairwise key expansion",
+                         (const u8 *)"context-bytes", 13, out, 48);
+        CHECK(hex_is(out, "abbc62d4db671fd70ed3820b247151aa8a14b4827eca916e"
+                          "95e3e582e7ded9548990aa8b2bddc76609817ff72b2549fd", 48));
+    }
+
+    /* AES-CMAC: RFC 4493 examples 1-4 */
+    {
+        static const u8 k[16] = { 0x2b, 0x7e, 0x15, 0x16, 0x28, 0xae, 0xd2, 0xa6,
+                                  0xab, 0xf7, 0x15, 0x88, 0x09, 0xcf, 0x4f, 0x3c };
+        static const u8 m[64] = {
+            0x6b, 0xc1, 0xbe, 0xe2, 0x2e, 0x40, 0x9f, 0x96, 0xe9, 0x3d, 0x7e, 0x11, 0x73, 0x93, 0x17, 0x2a,
+            0xae, 0x2d, 0x8a, 0x57, 0x1e, 0x03, 0xac, 0x9c, 0x9e, 0xb7, 0x6f, 0xac, 0x45, 0xaf, 0x8e, 0x51,
+            0x30, 0xc8, 0x1c, 0x46, 0xa3, 0x5c, 0xe4, 0x11, 0xe5, 0xfb, 0xc1, 0x19, 0x1a, 0x0a, 0x52, 0xef,
+            0xf6, 0x9f, 0x24, 0x45, 0xdf, 0x4f, 0x9b, 0x17, 0xad, 0x2b, 0x41, 0x7b, 0xe6, 0x6c, 0x37, 0x10,
+        };
+
+        rtw89_aes_cmac(k, m, 0, out);
+        CHECK(hex_is(out, "bb1d6929e95937287fa37d129b756746", 16));
+        rtw89_aes_cmac(k, m, 16, out);
+        CHECK(hex_is(out, "070a16b46b4d4144f79bdd9dd04a287c", 16));
+        rtw89_aes_cmac(k, m, 40, out);
+        CHECK(hex_is(out, "dfa66747de9ae63030ca32611497c827", 16));
+        rtw89_aes_cmac(k, m, 64, out);
+        CHECK(hex_is(out, "51f0bebf7e3b9d92fc49741779363cfe", 16));
+        {
+            /* the same message in uneven pieces */
+            const u8 *pieces[3] = { m, m + 7, m + 33 };
+            size_t lens[3] = { 7, 26, 31 };
+
+            rtw89_aes_cmac_vector(k, 3, pieces, lens, out);
+            CHECK(hex_is(out, "51f0bebf7e3b9d92fc49741779363cfe", 16));
+        }
+    }
 }
 
 /* ---- cfg80211 helpers ---- */
