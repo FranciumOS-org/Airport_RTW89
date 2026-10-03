@@ -44,6 +44,8 @@ struct rtw89_glue_dma {
 /* A network heard in a scan: what callers see plus what a join needs. */
 struct rtw89_glue_bss_entry {
     struct rtw89_glue_bss pub;
+    unsigned long last_seen;    /* jiffies of the last frame heard from it */
+    u32 scan_gen;               /* the scan it was last heard in */
     u16 beacon_int;
     u16 ies_len;
     u8 ies[RTW89_GLUE_MAX_IES];
@@ -72,6 +74,7 @@ static struct {
     spinlock_t bss_lock;
     struct rtw89_glue_bss_entry bss[RTW89_GLUE_MAX_BSS];
     unsigned int n_bss;
+    u32 scan_gen;               /* counts the scans started */
 
     /* The network the user asked for, kept to join it again when the
      * connection is lost: once it has worked, so that a wrong password is
@@ -730,11 +733,20 @@ void rtw89_glue_note_bss(const u8 *frame, size_t len, u16 freq, s8 signal)
             break;
         }
     }
-    if (!e && glue.n_bss < RTW89_GLUE_MAX_BSS) {
-        e = &glue.bss[glue.n_bss++];
+    if (!e) {
+        if (glue.n_bss < RTW89_GLUE_MAX_BSS) {
+            e = &glue.bss[glue.n_bss++];
+        } else {
+            /* full: the one heard least recently makes room */
+            e = &glue.bss[0];
+            for (i = 1; i < glue.n_bss; i++)
+                if (time_before(glue.bss[i].last_seen, e->last_seen))
+                    e = &glue.bss[i];
+        }
         memset(e, 0, sizeof(*e));
         memcpy(e->pub.bssid, mgmt->bssid, ETH_ALEN);
         e->pub.signal = signal;
+        e->scan_gen = glue.scan_gen;
     }
     if (e) {
         if (has_ssid) {
@@ -752,8 +764,13 @@ void rtw89_glue_note_bss(const u8 *frame, size_t len, u16 freq, s8 signal)
         }
         e->pub.freq = freq;
         e->pub.channel = (u8)ieee80211_frequency_to_channel(freq);
-        if (signal > e->pub.signal)
+        /* the newest signal at the first frame of each scan, the strongest
+         * after that: the list outlives scans, a best-ever value would not
+         * follow the machine moving away */
+        if (e->scan_gen != glue.scan_gen || signal > e->pub.signal)
             e->pub.signal = signal;
+        e->scan_gen = glue.scan_gen;
+        e->last_seen = jiffies;
         e->pub.seen++;
     }
     spin_unlock(&glue.bss_lock);
@@ -967,9 +984,31 @@ static void glue_tx_status(void *ctx, struct sk_buff *skb)
     kfree_skb(skb);
 }
 
+/* Networks not heard for GLUE_BSS_MAX_AGE leave the list (after a scan). */
+#define GLUE_BSS_MAX_AGE (90 * HZ)
+
+static void glue_bss_expire(void)
+{
+    unsigned int i = 0;
+
+    spin_lock(&glue.bss_lock);
+    while (i < glue.n_bss) {
+        if (time_after(jiffies, glue.bss[i].last_seen + GLUE_BSS_MAX_AGE)) {
+            glue.n_bss--;
+            if (i != glue.n_bss)
+                glue.bss[i] = glue.bss[glue.n_bss];
+        } else {
+            i++;
+        }
+    }
+    spin_unlock(&glue.bss_lock);
+}
+
 static void glue_scan_done(void *ctx, bool aborted)
 {
     glue.scanning = false;
+    if (!aborted)
+        glue_bss_expire();
     IOLog("[rtw89] scan %s: %u network(s) heard\n", aborted ? "aborted" : "finished",
           glue.n_bss);
     /* the attempt to get the network back was waiting for this */
@@ -1320,10 +1359,14 @@ static int glue_scan_locked(void)
     if (ret) {
         glue.scanning = false;
     } else {
-        /* a new list; if the scan did not start, the old one is still the
-         * best there is */
+        /*
+         * The list is kept through the scan, not started afresh: macOS asks
+         * to join right after starting one, and an emptied list made a
+         * network on a channel not yet scanned "not found". What was not
+         * heard for a while goes when a scan ends (glue_bss_expire()).
+         */
         spin_lock(&glue.bss_lock);
-        glue.n_bss = 0;
+        glue.scan_gen++;
         spin_unlock(&glue.bss_lock);
     }
     wiphy_unlock(hw->wiphy);
