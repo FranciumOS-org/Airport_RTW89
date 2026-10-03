@@ -124,7 +124,7 @@ SAE_SRCS := third_party/hostap/src/common/sae.c third_party/hostap/src/common/dr
             $(COMPAT89_DIR)/rtw89_wpabuf.c \
             $(addprefix third_party/mbedtls/library/,bignum.c bignum_core.c ecp.c ecp_curves.c \
                 constant_time.c platform_util.c) \
-            $(COMPAT89_DIR)/rtw89_hostap.c
+            $(COMPAT89_DIR)/rtw89_hostap.c $(COMPAT89_DIR)/rtw89_sae.c
 # The same files built for the kernel: plain C with the stand-in libc headers
 # (hostap/kernel_libc) in front of the SDK's, the driver's IOLog redirect, and
 # no warnings for code that is not ours.
