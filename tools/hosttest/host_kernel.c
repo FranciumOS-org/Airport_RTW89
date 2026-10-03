@@ -64,6 +64,17 @@ int scnprintf(char *buf, size_t size, const char *fmt, ...)
 }
 
 void read_random(void *buf, unsigned len) { arc4random_buf(buf, len); }
+/* hostap's buffer overflow handler in the kernel build (rtw89_hostap_abort) */
+void panic(const char *fmt, ...)
+{
+    va_list ap;
+
+    va_start(ap, fmt);
+    vfprintf(stdout, fmt, ap);
+    va_end(ap);
+    fflush(stdout);
+    abort();
+}
 
 int PE_parse_boot_argn(const char *name, void *ptr, int size)
 {

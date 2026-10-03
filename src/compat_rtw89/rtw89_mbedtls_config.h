@@ -14,5 +14,7 @@
 /* NIST-specific reduction: faster, and the curve's own code */
 #define MBEDTLS_ECP_NIST_OPTIM
 /* MBEDTLS_HAVE_ASM stays off: plain C only in the kernel */
+/* no 128-bit division: the kernel does not export __udivti3 */
+#define MBEDTLS_NO_UDBL_DIVISION
 
 #endif

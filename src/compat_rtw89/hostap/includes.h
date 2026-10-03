@@ -1,7 +1,7 @@
 /* SPDX-License-Identifier: GPL-2.0 */
 /* Stands in for hostap's utils/includes.h: no sockets, no stdio in the kernel. */
-#ifndef RTW89_HOSTAP_INCLUDES_H
-#define RTW89_HOSTAP_INCLUDES_H
+#ifndef INCLUDES_H /* the same guard as hostap's, so whichever comes first wins */
+#define INCLUDES_H
 
 #include <stddef.h>
 #include <stdint.h>
@@ -9,9 +9,10 @@
 #include <stdarg.h>
 #include <sys/types.h>
 #include <string.h>
-#ifndef KERNEL
+/* in the kernel build these two are hostap/kernel_libc's */
 #include <stdlib.h>
 #include <stdio.h>
+#ifndef KERNEL
 #include <errno.h>
 #include <ctype.h>
 #endif
