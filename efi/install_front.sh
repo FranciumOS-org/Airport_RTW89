@@ -22,6 +22,7 @@ find_efi "${EFI:-}"
 oc="$EFI_MOUNT/EFI/OC"
 
 export COPYFILE_DISABLE=1
+efi_room "$src"
 rm -rf "$oc/Kexts/AirPortRTW89Front.kext"
 cp -R -X "$src" "$oc/Kexts/"
 find "$oc/Kexts/AirPortRTW89Front.kext" -name '._*' -delete 2>/dev/null || true
