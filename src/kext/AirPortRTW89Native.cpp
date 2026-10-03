@@ -59,6 +59,16 @@ struct AirPort_RTW89::NativeState {
  * the first call has returned), on a kernel stack of 16 KB: buffers on the
  * stack of the request handler overflowed it.
  */
+/*
+ * Whether macOS is told the card does SAE and protected management frames
+ * (capability bytes 9 and 6, see APPLE80211_IOC_CARD_CAPABILITIES). Off until
+ * the WPA3 join itself is done: told so, macOS picks SAE on WPA2/WPA3 mixed
+ * networks too and the join fails where WPA2 would have worked, and it may
+ * choose WPA2 networks that require frame protection. With it off, WPA3-only
+ * networks are refused by macOS before they reach the driver.
+ */
+static const bool kAdvertiseWPA3 = false;
+
 struct Scratch {
     void *p;
     size_t n;
@@ -1396,7 +1406,8 @@ int AirPort_RTW89::nativeRequest(bool isSet, int number, void *data)
          * supported" and never sends a WPA3 join, bit 0x10 (76) for picking
          * the SAE key management suite.
          */
-        static_cast<uint8_t *>(d->capabilities)[9] |= 0x08 | 0x10;
+        if (kAdvertiseWPA3)
+            static_cast<uint8_t *>(d->capabilities)[9] |= 0x08 | 0x10;
         /*
          * Byte 6, bit 0x01 (capability 48): protected management frames.
          * __getMFPCaps tests byte 6 & 0x11, and Apple80211Associate2 takes
@@ -1404,7 +1415,8 @@ int AirPort_RTW89::nativeRequest(bool isSet, int number, void *data)
          * network (MFP required) is refused with -3900 before any request
          * leaves macOS (traced with tools/assoctrace.py).
          */
-        d->capabilities[6] |= 0x01;
+        if (kAdvertiseWPA3)
+            d->capabilities[6] |= 0x01;
         return kIOReturnSuccess;
     }
     case APPLE80211_IOC_POWER: {
