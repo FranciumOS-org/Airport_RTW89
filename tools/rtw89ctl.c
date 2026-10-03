@@ -390,17 +390,19 @@ int main(int argc, char **argv)
         return 0;
     }
 
-    if (!strcmp(command, "log")) {
-        /* the driver's own log ring: its lines since it loaded (64 KB) */
+    if (!strcmp(command, "log") || !strcmp(command, "coex")) {
+        /* the driver's own log ring: its lines since it loaded (64 KB); or the
+         * Wi-Fi/Bluetooth coexistence report */
         CFTypeRef v;
 
-        kr = send_command(service, "log");
+        kr = send_command(service, command);
         if (kr != KERN_SUCCESS) {
-            fprintf(stderr, "log failed: 0x%x%s\n", kr,
+            fprintf(stderr, "%s failed: 0x%x%s\n", command, kr,
                     kr == kIOReturnNotPrivileged ? " (run with sudo)" : "");
             return 1;
         }
-        v = IORegistryEntryCreateCFProperty(service, CFSTR("RTW89 Log"), NULL, 0);
+        v = IORegistryEntryCreateCFProperty(service, !strcmp(command, "log") ? CFSTR("RTW89 Log") :
+                                            CFSTR("RTW89 Coex"), NULL, 0);
         if (v && CFGetTypeID(v) == CFStringGetTypeID()) {
             CFIndex n = CFStringGetMaximumSizeForEncoding(CFStringGetLength(v),
                                                           kCFStringEncodingUTF8) + 1;
@@ -455,7 +457,7 @@ int main(int argc, char **argv)
          strcmp(command, "join") && strcmp(command, "leave") && strcmp(command, "probe") &&
          strcmp(command, "drop")) ||
         (!strcmp(command, "join") && argc < 3)) {
-        fprintf(stderr, "usage: rtw89ctl up|down|scan|join SSID|leave|status|log|probe|drop|flush on|off|ax on|off|"
+        fprintf(stderr, "usage: rtw89ctl up|down|scan|join SSID|leave|status|log|coex|probe|drop|flush on|off|ax on|off|"
                         "rejoin on|off\n");
         return 2;
     }
