@@ -288,6 +288,12 @@ struct rtw89_glue_link {
     uint32_t scans_connected;
     uint32_t scan_ms_connected;
     uint32_t last_scan_ms;          /* the latest scan, associated or not */
+
+    /* TX power: the country whose tables are in force ("00": worldwide), and
+     * the limit they set on this channel at 20 MHz for 802.11n/ax, in 0.5 dB
+     * steps, sending on one antenna and on both (each) */
+    char     country[3];
+    int8_t   txpwr_limit[2];
 };
 
 void rtw89_glue_link(struct rtw89_glue_link *link);

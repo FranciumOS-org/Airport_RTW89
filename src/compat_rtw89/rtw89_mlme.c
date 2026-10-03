@@ -549,6 +549,7 @@ static void mlme_teardown(u16 deauth_reason)
     memset(&conf->he_obss_pd, 0, sizeof(conf->he_obss_pd));
 
     if (was_assoc) {
+        rtw89_cfg80211_country_ie(mlme.hw->wiphy, NULL);
         mlme.vif->cfg.assoc = false;
         mlme.vif->cfg.aid = 0;
         conf->qos = false;
@@ -1621,6 +1622,11 @@ static void mlme_rx_assoc_resp(const struct ieee80211_mgmt *mgmt, size_t len)
         ops->vif_cfg_changed(mlme.hw, mlme.vif, BSS_CHANGED_ASSOC);
     if (ops->link_info_changed)
         ops->link_info_changed(mlme.hw, mlme.vif, conf, changed);
+
+    /* __cfg80211_connect_result(): the AP's country, for the TX power tables */
+    elem = mlme_find_elem(WLAN_EID_COUNTRY, mlme.bss.ies, mlme.bss.ies_len);
+    if (elem && elem->datalen >= 2)
+        rtw89_cfg80211_country_ie(mlme.hw->wiphy, elem->data);
 
     mlme.last_error = 0;
     if (!mlme.rsn)
