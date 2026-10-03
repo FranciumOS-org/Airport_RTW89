@@ -26,6 +26,7 @@ oc="$EFI_MOUNT/EFI/OC"
 
 export COPYFILE_DISABLE=1
 if [ "$enable" = True ]; then
+    efi_room "$src"
     rm -rf "$oc/Kexts/AirPort_RTW89.kext"
     cp -R -X "$src" "$oc/Kexts/"
     find "$oc/Kexts/AirPort_RTW89.kext" -name '._*' -delete 2>/dev/null || true

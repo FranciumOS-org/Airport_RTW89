@@ -58,3 +58,22 @@ find_efi() {
     fi
     exit 1
 }
+
+# efi_room KEXT...: stop, before anything is changed, unless the EFI volume
+# ($EFI_MOUNT, with OpenCore's Kexts in $oc/Kexts) can take these kexts in
+# place of the copies of them already there, plus $EFI_EXTRA_KB and 1 MB to
+# spare. The driver carries every chip's firmware, about 12 MB.
+efi_room() {
+    need=$((${EFI_EXTRA_KB:-0} + 1024))
+    for k; do
+        name="$(basename "$k")"
+        need=$((need + $(du -sk "$k" | cut -f1)))
+        [ -d "$oc/Kexts/$name" ] && need=$((need - $(du -sk "$oc/Kexts/$name" | cut -f1)))
+    done
+    free="$(df -k "$EFI_MOUNT" | awk 'NR == 2 { print $4 }')"
+    if [ "$free" -lt "$need" ]; then
+        echo "the EFI volume has $free KB free and this needs $need KB. Nothing was changed." >&2
+        echo "make room on it (old kexts or other operating systems' files you no longer boot) and run this again." >&2
+        exit 1
+    fi
+}

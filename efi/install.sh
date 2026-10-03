@@ -41,9 +41,17 @@ trap 'rm -f "$tmp"' EXIT
 python3 "$here/configure.py" install "$oc/config.plist" "$tmp"
 plutil -lint "$tmp" >/dev/null || { echo "the new config does not parse; nothing was changed" >&2; exit 1; }
 
-# about 6 MB go in (the Broadcom plugin inside IO80211FamilyLegacy is left out)
-free_kb="$(df -k "$EFI_MOUNT" | awk 'NR == 2 { print $4 }')"
-[ "$free_kb" -ge 8192 ] || { echo "only ${free_kb} KB free on the EFI volume; 8 MB wanted. Nothing was changed." >&2; exit 1; }
+# the old Wi-Fi stack's kexts not there yet (without the Broadcom plugin
+# inside IO80211FamilyLegacy, which is left out), then ours in place of any
+# copies of them
+EFI_EXTRA_KB=0
+for k in IOSkywalkFamily IO80211FamilyLegacy AMFIPass; do
+    [ -d "$oc/Kexts/$k.kext" ] && continue
+    kb=$(du -sk "$kit/$k.kext" | cut -f1)
+    [ -d "$kit/$k.kext/Contents/PlugIns" ] && kb=$((kb - $(du -sk "$kit/$k.kext/Contents/PlugIns" | cut -f1)))
+    EFI_EXTRA_KB=$((EFI_EXTRA_KB + kb))
+done
+efi_room "$ours/AirPortRTW89Front.kext" "$ours/AirPort_RTW89.kext"
 
 backup="$oc/config.plist.pre-airport-rtw89"
 [ -e "$backup" ] || { cp "$oc/config.plist" "$backup"; echo "saved the config as it was: $backup"; }
