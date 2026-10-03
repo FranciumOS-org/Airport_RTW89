@@ -1,14 +1,33 @@
 # AirPort_RTW89
 
-Native Wi-Fi on macOS for the **Realtek RTL8852BE** (PCI `10EC:B852`, Wi-Fi 6),
-by porting the Linux **rtw89** driver. The card shows up as Wi-Fi in macOS and
-is used from the Wi-Fi menu and System Settings like a Mac's own.
+Native Wi-Fi on macOS for **Realtek's rtw89 PCIe cards**, by porting the Linux
+**rtw89** driver. The card shows up as Wi-Fi in macOS and is used from the
+Wi-Fi menu and System Settings like a Mac's own.
 
 > **Preview (0.1.0).** It has been developed and tested on **one machine**
-> (ASUS TUF A15 FA507NU, macOS Sequoia 15.8.1). It works there every day, but
-> nobody else has run it yet. A driver bug can panic the machine: keep a way
-> to boot without it (see [Installing](#installing)). Reports from other
-> RTL8852BE owners are what this preview is for.
+> (ASUS TUF A15 FA507NU with an RTL8852BE, macOS Sequoia 15.8.1). It works
+> there every day; on every other card it has **never run on real hardware**.
+> A driver bug can panic the machine: keep a way to boot without it (see
+> [Installing](#installing)). Reports from other machines and cards are what
+> this preview is for: see [TESTING.md](TESTING.md).
+
+## Cards
+
+| Card | PCI ID (`10EC:`) | Wi-Fi | State |
+|---|---|---|---|
+| RTL8852BE | `B852`, `B85B` | 6, 2×2 | **works** (the development machine) |
+| RTL8852BTE | `B520` | 6, 2×2 | built in, untested |
+| RTL8851BE | `B851` | 6, 1×1 | built in, untested |
+| RTL8852AE | `8852`, `A85A` | 6, 2×2 | built in, untested |
+| RTL8852CE | `C852` | 6E, 2×2, 160 MHz | built in, untested; 6 GHz off (needs WPA3) |
+| RTL8922AE | `8922`, `892B` | 7, 2×2 | built in, untested; joins as Wi-Fi 6, 6 GHz off |
+| RTL8922DE | `892D`, `882D`, `895D` | 7, 2×2 | built in, untested; joins as Wi-Fi 6, 6 GHz off |
+
+All of them run the same Linux code, unmodified, with each chip's own Realtek
+firmware. To see which card you have before installing anything, run
+`sudo tools/collect_logs.sh` from this folder: `logs/system.txt` lists the
+Realtek PCI devices, the Wi-Fi card as `WLAN` or similar with `device-id=b852`
+(or another ID from the table). USB versions of these cards are not supported.
 
 ## What works
 
@@ -32,7 +51,8 @@ is used from the Wi-Fi menu and System Settings like a Mac's own.
   Transmit power follows the country the router announces; a router that
   announces none leaves the driver on Realtek's cautious worldwide limits
   (`rtw89ctl status` shows which: "tables of 00" is worldwide).
-- **6 GHz**: the RTL8852BE has none.
+- **6 GHz** is switched off (RTL8852CE, RTL8922AE/DE): every 6 GHz network
+  needs WPA3. **Wi-Fi 7** cards join as Wi-Fi 6.
 - Only **Sequoia 15.8.1** is tested. Sonoma and Tahoe are expected to work
   (the Tahoe join request is handled) but are untested.
 
@@ -48,6 +68,8 @@ is used from the Wi-Fi menu and System Settings like a Mac's own.
   the system volume is needed.
 - The development machine runs with `csr-active-config` `0xA03`; full SIP has
   not been tried.
+- Python 3, which the installer uses to edit `config.plist`: Apple's Command
+  Line Tools have it (`xcode-select --install`).
 
 ## Installing
 
@@ -74,20 +96,24 @@ is used from the Wi-Fi menu and System Settings like a Mac's own.
 sudo tools/collect_logs.sh
 ```
 
-saves the driver's own log and macOS's Wi-Fi log of this boot into `build/log/`.
-Neither contains passwords. Attach them to a report, with your machine, macOS
-version and what you did.
+saves your machine, macOS version, card, the driver's log and macOS's Wi-Fi
+log of this boot into `logs/`, and packs them into one zip to attach to a
+report (with what you did). There are no passwords in it, and MAC addresses
+are cut to their first half; network names can appear, so look before posting
+it publicly. [TESTING.md](TESTING.md) says what to try and send.
 
-`rtw89ctl status` (no sudo) shows the link: network, channel, rates, and what
-the driver hears around it. `sudo rtw89ctl log` prints the driver's log.
+`tools/rtw89ctl status` (no sudo) shows the link: network, channel, rates,
+the TX power tables, and what the driver hears around it. `sudo tools/rtw89ctl log`
+prints the driver's log.
 
 ## Building from source
 
 On macOS with the Command Line Tools:
 
 ```sh
-make fetch-firmware   # once: Realtek's firmware from linux-firmware
+make fetch-firmware   # once: Realtek's firmware for each chip, from linux-firmware
 make kext front       # build/out/AirPort_RTW89.kext and AirPortRTW89Front.kext
+make release          # the download: build/release/AirPort_RTW89-<version>.zip
 ```
 
 `make kext` first runs `make hosttest`: the same driver code in userspace
@@ -103,7 +129,7 @@ development loop.
 | `src/front/` | The front: the IO80211 controller macOS talks to, loaded by OpenCore with the old Wi-Fi stack |
 | `src/compat_rtw89/` | What Linux's rtw89 needs from Linux, written for macOS: the 802.11 association and key handshakes (MLME), the data path, cfg80211/mac80211 |
 | `src/compat/` | Linux-API shims inherited from AirPort_RTW88 |
-| `third_party/rtw89/` | Linux rtw89 for the RTL8852BE, **unmodified** |
+| `third_party/rtw89/` | Linux rtw89: the core and the PCIe chips, **unmodified** |
 | `third_party/linux-include/` | Linux 802.11 headers, unmodified |
 | `third_party/hostap/`, `third_party/mbedtls/` | For WPA3, not in use yet; unmodified |
 | `efi/` | Installing into OpenCore |

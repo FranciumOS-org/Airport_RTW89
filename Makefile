@@ -144,7 +144,7 @@ ALL_OBJS      := $(DRIVER_OBJS) $(COMPAT_OBJS) $(COMPAT89_OBJS) $(FW_OBJS) $(SAE
 # Targets                                                              #
 # ------------------------------------------------------------------ #
 
-.PHONY: front deptest all compile errors link hosttest saetest kext fetch-firmware clean
+.PHONY: front deptest all compile errors link hosttest saetest kext fetch-firmware release clean
 
 all: compile
 
@@ -354,6 +354,28 @@ fetch-firmware:
 	@curl -fsSL -m 60 --output $(FIRMWARE_DIR)/LICENCE.rtlwifi_firmware.txt \
 	    "$(FW_BASE)/LICENSES/LICENCE.rtlwifi_firmware.txt?id=$(FW_COMMIT)"
 	@cd $(FIRMWARE_DIR) && shasum -a 256 -c SHA256SUMS
+
+# A download for testers: build/release/AirPort_RTW89-<version>.zip with the
+# two kexts, the EFI scripts (not efi/tuf-a15/, this machine's own), rtw89ctl,
+# the log collector, the README, TESTING.md and the licences. The old Wi-Fi
+# stack is not Apple's to give away here: efi/kit/ stays empty (efi/README.md).
+VERSION     := $(shell /usr/libexec/PlistBuddy -c 'Print CFBundleShortVersionString' src/kext/Info.plist)
+RELEASE     := AirPort_RTW89-$(VERSION)
+RELEASE_DIR := $(BUILD_DIR)/release/$(RELEASE)
+
+release: kext front
+	@rm -rf $(RELEASE_DIR) $(BUILD_DIR)/release/$(RELEASE).zip
+	@mkdir -p $(RELEASE_DIR)/Kexts $(RELEASE_DIR)/efi/kit $(RELEASE_DIR)/tools $(RELEASE_DIR)/firmware
+	@cp -R $(BUILD_DIR)/out/AirPort_RTW89.kext $(BUILD_DIR)/out/AirPortRTW89Front.kext $(RELEASE_DIR)/Kexts/
+	@cp efi/install.sh efi/uninstall.sh efi/configure.py efi/find_efi.sh efi/README.md $(RELEASE_DIR)/efi/
+	@printf 'Put IOSkywalkFamily.kext, IO80211FamilyLegacy.kext and AMFIPass.kext here:\nsee ../README.md, "Requirements".\n' > $(RELEASE_DIR)/efi/kit/PUT-KEXTS-HERE.txt
+	@cp $(BUILD_DIR)/out/rtw89ctl tools/collect_logs.sh $(RELEASE_DIR)/tools/
+	@cp README.md TESTING.md CREDITS.md LICENSE $(RELEASE_DIR)/
+	@cp $(FIRMWARE_DIR)/LICENCE.rtlwifi_firmware.txt $(RELEASE_DIR)/firmware/
+	@git rev-parse --short HEAD > $(RELEASE_DIR)/COMMIT
+	@find $(RELEASE_DIR) -name '.DS_Store' -delete
+	@cd $(BUILD_DIR)/release && COPYFILE_DISABLE=1 zip -qry $(RELEASE).zip $(RELEASE)
+	@echo "  ZIP  $(BUILD_DIR)/release/$(RELEASE).zip ($$(du -h $(BUILD_DIR)/release/$(RELEASE).zip | cut -f1), commit $$(cat $(RELEASE_DIR)/COMMIT))"
 
 clean:
 	rm -rf $(BUILD_DIR)
