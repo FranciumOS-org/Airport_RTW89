@@ -144,7 +144,7 @@ ALL_OBJS      := $(DRIVER_OBJS) $(COMPAT_OBJS) $(COMPAT89_OBJS) $(FW_OBJS) $(SAE
 # Targets                                                              #
 # ------------------------------------------------------------------ #
 
-.PHONY: front deptest all compile errors link hosttest saetest kext fetch-firmware release clean
+.PHONY: front deptest all compile errors link hosttest saetest kext fetch-firmware bundle release clean
 
 all: compile
 
@@ -355,27 +355,45 @@ fetch-firmware:
 	    "$(FW_BASE)/LICENSES/LICENCE.rtlwifi_firmware.txt?id=$(FW_COMMIT)"
 	@cd $(FIRMWARE_DIR) && shasum -a 256 -c SHA256SUMS
 
-# A download for testers: build/release/AirPort_RTW89-<version>.zip with the
-# two kexts, the EFI scripts (not efi/tuf-a15/, this machine's own), rtw89ctl,
-# the log collector, the README, TESTING.md and the licences. The old Wi-Fi
-# stack is not Apple's to give away here: efi/kit/ stays empty (efi/README.md).
+# The kext as it is installed: the driver, with the front inside it as a
+# plugin (OpenCore loads Contents/PlugIns/ kexts as entries of their own, after
+# IO80211FamilyLegacy) and the licences that must travel with the firmware and
+# the GPL code in Contents/Resources. build/out/bundle/AirPort_RTW89.kext.
+BUNDLE := $(BUILD_DIR)/out/bundle/AirPort_RTW89.kext
+
+bundle: kext front
+	@rm -rf $(BUNDLE)
+	@mkdir -p $(dir $(BUNDLE))
+	@cp -R $(BUILD_DIR)/out/AirPort_RTW89.kext $(BUNDLE)
+	@mkdir -p $(BUNDLE)/Contents/PlugIns $(BUNDLE)/Contents/Resources
+	@cp -R $(BUILD_DIR)/out/AirPortRTW89Front.kext $(BUNDLE)/Contents/PlugIns/
+	@cp LICENSE CREDITS.md $(FIRMWARE_DIR)/LICENCE.rtlwifi_firmware.txt $(BUNDLE)/Contents/Resources/
+	@git rev-parse --short HEAD > $(BUNDLE)/Contents/Resources/COMMIT
+	@echo "  BUNDLE $(BUNDLE) (the front in Contents/PlugIns)"
+
+# The downloads: AirPort_RTW89-<version>.zip, the kext and nothing else; and
+# AirPort_RTW89-<version>-tools.zip for testers: the installer (not
+# efi/tuf-a15/, this machine's own), rtw89ctl, the log collector, README and
+# TESTING.md. The old Wi-Fi stack is not Apple's to give away here.
 VERSION     := $(shell /usr/libexec/PlistBuddy -c 'Print CFBundleShortVersionString' src/kext/Info.plist)
 RELEASE     := AirPort_RTW89-$(VERSION)
-RELEASE_DIR := $(BUILD_DIR)/release/$(RELEASE)
+TOOLS       := $(RELEASE)-tools
+TOOLS_DIR   := $(BUILD_DIR)/release/$(TOOLS)
 
-release: kext front
-	@rm -rf $(RELEASE_DIR) $(BUILD_DIR)/release/$(RELEASE).zip
-	@mkdir -p $(RELEASE_DIR)/Kexts $(RELEASE_DIR)/efi/kit $(RELEASE_DIR)/tools $(RELEASE_DIR)/firmware
-	@cp -R $(BUILD_DIR)/out/AirPort_RTW89.kext $(BUILD_DIR)/out/AirPortRTW89Front.kext $(RELEASE_DIR)/Kexts/
-	@cp efi/install.sh efi/uninstall.sh efi/configure.py efi/find_efi.sh efi/README.md $(RELEASE_DIR)/efi/
-	@printf 'Put IOSkywalkFamily.kext, IO80211FamilyLegacy.kext and AMFIPass.kext here:\nsee ../README.md, "Requirements".\n' > $(RELEASE_DIR)/efi/kit/PUT-KEXTS-HERE.txt
-	@cp $(BUILD_DIR)/out/rtw89ctl tools/collect_logs.sh $(RELEASE_DIR)/tools/
-	@cp README.md TESTING.md CREDITS.md LICENSE $(RELEASE_DIR)/
-	@cp $(FIRMWARE_DIR)/LICENCE.rtlwifi_firmware.txt $(RELEASE_DIR)/firmware/
-	@git rev-parse --short HEAD > $(RELEASE_DIR)/COMMIT
-	@find $(RELEASE_DIR) -name '.DS_Store' -delete
-	@cd $(BUILD_DIR)/release && COPYFILE_DISABLE=1 zip -qry $(RELEASE).zip $(RELEASE)
-	@echo "  ZIP  $(BUILD_DIR)/release/$(RELEASE).zip ($$(du -h $(BUILD_DIR)/release/$(RELEASE).zip | cut -f1), commit $$(cat $(RELEASE_DIR)/COMMIT))"
+release: bundle
+	@rm -rf $(BUILD_DIR)/release
+	@mkdir -p $(TOOLS_DIR)/efi/kit $(TOOLS_DIR)/tools
+	@cp -R $(BUNDLE) $(BUILD_DIR)/release/
+	@cp efi/install.sh efi/uninstall.sh efi/configure.py efi/find_efi.sh efi/README.md $(TOOLS_DIR)/efi/
+	@printf 'Put IOSkywalkFamily.kext, IO80211FamilyLegacy.kext and AMFIPass.kext here:\nsee ../README.md, "Requirements".\n' > $(TOOLS_DIR)/efi/kit/PUT-KEXTS-HERE.txt
+	@printf 'Put AirPort_RTW89.kext (from %s.zip) in this folder, next to this file.\n' $(RELEASE) > $(TOOLS_DIR)/PUT-AirPort_RTW89.kext-HERE.txt
+	@cp $(BUILD_DIR)/out/rtw89ctl tools/collect_logs.sh $(TOOLS_DIR)/tools/
+	@cp README.md TESTING.md LICENSE $(TOOLS_DIR)/
+	@find $(BUILD_DIR)/release -name '.DS_Store' -delete
+	@cd $(BUILD_DIR)/release && COPYFILE_DISABLE=1 zip -qry $(RELEASE).zip AirPort_RTW89.kext && \
+	    COPYFILE_DISABLE=1 zip -qry $(TOOLS).zip $(TOOLS)
+	@echo "  ZIP  $(BUILD_DIR)/release/$(RELEASE).zip ($$(du -h $(BUILD_DIR)/release/$(RELEASE).zip | cut -f1)): AirPort_RTW89.kext, commit $$(cat $(BUNDLE)/Contents/Resources/COMMIT)"
+	@echo "  ZIP  $(BUILD_DIR)/release/$(TOOLS).zip ($$(du -h $(BUILD_DIR)/release/$(TOOLS).zip | cut -f1))"
 
 clean:
 	rm -rf $(BUILD_DIR)
