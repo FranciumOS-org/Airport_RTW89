@@ -42,8 +42,10 @@ you are reporting.
 
 ## What to send
 
-The zip that `collect_logs.sh` names (`logs/AirPort_RTW89-report-....zip`) and
-this, filled in:
+Open an issue at <https://github.com/FranciumOS-org/Airport_RTW89/issues> titled with your card and the
+result (e.g. "RTL8852CE: no networks listed"), and attach the zip that
+`collect_logs.sh` names (`logs/AirPort_RTW89-report-....zip`) with this,
+filled in:
 
 ```
 Card:            (e.g. RTL8852CE, 10ec:c852)
