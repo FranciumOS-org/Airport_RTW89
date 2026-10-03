@@ -292,7 +292,7 @@ How it is put together, because of two things found on the way:
   behaves as before. Only a change to the front needs a restart.
 - OpenCore itself boots from a USB stick macOS cannot read; a second copy on
   the internal EFI partition is the one that carries the front
-  (`efi/install_internal.sh`, `efi/install_front.sh`). The stick is the way
+  (`efi/tuf-a15/install_internal.sh`, `efi/install_front.sh`). The stick is the way
   back.
 
 The first run double-faulted: IO80211 re-enters `apple80211Request()` from

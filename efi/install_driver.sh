@@ -1,6 +1,6 @@
 #!/bin/sh
 # Put the driver (build/out/AirPort_RTW89.kext, make kext) into the OpenCore
-# copy on the internal EFI partition and add it to config.plist, after the
+# EFI (efi/find_efi.sh; EFI=<UUID or path> picks one if there are several) and add it to config.plist, after the
 # front. Wi-Fi then comes up at boot without tools/load.sh. It takes effect at
 # the next restart.
 #
@@ -20,9 +20,9 @@ enable=True
 [ "${1:-}" = "--disable" ] && enable=False
 [ -f "$src/Contents/MacOS/AirPort_RTW89" ] || { echo "no kext at $src; run: make kext" >&2; exit 1; }
 
-. "$here/internal_efi.sh"
-internal_efi
-oc="$INTERNAL_OC"
+. "$here/find_efi.sh"
+find_efi "${EFI:-}"
+oc="$EFI_MOUNT/EFI/OC"
 
 export COPYFILE_DISABLE=1
 if [ "$enable" = True ]; then

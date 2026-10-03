@@ -1,6 +1,6 @@
 #!/bin/sh
 # Put the front kext (build/out/AirPortRTW89Front.kext, make front) into the
-# OpenCore copy on the internal EFI partition and add it to config.plist, after
+# OpenCore EFI (efi/find_efi.sh; EFI=<UUID or path> picks one if there are several) and add it to config.plist, after
 # IO80211FamilyLegacy. It takes effect at the next restart.
 #
 #   sudo efi/install_front.sh            install or update
@@ -17,9 +17,9 @@ enable=True
 [ "${1:-}" = "--disable" ] && enable=False
 [ -f "$src/Contents/MacOS/AirPortRTW89Front" ] || { echo "no kext at $src; run: make front" >&2; exit 1; }
 
-. "$here/internal_efi.sh"
-internal_efi
-oc="$INTERNAL_OC"
+. "$here/find_efi.sh"
+find_efi "${EFI:-}"
+oc="$EFI_MOUNT/EFI/OC"
 
 export COPYFILE_DISABLE=1
 rm -rf "$oc/Kexts/AirPortRTW89Front.kext"
