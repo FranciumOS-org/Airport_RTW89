@@ -21,6 +21,7 @@
 
 #ifdef KERNEL
 #include <IOKit/IOLib.h>
+#include <kern/debug.h>
 #include <sys/random.h>
 #else
 #include <stdlib.h>
@@ -110,6 +111,13 @@ void *rtw89_hostap_realloc(void *ptr, size_t size)
     return n;
 #endif
 }
+
+#ifdef KERNEL
+void rtw89_hostap_abort(void)
+{
+    panic("AirPort_RTW89: hostap buffer overflow");
+}
+#endif
 
 int rtw89_hostap_memcmp_const(const void *a, const void *b, size_t len)
 {

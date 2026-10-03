@@ -114,7 +114,25 @@ FW_OBJS       := $(BUILD_DIR)/fw/rtw88_firmware.o $(BUILD_DIR)/fw/fw_blobs.o \
 # Plain kernel C: rtw88_firmware.c is written against IOKit, not the Linux shims.
 FW_CFLAGS     := $(KEXT_FLAGS) $(LOGRING_DEF) -std=gnu11 -DKERNEL -I$(COMPAT_DIR)
 
-ALL_OBJS      := $(DRIVER_OBJS) $(COMPAT_OBJS) $(COMPAT89_OBJS) $(FW_OBJS)
+# WPA3: hostap's SAE code on Mbed TLS (third_party/), adapted by
+# src/compat_rtw89/rtw89_hostap.c and the stand-in headers in hostap/.
+SAE_INC  := -I$(COMPAT89_DIR)/hostap -I$(PROJ_ROOT)/third_party/hostap/src \
+            -I$(PROJ_ROOT)/third_party/hostap/src/utils -I$(PROJ_ROOT)/third_party/hostap/src/common \
+            -I$(PROJ_ROOT)/third_party/mbedtls/include -I$(PROJ_ROOT)/third_party/mbedtls/library \
+            -I$(COMPAT89_DIR) -DMBEDTLS_CONFIG_FILE='"rtw89_mbedtls_config.h"'
+SAE_SRCS := third_party/hostap/src/common/sae.c third_party/hostap/src/common/dragonfly.c \
+            $(COMPAT89_DIR)/rtw89_wpabuf.c \
+            $(addprefix third_party/mbedtls/library/,bignum.c bignum_core.c ecp.c ecp_curves.c \
+                constant_time.c platform_util.c) \
+            $(COMPAT89_DIR)/rtw89_hostap.c
+# The same files built for the kernel: plain C with the stand-in libc headers
+# (hostap/kernel_libc) in front of the SDK's, the driver's IOLog redirect, and
+# no warnings for code that is not ours.
+SAE_KFLAGS := $(KEXT_FLAGS) $(LOGRING_DEF) -std=gnu11 -DKERNEL -w \
+              -I$(COMPAT89_DIR)/hostap/kernel_libc $(SAE_INC)
+SAE_KOBJS  := $(patsubst %.c,$(BUILD_DIR)/sae/%.o,$(notdir $(SAE_SRCS)))
+
+ALL_OBJS      := $(DRIVER_OBJS) $(COMPAT_OBJS) $(COMPAT89_OBJS) $(FW_OBJS) $(SAE_KOBJS)
 
 # ------------------------------------------------------------------ #
 # Targets                                                              #
@@ -189,18 +207,14 @@ define hostrun
 	    [ $$rc -eq 0 ] || { echo "  hosttest FAILED (exit $$rc), see $(BUILD_DIR)/log/$(3).log"; exit 1; }
 endef
 
-# WPA3: hostap's SAE code on Mbed TLS (third_party/), adapted by
-# src/compat_rtw89/rtw89_hostap.c and the stand-in headers in hostap/.
-SAE_INC  := -I$(COMPAT89_DIR)/hostap -I$(PROJ_ROOT)/third_party/hostap/src \
-            -I$(PROJ_ROOT)/third_party/hostap/src/utils -I$(PROJ_ROOT)/third_party/hostap/src/common \
-            -I$(PROJ_ROOT)/third_party/mbedtls/include -I$(PROJ_ROOT)/third_party/mbedtls/library \
-            -I$(COMPAT89_DIR) -DMBEDTLS_CONFIG_FILE='"rtw89_mbedtls_config.h"'
-SAE_SRCS := third_party/hostap/src/common/sae.c third_party/hostap/src/common/dragonfly.c \
-            third_party/hostap/src/utils/wpabuf.c \
-            $(addprefix third_party/mbedtls/library/,bignum.c bignum_core.c ecp.c ecp_curves.c \
-                constant_time.c platform_util.c) \
-            $(COMPAT89_DIR)/rtw89_hostap.c
 SAETEST  := $(BUILD_DIR)/out/sae_test
+
+vpath %.c third_party/hostap/src/common third_party/mbedtls/library $(COMPAT89_DIR)
+
+$(BUILD_DIR)/sae/%.o: %.c
+	@mkdir -p $(dir $@) $(BUILD_DIR)/log
+	@echo "  CC   sae/$*.c"
+	@$(CC) $(SAE_KFLAGS) -c $< -o $@ 2> $(BUILD_DIR)/log/sae_$*.log || { cat $(BUILD_DIR)/log/sae_$*.log >&2; exit 1; }
 
 # The SAE exchange in userspace, both sides (tools/hosttest/sae_test.c).
 saetest:
@@ -223,6 +237,10 @@ hosttest: link
 	$(call hostrun,$(HOSTTEST),00,hosttest_00)
 	$(call hostrun,$(HOSTTEST),ff,hosttest_ff)
 	$(call hostrun,$(HOSTTEST)_fakechip,00 ok,hosttest_fakechip)
+	@cc -c -O1 -g -w $(filter-out -DMBEDTLS%,$(SAE_INC)) tools/hosttest/sae_test.c -o $(BUILD_DIR)/out/sae_test_main.o
+	@cc $(ARCH) -o $(SAETEST)_kernel $(BUILD_DIR)/out/sae_test_main.o $(SAE_KOBJS) \
+	    $(BUILD_DIR)/fw/rtw89_crypto.o $(BUILD_DIR)/out/host_kernel.o
+	$(call hostrun,$(SAETEST)_kernel,,sae_test_kernel)
 
 # ------------------------------------------------------------------ #
 # Kext bundle                                                          #
