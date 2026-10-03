@@ -28,6 +28,12 @@
 			<string>AirPortRTW89Front</string>
 			<key>IOMatchCategory</key>
 			<string>AirPortRTW89Front</string>
+			<!-- Higher than the driver's: IOKit starts the two one after the
+			     other on the card, and the driver waits in start() for the
+			     front, so the front must go first whatever the order of the
+			     OpenCore entries (the plugin's comes after the driver's). -->
+			<key>IOProbeScore</key>
+			<integer>2000</integer>
 			<key>IOPCIMatch</key>
 			<string>0xb85110ec 0x885210ec 0xa85a10ec 0xb85210ec 0xb85b10ec 0xb52010ec 0xc85210ec 0x892210ec 0x892b10ec 0x892d10ec 0x882d10ec 0x895d10ec</string>
 			<key>IOProviderClass</key>
