@@ -26,8 +26,9 @@ must stay disabled**: it makes `\_SB.PCI0.GPP6.WLAN` (the RTL8852BE) report
 vendor/device 0xFFFF, so our kext could never match. Check with
 `ioreg -l | grep -i 'b852'`. The user chose native Wi-Fi through the old stack
 (IO80211FamilyLegacy + Ventura's IOSkywalkFamily + AMFIPass, Apple's IOSkywalkFamily
-blocked): see efi/README.md. EFI changes go in through `sudo efi/apply.sh`, run by the
-user (undo: `sudo efi/revert.sh`); Claude prepares, never edits the EFI.
+blocked): see efi/README.md. EFI changes go in through `sudo efi/install.sh` (or `efi/install_driver.sh`
+for a new driver build), run by the user (undo: `sudo efi/uninstall.sh`); Claude prepares,
+never edits the EFI. The EFI is found by efi/find_efi.sh, never by a fixed disk number.
 
 ## Workflow
 

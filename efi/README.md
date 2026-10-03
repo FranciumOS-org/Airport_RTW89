@@ -1,8 +1,9 @@
-# The old Wi-Fi stack in the EFI
+# Installing into the OpenCore EFI
 
-For the card to show up as Wi-Fi in macOS (menu, System Settings), the kext has
-to be a driver for Apple's IO80211 family as it was up to Ventura. Sonoma and
-later ship a different one, so OpenCore puts the old one back:
+For the card to show up as Wi-Fi in macOS (menu, System Settings), the driver
+has to work with Apple's IO80211 family as it was up to Ventura. Sonoma and
+later ship a different one, so OpenCore puts the old one back, and with it
+this project's two kexts:
 
 | What | Where it goes | From |
 |---|---|---|
@@ -10,94 +11,56 @@ later ship a different one, so OpenCore puts the old one back:
 | `IO80211FamilyLegacy.kext` | `EFI/OC/Kexts`, `Kernel -> Add` | same folder, `IO80211FamilyLegacy-v1.0.0.zip` |
 | `AMFIPass.kext` 1.4.1 | `EFI/OC/Kexts`, `Kernel -> Add`, after Lilu | `payloads/Kexts/Acidanthera/AMFIPass-v1.4.1-RELEASE.zip` |
 | block of `com.apple.iokit.IOSkywalkFamily` | `Kernel -> Block`, strategy Exclude | |
+| `AirPortRTW89Front.kext` | `EFI/OC/Kexts`, `Kernel -> Add`, after IO80211FamilyLegacy | this project |
+| `AirPort_RTW89.kext` | `EFI/OC/Kexts`, `Kernel -> Add` | this project |
 
-All four entries have MinKernel 23.0.0 (Sonoma). The `AirPortBrcmNIC.kext`
-plugin inside `IO80211FamilyLegacy.kext` is for Broadcom cards and is not
-added. `SecureBootModel` must be `Disabled`.
+All entries have MinKernel 23.0.0 (Sonoma). The `AirPortBrcmNIC.kext` plugin
+inside `IO80211FamilyLegacy.kext` is for Broadcom cards and is left out.
+`Misc -> Security -> SecureBootModel` must be `Disabled`.
 
-The kexts are not in the repository. Unpack the three archives into `efi/kit/`
-so that `efi/kit/IOSkywalkFamily.kext` and so on exist.
+Apple's kexts are not part of this project. Download the three archives from
+OpenCore Legacy Patcher's repository and unpack them into `efi/kit/`, so that
+`efi/kit/IOSkywalkFamily.kext`, `efi/kit/IO80211FamilyLegacy.kext` and
+`efi/kit/AMFIPass.kext` exist.
 
-## Applying it
-
-```sh
-sudo efi/apply.sh
-```
-
-mounts the EFI partition, saves `config.plist` as `config.plist.pre-wifistack`
-next to it, copies the kexts and adds the entries (`efi/prepare.py`, which
-touches nothing else and can be run on a copy first to see the result). Then
-restart.
-
-## Undoing it
+## Installing
 
 ```sh
-sudo efi/revert.sh
+sudo efi/install.sh
 ```
 
-puts the saved config back. If macOS does not start: boot Windows, open an
-administrator command prompt and
+finds the volume OpenCore is on (if there are several, for example an internal
+copy and a USB stick, it lists them and asks for one: pass its UUID, as in
+`sudo efi/install.sh 1234ABCD-...`, or its mount path), keeps the config as it
+was as `EFI/OC/config.plist.pre-airport-rtw89`, copies the kexts and adds the
+entries (`efi/configure.py`, which touches nothing else; it can be run on a
+copy of a config first to see the result). Then restart. Running it again
+updates the two kexts of this project.
 
+Keep a way back before the first install: a USB stick with your OpenCore EFI
+as it is now. If macOS does not start, boot from that.
+
+## Switching it off
+
+```sh
+sudo efi/uninstall.sh
 ```
-mountvol S: /S
-copy /Y S:\EFI\OC\config.plist.pre-wifistack S:\EFI\OC\config.plist
-```
+
+switches all those entries off (the files stay). From another system the
+saved `config.plist.pre-airport-rtw89` can be copied over `config.plist`.
 
 ## After the restart
 
-`kmutil showloaded | grep -i -E 'skywalk|80211|amfipass'` should list
-`com.apple.iokit.IOSkywalkFamily`, `com.apple.iokit.IO80211FamilyLegacy` and
-`com.dhinakg.AMFIPass`.
+`kmutil showloaded | grep -i -E 'skywalk|80211|amfipass|rtw89'` should list
+`com.apple.iokit.IOSkywalkFamily`, `com.apple.iokit.IO80211FamilyLegacy`,
+`com.dhinakg.AMFIPass`, `com.rtw89.front` and `com.rtw89.driver`. The driver
+waits up to 30 s at boot for the front, which waits for the injected family.
 
-## OpenCore on the internal EFI partition
+## Development
 
-On the TUF A15 OpenCore boots from a USB stick that macOS cannot read (the
-mount fails with an I/O error), so macOS cannot update it. A kext that depends
-on the injected family has to be injected too (`tools/deptest.sh` showed that
-`kmutil` will not load one from the running system), which means the EFI gets
-a new build for every test of the native driver's front. Hence a second copy
-of OpenCore where macOS can write:
+`sudo efi/install_driver.sh` and `sudo efi/install_front.sh` put a new build
+of one kext in (`EFI=<UUID or path>` picks the volume if there are several);
+`--disable` switches its entry off, to go back to loading test builds by hand
+with `tools/load.sh`. A change to the front always needs a restart.
 
-```sh
-sudo efi/install_internal.sh
-```
-
-copies `EFI/OC` from the backup on the Windows data drive to the internal EFI
-partition, with the stick's config (Wi-Fi stack added) and the three kexts. It
-writes only `EFI/OC`; Windows' and Ubuntu's files are left alone. The stick
-stays as it is: booting from it is the way back if the internal copy breaks.
-
-The firmware then needs a boot entry for `\EFI\OC\OpenCore.efi` on that
-partition. Either in the firmware setup (F2, Advanced Mode, Boot, Add New Boot
-Option, pick the internal EFI partition and that file), or from an
-administrator command prompt in Windows:
-
-```
-bcdedit /copy {bootmgr} /d "OpenCore internal"
-bcdedit /set {the-id-it-printed} path \EFI\OC\OpenCore.efi
-```
-
-and choose it from the boot menu (Esc at power-on).
-
-## The driver at boot
-
-`efi/install_front.sh` puts the front in the internal copy. Once the native
-driver is stable, the driver itself can go in too, so Wi-Fi comes up at boot
-without `tools/load.sh`:
-
-```sh
-make kext
-sudo efi/install_driver.sh
-```
-
-copies `build/out/AirPort_RTW89.kext` to `EFI/OC/Kexts` and adds it to
-`config.plist` right after the front (the previous config is kept as
-`config.plist.before-driver`). Restart for it to take effect. The driver waits
-up to 30 s at boot for the front to start, because the front waits for the
-injected Wi-Fi family; it waits only when the front's personality is in the
-catalogue, so without the front it does not hold up the boot.
-
-`sudo efi/install_driver.sh --disable` switches the entry off again, for going
-back to loading test builds by hand. Each new build needs the script run again
-and a restart. If the driver stops macOS starting, boot from the USB stick,
-which has neither the front nor the driver.
+`efi/tuf-a15/` holds scripts for the machine this port is developed on only.

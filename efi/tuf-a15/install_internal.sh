@@ -17,7 +17,7 @@ set -eu
 here="$(cd "$(dirname "$0")" && pwd)"
 backup="${1:-/Volumes/Extra Storage/mac development/setup/EFI-TUF-A15-working}"
 part="${3:-BC5C5FBD-D3C3-42BD-AE73-558AE9D9D5A5}"   # the internal EFI partition, by UUID (disk numbers change)
-kit="$here/kit"
+kit="$here/../kit"
 
 [ -f "$backup/EFI/OC/OpenCore.efi" ] || { echo "no EFI/OC/OpenCore.efi under $backup" >&2; exit 1; }
 perl -e 'alarm 90; exec @ARGV' diskutil mount "$part" >/dev/null

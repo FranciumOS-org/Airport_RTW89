@@ -14,7 +14,7 @@ set -eu
 here="$(cd "$(dirname "$0")" && pwd)"
 config="${1:-/Volumes/Extra Storage/mac development/setup/EFI-TUF-A15-working/EFI/OC/config.plist}"
 dest="${2:-/Volumes/NO NAME/rtw89-wifistack}"
-kit="$here/kit"
+kit="$here/../kit"
 
 [ -f "$config" ] || { echo "no config at $config" >&2; exit 1; }
 [ -d "$(dirname "$dest")" ] || { echo "$(dirname "$dest") is not there: mount the volume first" >&2; exit 1; }
