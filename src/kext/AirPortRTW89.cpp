@@ -677,6 +677,9 @@ void AirPort_RTW89::publishLink()
     setProperty("RTW89 Beacon Losses", link.beacon_losses, 32);
     setProperty("RTW89 Beacon Updates", link.beacon_updates, 32);
     setProperty("RTW89 Probe Acks", link.probe_acks, 32);
+    setProperty("RTW89 Scans Connected", link.scans_connected, 32);
+    setProperty("RTW89 Scan ms Connected", link.scan_ms_connected, 32);
+    setProperty("RTW89 Last Scan ms", link.last_scan_ms, 32);
     setProperty("RTW89 Rejoin", link.rejoin);
     setProperty("RTW89 Rejoining", link.rejoining);
     setProperty("RTW89 Rejoin Tries", link.rejoin_tries, 32);
