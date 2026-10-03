@@ -1,6 +1,8 @@
 #!/bin/sh
 # Download the unmodified upstream code WPA3 (SAE) is built from, at pinned
-# commits (approved by the user, 2026-10-02):
+# commits (approved by the user, 2026-10-02; the last eleven Mbed TLS headers
+# and the bignum_mod files in
+# second and third approvals the same day):
 #
 #   third_party/hostap/    hostap (wpa_supplicant/hostapd): the SAE protocol.
 #                          BSD-3-Clause.
@@ -49,6 +51,15 @@ for f in LICENSE \
          include/mbedtls/config_adjust_psa_superset_legacy.h \
          include/mbedtls/config_adjust_ssl.h include/mbedtls/config_adjust_x509.h \
          include/mbedtls/config_psa.h include/mbedtls/platform.h \
-         include/mbedtls/platform_time.h; do
+         include/mbedtls/platform_time.h \
+         library/bignum_core_invasive.h library/ecp_invasive.h \
+         include/mbedtls/constant_time.h include/mbedtls/error.h include/mbedtls/threading.h \
+         include/psa/crypto_adjust_auto_enabled.h \
+         include/psa/crypto_adjust_config_dependencies.h \
+         include/psa/crypto_adjust_config_key_pair_types.h \
+         include/psa/crypto_adjust_config_synonyms.h \
+         include/psa/crypto_config.h include/psa/crypto_legacy.h \
+         library/bignum_mod.h library/bignum_mod_raw.h library/bignum_mod_raw_invasive.h \
+         library/bignum_mod.c library/bignum_mod_raw.c; do
     mfetch $f
 done

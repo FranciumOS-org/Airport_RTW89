@@ -147,6 +147,70 @@ void rtw89_hostap_printf(int level, const char *fmt, ...)
     va_end(ap);
 }
 
+/* ------------------------------------------------------------------ */
+/*  From hostap's utils/common.c, which is not vendored                 */
+/* ------------------------------------------------------------------ */
+
+/* A memset the compiler cannot drop as a dead store. */
+static void *(*volatile memset_keep)(void *, int, size_t) = memset;
+
+void forced_memzero(void *ptr, size_t len)
+{
+    memset_keep(ptr, 0, len);
+}
+
+void bin_clear_free(void *bin, size_t len)
+{
+    if (bin) {
+        forced_memzero(bin, len);
+        os_free(bin);
+    }
+}
+
+/* Shift the whole buffer, taken as one big-endian number, right by @bits (< 8). */
+void buf_shift_right(u8 *buf, size_t len, size_t bits)
+{
+    size_t i;
+
+    for (i = len - 1; i > 0; i--)
+        buf[i] = (u8)(buf[i - 1] << (8 - bits) | buf[i] >> bits);
+    buf[0] >>= bits;
+}
+
+int hex2num(char c)
+{
+    if (c >= '0' && c <= '9')
+        return c - '0';
+    if (c >= 'a' && c <= 'f')
+        return c - 'a' + 10;
+    if (c >= 'A' && c <= 'F')
+        return c - 'A' + 10;
+    return -1;
+}
+
+int hexstr2bin(const char *hex, u8 *buf, size_t len)
+{
+    size_t i;
+
+    for (i = 0; i < len; i++) {
+        int hi = hex2num(hex[2 * i]), lo = hi < 0 ? -1 : hex2num(hex[2 * i + 1]);
+
+        if (hi < 0 || lo < 0)
+            return -1;
+        buf[i] = (u8)(hi << 4 | lo);
+    }
+    return 0;
+}
+
+size_t int_array_len(const int *a)
+{
+    size_t i;
+
+    for (i = 0; a && a[i]; i++)
+        ;
+    return i;
+}
+
 /* Mbed TLS's random source, for its blinding and for crypto_bignum_rand(). */
 static int mbedtls_rng(void *ctx, unsigned char *out, size_t len)
 {
