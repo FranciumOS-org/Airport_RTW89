@@ -1739,9 +1739,12 @@ int main(int argc, char **argv)
     if (posix_memalign(&mmio, 4096, MMIO_LEN))
         return 1;
     dev.mmio_base = mmio;
+    /* another chip's PCI ID (hex), for the dead-device rounds */
+    if (argc > 3)
+        dev.device = (uint16_t)strtoul(argv[3], NULL, 16);
 
     /* Config space: IDs, capability list -> PCI Express capability at 0x70. */
-    cfg[0x00] = 0xec; cfg[0x01] = 0x10; cfg[0x02] = 0x52; cfg[0x03] = 0xb8;
+    cfg[0x00] = 0xec; cfg[0x01] = 0x10; cfg[0x02] = dev.device & 0xff; cfg[0x03] = dev.device >> 8;
     cfg[0x06] = 0x10;           /* status: capability list */
     cfg[0x34] = 0x70;
     cfg[0x70] = 0x10;           /* PCI Express */
@@ -1752,8 +1755,22 @@ int main(int argc, char **argv)
     if (ret)
         return 3;
 
-    printf("== supports 10ec:b852: %d, 10ec:c822: %d\n",
+    printf("== device 10ec:%04x; supports 10ec:b852: %d, 10ec:c822: %d\n", dev.device,
            rtw89_glue_supports(0x10ec, 0xb852), rtw89_glue_supports(0x10ec, 0xc822));
+    {
+        /* every rtw89 PCIe chip; the RTL8822CE (c822) is rtw88's */
+        static const uint16_t ids[] = { 0xb851, 0x8852, 0xa85a, 0xb852, 0xb85b, 0xb520,
+                                        0xc852, 0x8922, 0x892b, 0x892d, 0x882d, 0x895d };
+        size_t k;
+
+        for (k = 0; k < sizeof(ids) / sizeof(ids[0]); k++)
+            if (!rtw89_glue_supports(0x10ec, ids[k])) {
+                printf("== FAIL 10ec:%04x not supported\n", ids[k]);
+                failed = 1;
+            }
+        if (rtw89_glue_supports(0x10ec, 0xc822))
+            failed = 1;
+    }
 
     if (expect_ok) {
         fake_device_mmio = mmio;

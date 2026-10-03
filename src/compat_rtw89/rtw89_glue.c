@@ -409,19 +409,42 @@ static unsigned int glue_dma_reap(void)
 /*  Probe / remove                                                      */
 /* ------------------------------------------------------------------ */
 
-static const struct pci_device_id *glue_match(uint16_t vendor, uint16_t device)
-{
-    const struct pci_device_id *id = rtw89_compat_pci_driver()->id_table;
+/* The PCI front ends built in (module_pci_driver() in rtw89_compat.h). */
+#define GLUE_PCI_DRIVERS(x) \
+    x(rtw89_8851be_driver) x(rtw89_8852ae_driver) x(rtw89_8852be_driver) \
+    x(rtw89_8852bte_driver) x(rtw89_8852ce_driver) x(rtw89_8922ae_driver) \
+    x(rtw89_8922de_driver)
+#define GLUE_DECLARE(d) struct pci_driver *rtw89_compat_pci_##d(void);
+#define GLUE_ENTRY(d) rtw89_compat_pci_##d,
+GLUE_PCI_DRIVERS(GLUE_DECLARE)
+static struct pci_driver *(*const glue_pci_drivers[])(void) = {
+    GLUE_PCI_DRIVERS(GLUE_ENTRY)
+};
 
-    for (; id->vendor; id++)
-        if (id->vendor == vendor && id->device == device)
-            return id;
+/* The front end for this device and its id_table entry, or NULL. */
+static const struct pci_device_id *glue_match(uint16_t vendor, uint16_t device,
+                                              struct pci_driver **drv)
+{
+    size_t i;
+
+    for (i = 0; i < ARRAY_SIZE(glue_pci_drivers); i++) {
+        struct pci_driver *d = glue_pci_drivers[i]();
+        const struct pci_device_id *id = d->id_table;
+
+        for (; id->vendor; id++) {
+            if (id->vendor == vendor && id->device == device) {
+                if (drv)
+                    *drv = d;
+                return id;
+            }
+        }
+    }
     return NULL;
 }
 
 bool rtw89_glue_supports(uint16_t vendor, uint16_t device)
 {
-    return glue_match(vendor, device) != NULL;
+    return glue_match(vendor, device, NULL) != NULL;
 }
 
 static void glue_teardown(void)
@@ -451,6 +474,7 @@ int rtw89_glue_probe(const struct rtw89_glue_platform *platform,
                      const struct rtw89_glue_device *device)
 {
     const struct pci_device_id *id;
+    struct pci_driver *drv;
     int ret, i;
 
     if (glue.active)
@@ -459,7 +483,7 @@ int rtw89_glue_probe(const struct rtw89_glue_platform *platform,
         !platform->dma_free || !device->mmio_base || !device->mmio_len)
         return -EINVAL;
 
-    id = glue_match(device->vendor, device->device);
+    id = glue_match(device->vendor, device->device, &drv);
     if (!id)
         return -ENODEV;
 
@@ -471,7 +495,7 @@ int rtw89_glue_probe(const struct rtw89_glue_platform *platform,
     memset(&glue, 0, sizeof(glue));
     glue.active = true;
     glue.plat = *platform;
-    glue.drv = rtw89_compat_pci_driver();
+    glue.drv = drv;
     spin_lock_init(&glue.dma_lock);
     spin_lock_init(&glue.bss_lock);
     mutex_init(&glue.cmd_lock);

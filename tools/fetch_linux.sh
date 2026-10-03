@@ -43,3 +43,13 @@ for f in iface.c link.c main.c sta_info.c scan.c util.c mlme.c tx.c rx.c wpa.c k
 done
 # the project licence, as Linux ships it
 fetch LICENSES/preferred/GPL-2.0 LICENSE
+# the other rtw89 PCIe chips (the RTL8852BE's files were vendored with the core)
+rtw=drivers/net/wireless/realtek/rtw89
+for f in rtw8851b.c rtw8851b_rfk.c rtw8851b_rfk_table.c rtw8851b_table.c rtw8851be.c \
+         rtw8852a.c rtw8852a_rfk.c rtw8852a_rfk_table.c rtw8852a_table.c rtw8852ae.c \
+         rtw8852bt.c rtw8852bt_rfk.c rtw8852bt_rfk_table.c rtw8852bte.c \
+         rtw8852c.c rtw8852c_rfk.c rtw8852c_rfk_table.c rtw8852c_table.c rtw8852ce.c \
+         rtw8922a.c rtw8922a_rfk.c rtw8922ae.c \
+         rtw8922d.c rtw8922d_rfk.c rtw8922de.c; do
+    fetch $rtw/$f third_party/rtw89/$f
+done

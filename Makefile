@@ -80,9 +80,15 @@ DRIVER_CFLAGS := \
 CORE_SRCS := mac80211 mac mac_be phy phy_be fw cam efuse efuse_be \
              regd sar coex ps chan ser acpi util pci pci_be
 
-# RTL8852B chip + RTL8852BE PCIe frontend
-CHIP_SRCS := rtw8852b_common rtw8852b rtw8852b_table rtw8852b_rfk \
-             rtw8852b_rfk_table rtw8852be
+# The chips and their PCIe front ends (the USB ones are left out)
+CHIP_SRCS := rtw8851b rtw8851b_table rtw8851b_rfk rtw8851b_rfk_table rtw8851be \
+             rtw8852a rtw8852a_table rtw8852a_rfk rtw8852a_rfk_table rtw8852ae \
+             rtw8852b_common rtw8852b rtw8852b_table rtw8852b_rfk \
+             rtw8852b_rfk_table rtw8852be \
+             rtw8852bt rtw8852bt_rfk rtw8852bt_rfk_table rtw8852bte \
+             rtw8852c rtw8852c_table rtw8852c_rfk rtw8852c_rfk_table rtw8852ce \
+             rtw8922a rtw8922a_rfk rtw8922ae \
+             rtw8922d rtw8922d_rfk rtw8922de
 
 # Inherited compat runtime
 COMPAT_SRCS := $(COMPAT_DIR)/rtw88_thread_call.c \
@@ -200,6 +206,9 @@ link: compile
 HOSTTEST := $(BUILD_DIR)/out/hosttest
 HOST_OBJS := $(BUILD_DIR)/out/host_main.o $(BUILD_DIR)/out/host_kernel.o $(BUILD_DIR)/out/selftest.o
 # Runs one smoke-test binary: $(call hostrun,<binary>,<args>,<log name>)
+# PCI IDs of the chips other than the RTL8852BE (b852), one or two per family
+OTHER_CHIP_IDS := b851 8852 a85a b85b b520 c852 8922 892b 892d 882d 895d
+
 define hostrun
 	@echo "  RUN  $(1) $(2)"
 	@perl -e 'alarm 600; exec @ARGV' $(1) $(2) > $(BUILD_DIR)/log/$(3).log 2>&1; \
@@ -236,6 +245,19 @@ hosttest: link
 	    $(filter-out $(BUILD_DIR)/compat_rtw89/rtw89_core_wrap.o,$(ALL_OBJS)) -lz
 	$(call hostrun,$(HOSTTEST),00,hosttest_00)
 	$(call hostrun,$(HOSTTEST),ff,hosttest_ff)
+	@# the other chips against a dead device, side by side (each waits out
+	@# the chip's power-on timeouts): probe must fail cleanly
+	@for id in $(OTHER_CHIP_IDS); do for fill in 00 ff; do \
+	    perl -e 'alarm 600; exec @ARGV' $(HOSTTEST) $$fill dead $$id \
+	        > $(BUILD_DIR)/log/hosttest_$${id}_$$fill.log 2>&1 \
+	        || echo "  hosttest FAILED for 10ec:$$id ($$fill), see $(BUILD_DIR)/log/hosttest_$${id}_$$fill.log" \
+	        > $(BUILD_DIR)/log/hosttest_$${id}_$$fill.failed & \
+	done; done; wait
+	@for id in $(OTHER_CHIP_IDS); do \
+	    echo "  RUN  10ec:$$id dead device: probe returned $$(grep -m1 'probe returned' $(BUILD_DIR)/log/hosttest_$${id}_00.log | sed 's/.*probe returned //')"; \
+	done
+	@if ls $(BUILD_DIR)/log/hosttest_*.failed >/dev/null 2>&1; then \
+	    cat $(BUILD_DIR)/log/hosttest_*.failed; rm -f $(BUILD_DIR)/log/hosttest_*.failed; exit 1; fi
 	$(call hostrun,$(HOSTTEST)_fakechip,00 ok,hosttest_fakechip)
 	@cc -c -O1 -g -w $(filter-out -DMBEDTLS%,$(SAE_INC)) tools/hosttest/sae_test.c -o $(BUILD_DIR)/out/sae_test_main.o
 	@cc $(ARCH) -o $(SAETEST)_kernel $(BUILD_DIR)/out/sae_test_main.o $(SAE_KOBJS) \

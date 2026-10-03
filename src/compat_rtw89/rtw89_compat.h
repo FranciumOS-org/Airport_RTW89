@@ -715,14 +715,14 @@ static inline void rfkill_resume_polling(struct rfkill *rfkill) { }
 
 /*
  * There is no PCI bus core to register with. module_pci_driver() instead
- * exports the driver so the platform glue (rtw89_glue.c) can match the device
- * against its id_table and call probe/remove itself. One PCI front end
- * (rtw8852be.c) is built in, so one accessor is enough.
+ * exports each PCI front end (rtw8852be.c, rtw8852ce.c, ...) under its own
+ * name, rtw89_compat_pci_<driver>(), and the platform glue (rtw89_glue.c)
+ * matches the device against their id_tables and calls probe/remove itself.
  */
 #undef module_pci_driver
 #define module_pci_driver(__pci_driver) \
-    struct pci_driver *rtw89_compat_pci_driver(void) { return &(__pci_driver); }
-struct pci_driver *rtw89_compat_pci_driver(void);
+    struct pci_driver *rtw89_compat_pci_##__pci_driver(void); \
+    struct pci_driver *rtw89_compat_pci_##__pci_driver(void) { return &(__pci_driver); }
 
 /* Walk the PCIe extended capability list (config space 0x100 and up). */
 static inline u16 pci_find_ext_capability(struct pci_dev *dev, int cap)

@@ -1,5 +1,6 @@
 // SPDX-License-Identifier: GPL-2.0
 #include "AirPortRTW89.hpp"
+#include "rtw89_chips.h"
 
 #include <IOKit/IOLib.h>
 #include <IOKit/IOMessage.h>
@@ -170,7 +171,7 @@ const OSString *AirPort_RTW89::newVendorString() const
 
 const OSString *AirPort_RTW89::newModelString() const
 {
-    return OSString::withCString("RTL8852BE");
+    return OSString::withCString(rtw89_chip_name(_deviceID));
 }
 
 IOReturn AirPort_RTW89::getHardwareAddress(IOEthernetAddress *addr)
@@ -419,6 +420,7 @@ bool AirPort_RTW89::start(IOService *provider)
     device.subsystem_vendor = _pci->configRead16(kIOPCIConfigSubSystemVendorID);
     device.subsystem_device = _pci->configRead16(kIOPCIConfigSubSystemID);
     device.revision = _pci->configRead8(kIOPCIConfigRevisionID);
+    _deviceID = device.device;
     LOG("found %04x:%04x (subsystem %04x:%04x, rev %02x)", device.vendor, device.device,
         device.subsystem_vendor, device.subsystem_device, device.revision);
 
@@ -522,7 +524,7 @@ void AirPort_RTW89::publishInfo()
     snprintf(mac, sizeof(mac), "%02x:%02x:%02x:%02x:%02x:%02x",
              info.mac[0], info.mac[1], info.mac[2], info.mac[3], info.mac[4], info.mac[5]);
 
-    LOG("RTL8852BE cut %c, RFE type %u, %uT%uR", 'A' + info.chip_cut, info.rfe_type,
+    LOG("%s cut %c, RFE type %u, %uT%uR", rtw89_chip_name(_deviceID), 'A' + info.chip_cut, info.rfe_type,
         info.tx_streams, info.rx_streams);
     LOG("firmware %s (%08x)", info.fw_version, info.fw_commit);
     LOG("MAC address %s", mac);

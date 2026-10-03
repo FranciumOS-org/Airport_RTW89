@@ -1,5 +1,6 @@
 // SPDX-License-Identifier: GPL-2.0
 #include "AirPortRTW89Front.hpp"
+#include "../kext/rtw89_chips.h"
 
 #include <IOKit/IOCommandGate.h>
 #include <IOKit/IOLib.h>
@@ -447,7 +448,7 @@ const OSString *AirPortRTW89Front::newVendorString() const
 
 const OSString *AirPortRTW89Front::newModelString() const
 {
-    return OSString::withCString("RTL8852BE");
+    return OSString::withCString(rtw89_chip_name(_pci ? _pci->configRead16(kIOPCIConfigDeviceID) : 0));
 }
 
 IONetworkInterface *AirPortRTW89Front::createInterface()
