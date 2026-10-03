@@ -120,7 +120,7 @@ ALL_OBJS      := $(DRIVER_OBJS) $(COMPAT_OBJS) $(COMPAT89_OBJS) $(FW_OBJS)
 # Targets                                                              #
 # ------------------------------------------------------------------ #
 
-.PHONY: front deptest all compile errors link hosttest kext fetch-firmware clean
+.PHONY: front deptest all compile errors link hosttest saetest kext fetch-firmware clean
 
 all: compile
 
@@ -188,6 +188,27 @@ define hostrun
 	    rc=$$?; grep -E '^==|WARN|BUG|HOST:|mlme\]' $(BUILD_DIR)/log/$(3).log; \
 	    [ $$rc -eq 0 ] || { echo "  hosttest FAILED (exit $$rc), see $(BUILD_DIR)/log/$(3).log"; exit 1; }
 endef
+
+# WPA3: hostap's SAE code on Mbed TLS (third_party/), adapted by
+# src/compat_rtw89/rtw89_hostap.c and the stand-in headers in hostap/.
+SAE_INC  := -I$(COMPAT89_DIR)/hostap -I$(PROJ_ROOT)/third_party/hostap/src \
+            -I$(PROJ_ROOT)/third_party/hostap/src/utils -I$(PROJ_ROOT)/third_party/hostap/src/common \
+            -I$(PROJ_ROOT)/third_party/mbedtls/include -I$(PROJ_ROOT)/third_party/mbedtls/library \
+            -I$(COMPAT89_DIR) -DMBEDTLS_CONFIG_FILE='"rtw89_mbedtls_config.h"'
+SAE_SRCS := third_party/hostap/src/common/sae.c third_party/hostap/src/common/dragonfly.c \
+            third_party/hostap/src/utils/wpabuf.c \
+            $(addprefix third_party/mbedtls/library/,bignum.c bignum_core.c ecp.c ecp_curves.c \
+                constant_time.c platform_util.c) \
+            $(COMPAT89_DIR)/rtw89_hostap.c
+SAETEST  := $(BUILD_DIR)/out/sae_test
+
+# The SAE exchange in userspace, both sides (tools/hosttest/sae_test.c).
+saetest:
+	@mkdir -p $(BUILD_DIR)/out $(BUILD_DIR)/log
+	@cc -O1 -g -w $(SAE_INC) $(SAE_SRCS) $(COMPAT89_DIR)/rtw89_crypto.c tools/hosttest/sae_test.c \
+	    -o $(SAETEST) 2> $(BUILD_DIR)/log/sae_test_build.log \
+	    || { grep -E 'error' $(BUILD_DIR)/log/sae_test_build.log >&2; exit 1; }
+	$(call hostrun,$(SAETEST),,sae_test)
 
 hosttest: link
 	@cc -c -O1 -g -Wall -o $(BUILD_DIR)/out/host_kernel.o tools/hosttest/host_kernel.c
