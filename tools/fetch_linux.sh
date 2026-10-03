@@ -41,3 +41,5 @@ for f in iface.c link.c main.c sta_info.c scan.c util.c mlme.c tx.c rx.c wpa.c k
          ieee80211_i.h sta_info.h; do
     fetch net/mac80211/$f third_party/linux-reference/net/mac80211/$f
 done
+# the project licence, as Linux ships it
+fetch LICENSES/preferred/GPL-2.0 LICENSE
