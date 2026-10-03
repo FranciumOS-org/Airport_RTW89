@@ -5,3 +5,4 @@ __pycache__/
 *.d
 .DS_Store
 efi/kit/
+logs/
