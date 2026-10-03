@@ -248,9 +248,9 @@ static void rtw89_cfg80211_reg_work(struct work_struct *work)
 /*
  * The world regulatory domain ("00" in the Linux regulatory database), which
  * is what applies until a country is known: 2.4 GHz channels 1-11 as usual,
- * 12-14 and all of 5/6 GHz listen-only (NO_IR: no probe requests, no
+ * 12-14 and all of 5 GHz listen-only (NO_IR: no probe requests, no
  * beaconing), radar detection required on 5250-5730 MHz, and nothing above
- * 5835 MHz. The driver decides active vs passive scanning per channel from
+ * 5835 MHz (6 GHz included, see below). The driver decides active vs passive scanning per channel from
  * these flags.
  */
 static void rtw89_cfg80211_apply_world_regdom(struct wiphy *wiphy)
@@ -288,7 +288,12 @@ static void rtw89_cfg80211_apply_world_regdom(struct wiphy *wiphy)
                     flags |= IEEE80211_CHAN_RADAR;
                 break;
             default:
-                flags = IEEE80211_CHAN_NO_IR;
+                /* 6 GHz (RTL8852CE, RTL8922AE/DE): off. Every network there
+                 * needs WPA3, which is not in yet, and the native layer
+                 * tells the bands apart by channel number, which 6 GHz
+                 * reuses; scanning its 59 listen-only channels would only
+                 * make every scan longer. */
+                flags = IEEE80211_CHAN_DISABLED;
                 break;
             }
 
