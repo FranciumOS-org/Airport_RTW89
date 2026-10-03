@@ -27,8 +27,11 @@ is used from the Wi-Fi menu and System Settings like a Mac's own.
 - **Sleep and wake**: the driver handles it, but it has not been tested on
   hardware (the development machine does not really sleep).
 - **AirDrop, AWDL, Continuity** over Wi-Fi.
-- **2.4 GHz uploads are slow** (about 11 Mb/s measured, against 66 Mb/s on 5 GHz
-  on the same router): use 5 GHz where you can.
+- **Range is still short of Windows**: two rooms from the router, 90 Mb/s on
+  5 GHz (peaks of 180) and 50 Mb/s on 2.4 GHz, where Windows gets about 200.
+  Transmit power follows the country the router announces; a router that
+  announces none leaves the driver on Realtek's cautious worldwide limits
+  (`rtw89ctl status` shows which: "tables of 00" is worldwide).
 - **6 GHz**: the RTL8852BE has none.
 - Only **Sequoia 15.8.1** is tested. Sonoma and Tahoe are expected to work
   (the Tahoe join request is handled) but are untested.
