@@ -95,6 +95,10 @@ static struct {
     unsigned int rejoin_tries;          /* attempts since the connection was lost */
     u32 rejoins;                        /* times it came back */
     unsigned long scan_started;
+    bool scan_connected;                /* the scan started while associated */
+    u32 scans_connected;
+    u32 scan_ms_connected;
+    u32 last_scan_ms;
     /* On a thread of its own: the driver's works run on the shared queue,
      * and the scan and join started from here wait for some of them. */
     struct workqueue_struct *rejoin_wq;
@@ -1022,6 +1026,9 @@ static void glue_bss_expire(void)
 static void glue_scan_done(void *ctx, bool aborted)
 {
     glue.scanning = false;
+    glue.last_scan_ms = jiffies_to_msecs(jiffies - glue.scan_started);
+    if (glue.scan_connected)
+        glue.scan_ms_connected += glue.last_scan_ms;
     if (!aborted)
         glue_bss_expire();
     IOLog("[rtw89] scan %s: %u network(s) heard\n", aborted ? "aborted" : "finished",
@@ -1370,10 +1377,13 @@ static int glue_scan_locked(void)
     glue.scan_req = sreq;
     glue.scanning = true;
     glue.scan_started = jiffies;
+    glue.scan_connected = glue.vif->cfg.assoc;
     ret = local->ops->hw_scan(hw, glue.vif, sreq);
     if (ret) {
         glue.scanning = false;
     } else {
+        if (glue.scan_connected)
+            glue.scans_connected++;
         /*
          * The list is kept through the scan, not started afresh: macOS asks
          * to join right after starting one, and an emptied list made a
@@ -1831,6 +1841,9 @@ void rtw89_glue_link(struct rtw89_glue_link *link)
     link->beacons = st.beacons;
     link->beacon_losses = st.beacon_losses;
     link->beacon_updates = st.beacon_updates;
+    link->scans_connected = glue.scans_connected;
+    link->scan_ms_connected = glue.scan_ms_connected;
+    link->last_scan_ms = glue.last_scan_ms;
     link->probe_acks = st.probe_acks;
     if (st.state == RTW89_MLME_CONNECTED) {
         struct rate_info ri;

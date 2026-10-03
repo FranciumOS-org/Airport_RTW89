@@ -283,6 +283,11 @@ struct rtw89_glue_link {
     bool     rejoining;             /* the connection was lost; trying to get it back */
     uint32_t rejoin_tries;          /* attempts so far */
     uint32_t rejoins;               /* times it came back since the driver was probed */
+
+    /* scans started while associated, and the time they took altogether */
+    uint32_t scans_connected;
+    uint32_t scan_ms_connected;
+    uint32_t last_scan_ms;          /* the latest scan, associated or not */
 };
 
 void rtw89_glue_link(struct rtw89_glue_link *link);

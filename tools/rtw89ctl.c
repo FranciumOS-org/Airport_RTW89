@@ -265,6 +265,10 @@ static void print_link(io_service_t service)
                get_long(service, CFSTR("RTW89 Probe Acks")),
                get_long(service, CFSTR("RTW89 Beacon Updates")));
     }
+    printf("%-10s %ld while connected, %ld ms scanning in all; the "
+           "latest took %ld ms\n", "scans", get_long(service, CFSTR("RTW89 Scans Connected")),
+           get_long(service, CFSTR("RTW89 Scan ms Connected")),
+           get_long(service, CFSTR("RTW89 Last Scan ms")));
     printf("%-10s %s; the connection has come back %ld time(s)\n", "rejoin",
            get_bool(service, CFSTR("RTW89 Rejoin")) ? "on" : "off",
            get_long(service, CFSTR("RTW89 Rejoins")));
