@@ -735,6 +735,26 @@ IOReturn AirPort_RTW89::setProperties(OSObject *properties)
         return kIOReturnSuccess;
     }
 
+    if (command->isEqualTo("coex")) {
+        /* the Wi-Fi/Bluetooth coexistence report, for rtw89ctl coex */
+        const size_t max = 32 * 1024;
+        char *text = static_cast<char *>(IOMallocZero(max + 1));
+        OSString *s;
+
+        if (!text)
+            return kIOReturnNoMemory;
+        IOLockLock(_commandLock);
+        text[rtw89_glue_coex_info(text, max)] = 0;
+        IOLockUnlock(_commandLock);
+        s = OSString::withCString(text);
+        IOFree(text, max + 1);
+        if (!s)
+            return kIOReturnNoMemory;
+        setProperty("RTW89 Coex", s);
+        s->release();
+        return kIOReturnSuccess;
+    }
+
     IOLockLock(_commandLock);
     if (!_probed) {
         result = kIOReturnNotReady;

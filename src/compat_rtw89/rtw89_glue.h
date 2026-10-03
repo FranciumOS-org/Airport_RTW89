@@ -100,6 +100,10 @@ void rtw89_glue_interrupt(void);
 /* Valid between a successful probe and remove. */
 bool rtw89_glue_get_info(struct rtw89_glue_info *info);
 
+/* Linux's Wi-Fi/Bluetooth coexistence report (debugfs btc_info) into @buf;
+ * returns its length, 0 if the driver has not probed. */
+size_t rtw89_glue_coex_info(char *buf, size_t max);
+
 /*
  * Radio up/down: what mac80211 does when the first interface is opened.
  * up() starts the hardware (power on, firmware, calibration, interrupts) and

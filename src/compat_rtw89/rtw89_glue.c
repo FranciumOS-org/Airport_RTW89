@@ -8,6 +8,7 @@
 #include "rtw89_glue.h"
 #include "rtw89_crypto.h"
 #include "core.h"
+#include "coex.h"
 
 void rtw88_trigger_interrupt(void);
 void rtw89_compat_debug_init(void);
@@ -690,6 +691,20 @@ bool rtw89_glue_get_info(struct rtw89_glue_info *info)
     info->tx_streams = rtwdev->hal.tx_nss;
     info->rx_streams = rtwdev->hal.rx_nss;
     return true;
+}
+
+size_t rtw89_glue_coex_info(char *buf, size_t max)
+{
+    struct ieee80211_hw *hw;
+    ssize_t n;
+
+    if (!glue.probed || !max)
+        return 0;
+    hw = pci_get_drvdata(&glue.pdev);
+    wiphy_lock(hw->wiphy);
+    n = rtw89_btc_dump_info(hw->priv, buf, max);
+    wiphy_unlock(hw->wiphy);
+    return n > 0 ? (size_t)n : 0;
 }
 
 /* ------------------------------------------------------------------ */

@@ -1579,6 +1579,15 @@ static int test_probed_device(void)
     int failures = 0, ret;
 
 #define EXPECT(cond) do { if (!(cond)) { failures++; printf("== FAIL %s\n", #cond); } } while (0)
+    {
+        /* rtw89ctl coex: the coexistence report, also into a short buffer */
+        static char report[32 * 1024];
+        size_t n = rtw89_glue_coex_info(report, sizeof(report));
+
+        EXPECT(n > 0 && n < sizeof(report) && strlen(report) == n);
+        EXPECT(strstr(report, "[BTC FEATURE SUB VER]") != NULL);
+        EXPECT(rtw89_glue_coex_info(report, 64) < 64);
+    }
     rtw89_glue_note_bss(beacon, sizeof(beacon), 2437, -60);
     rtw89_glue_note_bss(beacon, sizeof(beacon), 2437, -55);
     rtw89_glue_note_bss(beacon, 10, 2437, -40);             /* truncated: ignored */
