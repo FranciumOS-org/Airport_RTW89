@@ -1032,6 +1032,28 @@ static int test_keep(void)
            link.txpwr_limit[1]);
     EXPECT(link.txpwr_limit[0] > 29);
 
+    /* ---- connected, a scan covers a slice of the channels ---- */
+    {
+        struct rtw89_glue_bss found;
+        int k;
+
+        /* the pretend chip refuses the probe request rtw89's hw_scan sends
+         * first (-EAGAIN), so the slice is all that can be checked */
+        for (k = 0; k < 3; k++) {
+            int sret = rtw89_glue_scan();
+
+            EXPECT(sret == 0 || sret == -11);   /* Linux's EAGAIN, not macOS's 35 */
+            rtw89_glue_link(&link);
+            EXPECT(link.last_scan_channels >= 1 && link.last_scan_channels <= 8);
+            if (!sret)
+                rtw89_glue_test_scan_done();
+        }
+        printf("== connected scan: %u channel(s)\n", link.last_scan_channels);
+        /* the network we are on is still listed */
+        EXPECT(rtw89_glue_find_bss(ap_mac, &found, NULL, 0, NULL, NULL));
+        EXPECT(link.state == RTW89_GLUE_LINK_CONNECTED);
+    }
+
     /* ---- beacons ---- */
     {
         uint32_t seen, updates;

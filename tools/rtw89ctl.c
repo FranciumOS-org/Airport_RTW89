@@ -266,9 +266,11 @@ static void print_link(io_service_t service)
                get_long(service, CFSTR("RTW89 Beacon Updates")));
     }
     printf("%-10s %ld while connected, %ld ms scanning in all; the "
-           "latest took %ld ms\n", "scans", get_long(service, CFSTR("RTW89 Scans Connected")),
+           "latest took %ld ms over %ld channel(s)\n", "scans",
+           get_long(service, CFSTR("RTW89 Scans Connected")),
            get_long(service, CFSTR("RTW89 Scan ms Connected")),
-           get_long(service, CFSTR("RTW89 Last Scan ms")));
+           get_long(service, CFSTR("RTW89 Last Scan ms")),
+           get_long(service, CFSTR("RTW89 Last Scan Channels")));
     {
         char country[8];
 
