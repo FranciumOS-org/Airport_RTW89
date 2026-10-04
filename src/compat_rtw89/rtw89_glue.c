@@ -42,6 +42,7 @@ struct rtw89_glue_dma {
 #define RTW89_GLUE_DMA_BUCKETS 256
 #define RTW89_GLUE_MAX_BSS 128
 #define RTW89_GLUE_MAX_IES 1024
+#define GLUE_SCAN_SLICE 8               /* channels per scan while connected */
 
 /* A network heard in a scan: what callers see plus what a join needs. */
 struct rtw89_glue_bss_entry {
@@ -97,6 +98,8 @@ static struct {
     u32 rejoins;                        /* times it came back */
     unsigned long scan_started;
     bool scan_connected;                /* the scan started while associated */
+    unsigned int scan_slice_pos;        /* where the next connected scan starts */
+    u32 last_scan_channels;
     u32 scans_connected;
     u32 scan_ms_connected;
     u32 last_scan_ms;
@@ -1028,8 +1031,25 @@ static void glue_tx_status(void *ctx, struct sk_buff *skb)
     kfree_skb(skb);
 }
 
-/* Networks not heard for GLUE_BSS_MAX_AGE leave the list (after a scan). */
+/*
+ * After a scan, networks on the channels it covered that have not been heard
+ * for GLUE_BSS_MAX_AGE leave the list. Connected scans cover a few channels
+ * each (GLUE_SCAN_SLICE), so the others' networks stay until their turn, or
+ * at most GLUE_BSS_MAX_AGE_ANY.
+ */
 #define GLUE_BSS_MAX_AGE (90 * HZ)
+#define GLUE_BSS_MAX_AGE_ANY (10 * 60 * HZ)
+
+static bool glue_scanned_freq(u16 freq)
+{
+    const struct cfg80211_scan_request *req = glue.scan_req ? &glue.scan_req->req : NULL;
+    u32 i;
+
+    for (i = 0; req && i < req->n_channels; i++)
+        if (req->channels[i]->center_freq == freq)
+            return true;
+    return false;
+}
 
 static void glue_bss_expire(void)
 {
@@ -1037,7 +1057,11 @@ static void glue_bss_expire(void)
 
     spin_lock(&glue.bss_lock);
     while (i < glue.n_bss) {
-        if (time_after(jiffies, glue.bss[i].last_seen + GLUE_BSS_MAX_AGE)) {
+        unsigned long seen = glue.bss[i].last_seen;
+
+        if (time_after(jiffies, seen + GLUE_BSS_MAX_AGE_ANY) ||
+            (time_after(jiffies, seen + GLUE_BSS_MAX_AGE) &&
+             glue_scanned_freq(glue.bss[i].pub.freq))) {
             glue.n_bss--;
             if (i != glue.n_bss)
                 glue.bss[i] = glue.bss[glue.n_bss];
@@ -1346,6 +1370,7 @@ static int glue_scan_locked(void)
     struct cfg80211_ssid *ssid;
     struct ieee80211_hw *hw;
     unsigned int n_channels = 0;
+    unsigned int next_slice;
     u8 *ies;
     int band, i, ret;
 
@@ -1371,13 +1396,37 @@ static int glue_scan_locked(void)
     ssid = (void *)&req->channels[n_channels];
     ies = (u8 *)(ssid + 1);
 
-    for (band = 0; band < NUM_NL80211_BANDS; band++) {
-        sband = hw->wiphy->bands[band];
-        if (!sband)
-            continue;
-        for (i = 0; i < sband->n_channels; i++)
-            if (!(sband->channels[i].flags & IEEE80211_CHAN_DISABLED))
+    /*
+     * Connected, a scan covers the next GLUE_SCAN_SLICE channels only: all of
+     * them took about 5.5 s off the network's channel, and macOS asks every
+     * 30 s, which on a weak 5 GHz link was seconds of no traffic each time. A
+     * slice is about a second; the whole list comes round every few minutes,
+     * as a Mac's own background scans do. Not connected, all of them.
+     */
+    {
+        bool slice = glue.vif->cfg.assoc;
+        unsigned int k = 0, taken = 0, from = slice ? glue.scan_slice_pos : 0;
+
+        for (band = 0; band < NUM_NL80211_BANDS; band++) {
+            sband = hw->wiphy->bands[band];
+            for (i = 0; sband && i < sband->n_channels; i++) {
+                if (sband->channels[i].flags & IEEE80211_CHAN_DISABLED)
+                    continue;
+                if (k++ < from)
+                    continue;
+                if (slice && taken == GLUE_SCAN_SLICE)
+                    continue;
                 req->channels[req->n_channels++] = &sband->channels[i];
+                taken++;
+            }
+        }
+        /* k is now the number of channels: wrap round (once the scan has
+         * started, below) */
+        next_slice = slice && from + taken < k ? from + taken : 0;
+        if (!req->n_channels) {
+            kfree(sreq);
+            return -EINVAL;
+        }
     }
 
     req->ssids = ssid;          /* zero length: the wildcard SSID */
@@ -1403,10 +1452,12 @@ static int glue_scan_locked(void)
     glue.scanning = true;
     glue.scan_started = jiffies;
     glue.scan_connected = glue.vif->cfg.assoc;
+    glue.last_scan_channels = req->n_channels;
     ret = local->ops->hw_scan(hw, glue.vif, sreq);
     if (ret) {
         glue.scanning = false;
     } else {
+        glue.scan_slice_pos = next_slice;
         if (glue.scan_connected)
             glue.scans_connected++;
         /*
@@ -1885,6 +1936,7 @@ void rtw89_glue_link(struct rtw89_glue_link *link)
     link->scans_connected = glue.scans_connected;
     link->scan_ms_connected = glue.scan_ms_connected;
     link->last_scan_ms = glue.last_scan_ms;
+    link->last_scan_channels = glue.last_scan_channels;
     link->probe_acks = st.probe_acks;
     if (st.state == RTW89_MLME_CONNECTED) {
         struct rate_info ri;
