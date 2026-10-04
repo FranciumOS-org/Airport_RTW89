@@ -1,9 +1,13 @@
 #!/usr/bin/env python3
 """Set up AirPort_RTW89 in an OpenCore EFI, from macOS, Windows or Linux.
 
-    macOS:    double-click setup.command   (or: python3 setup.py)
-    Windows:  double-click setup.cmd       (or: py setup.py)
-    Linux:    python3 setup.py
+    macOS:    double-click "Kext Installer.command"
+    Windows:  double-click "Kext Installer.cmd"
+    Linux:    sh "Kext Installer.sh"
+(each installs Python 3 first if it is missing), or: python3 "Kext Installer.py"
+
+In the release this file sits next to AirPort_RTW89.kext and has efi/configure.py
+built in (make release); in the source tree it uses efi/configure.py.
 
 It asks for the EFI's config.plist (drag it into the window, or press Enter to
 look for it on mounted volumes), then, after showing what it will do and
@@ -28,8 +32,9 @@ import subprocess
 import sys
 
 HERE = os.path.dirname(os.path.abspath(__file__))
-sys.path.insert(0, os.path.join(HERE, 'efi'))
-import configure  # noqa: E402  (efi/configure.py: the config.plist changes)
+# efi/configure.py: the config.plist changes (built into the released copy)
+sys.path[:0] = [os.path.join(HERE, 'efi'), os.path.join(HERE, '..', 'efi')]
+import configure  # noqa: E402  # BUILT-IN CONFIGURE
 
 OCLP = ('https://github.com/dortania/OpenCore-Legacy-Patcher/raw/'
         'd9604c36a432eaf243ea18659ff4d208187452d7/payloads/Kexts')
@@ -48,13 +53,17 @@ def say(text=''):
     print(text, flush=True)
 
 
+def read(prompt):
+    try:
+        return input(prompt)
+    except EOFError:
+        stop('no answer')
+
+
 def ask(question, default=True):
     hint = 'Y/n' if default else 'y/N'
     while True:
-        try:
-            answer = input('%s [%s] ' % (question, hint)).strip().lower()
-        except EOFError:
-            stop('no answer')
+        answer = read('%s [%s] ' % (question, hint)).strip().lower()
         if not answer:
             return default
         if answer in ('y', 'yes'):
@@ -153,7 +162,7 @@ def try_mount():
 
 def choose_config():
     say('Drag your OpenCore config.plist into this window and press Enter,')
-    typed = input('or just press Enter to look for it on mounted volumes: ')
+    typed = read('or just press Enter to look for it on mounted volumes: ')
     if typed.strip():
         path = clean_path(typed)
         if not os.path.isfile(path):
@@ -173,7 +182,7 @@ def choose_config():
     for k, path in enumerate(found, 1):
         say('  %d. %s' % (k, path))
     while True:
-        pick = input('Which one does this machine boot from? (number) ').strip()
+        pick = read('Which one does this machine boot from? (number) ').strip()
         if pick.isdigit() and 1 <= int(pick) <= len(found):
             return found[int(pick) - 1]
 
@@ -195,7 +204,8 @@ def find_kext(name, extra=()):
     (also one folder down, where unzipping puts it), and in EXTRA."""
     downloads = os.path.join(os.path.expanduser('~'), 'Downloads')
     places = list(extra) + [HERE, os.path.join(HERE, 'efi', 'kit'),
-                            os.path.join(HERE, 'build', 'out', 'bundle'), downloads]
+                            os.path.join(HERE, '..', 'efi', 'kit'),
+                            os.path.join(HERE, '..', 'build', 'out', 'bundle'), downloads]
     for place in places:
         if not os.path.isdir(place):
             continue
@@ -253,7 +263,7 @@ def need_root(path):
 
 def main():
     global CHANGED, CONFIG
-    say('AirPort_RTW89 setup (%s, Python %s)' % (platform.system(), platform.python_version()))
+    say('AirPort_RTW89 Kext Installer (%s, Python %s)' % (platform.system(), platform.python_version()))
     say()
     if len(sys.argv) == 3 and sys.argv[1] == '--config':
         CONFIG = sys.argv[2]
@@ -279,7 +289,7 @@ def main():
     ours = find_kext('AirPort_RTW89')
     if not ours or not is_kext(os.path.join(ours, FRONT_PLUGIN), 'AirPortRTW89Front'):
         say('AirPort_RTW89.kext (from the release zip) is not next to this script or in Downloads.')
-        ours = clean_path(input('Drag AirPort_RTW89.kext in here and press Enter: '))
+        ours = clean_path(read('Drag AirPort_RTW89.kext in here and press Enter: '))
         if not is_kext(ours, 'AirPort_RTW89') or \
                 not is_kext(os.path.join(ours, FRONT_PLUGIN), 'AirPortRTW89Front'):
             stop('%s is not AirPort_RTW89.kext 0.2.0 or later (the front must be inside it)' % ours)
@@ -300,7 +310,7 @@ def main():
         for name, url in missing:
             say('  %s.kext: %s' % (name, url))
         stop('download them (each link is a zip with the kext inside), unzip them next to '
-             'this script or in Downloads, and run setup again')
+             'this script or in Downloads, and run the Kext Installer again')
 
     # what it will do
     plan = ['copy AirPort_RTW89.kext %s (%s) into %s' % (bundle_version(ours), ours, kexts)]
@@ -344,7 +354,7 @@ def main():
     stamp = datetime.datetime.now().strftime('%Y%m%d-%H%M%S')
     backup = os.path.join(oc, 'config.plist.pre-airport-rtw89')
     if os.path.exists(backup):
-        backup = os.path.join(oc, 'config.plist.before-setup-' + stamp)
+        backup = os.path.join(oc, 'config.plist.before-kext-installer-' + stamp)
     shutil.copy2(CONFIG, backup)
     say('saved the config as %s' % backup)
     CHANGED = True
@@ -384,7 +394,7 @@ def main():
     say('Done. Restart to use it; keep a USB stick that boots without this EFI at hand.')
     say('To go back: copy %s over config.plist.' % os.path.basename(backup))
     if not backup.endswith('pre-airport-rtw89'):
-        say('(config.plist.pre-airport-rtw89 is the config from before the first setup.)')
+        say('(config.plist.pre-airport-rtw89 is the config from before the first install.)')
     pause()
 
 

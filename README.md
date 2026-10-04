@@ -83,14 +83,15 @@ Realtek PCI devices, the Wi-Fi card as `WLAN` or similar with `device-id=b852`
 2. Download the three kexts of the old Wi-Fi stack from the links in
    [Requirements](#requirements) and unzip them.
 3. Put them in, one way or the other:
-   - **With setup (easiest)**, from `AirPort_RTW89-<version>-tools.zip`, on
-     macOS, Windows or Linux. Leave the downloaded kexts unzipped in your
-     Downloads folder (or next to `setup.py`), then run:
-     - macOS: double-click `setup.command` (the first time, right-click it ->
-       Open, as it comes from the internet);
-     - Windows: double-click `setup.cmd` (it asks for administrator rights:
-       the EFI partition needs them);
-     - Linux: `python3 setup.py`.
+   - **With the Kext Installer (easiest)**, which comes with the kext in
+     `AirPort_RTW89-<version>.zip`, on macOS, Windows or Linux. Unzip it, leave
+     the three downloaded kexts unzipped in your Downloads folder (or next to
+     the installer), then run:
+     - macOS: double-click `Kext Installer.command` (the first time,
+       right-click it -> Open, as it comes from the internet);
+     - Windows: double-click `Kext Installer.cmd` (it asks for administrator
+       rights: the EFI partition needs them);
+     - Linux: `sh "Kext Installer.sh"`.
 
      It asks for your `config.plist` (drag it into the window, or press Enter
      and it looks for, and offers to mount, the EFI partition), shows what it
@@ -98,8 +99,10 @@ Realtek PCI devices, the Wi-Fi card as `WLAN` or similar with `device-id=b852`
      Broadcom plugin, saves your config as `config.plist.pre-airport-rtw89`,
      puts the entries in the order they must load in, adds the Block entry,
      and offers to set SecureBootModel and, for Tahoe, `-amfipassbeta`.
-     Nothing else in your config is changed. It needs Python 3 (macOS:
-     `xcode-select --install`; Windows: python.org).
+     Nothing else in your config is changed. It needs Python 3 and installs
+     it if it is missing, after asking: Apple's Command Line Tools on macOS,
+     Python 3.12 (winget, else python.org) on Windows, the package manager's
+     on Linux.
    - **By hand**, as with any kext:
      1. Download `AirPort_RTW89.kext` (the release's
         `AirPort_RTW89-<version>.zip`); you have the other three from step 2.
@@ -121,8 +124,8 @@ Realtek PCI devices, the Wi-Fi card as `WLAN` or similar with `device-id=b852`
      5. If the same EFI also boots Ventura or older, give the four kexts
         `MinKernel` `23.0.0` too.
      6. `Misc -> Security -> SecureBootModel` must be `Disabled`.
-   - **With the shell installer** (macOS, what setup does without the
-     questions), from the tools zip: put the three kexts in its `efi/kit/` and
+   - **With the shell installer** (macOS, what the Kext Installer does
+     without the questions), from the tools zip: put the three kexts in its `efi/kit/` and
      `AirPort_RTW89.kext` in the folder itself, then
      ```sh
      sudo efi/install.sh
