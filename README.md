@@ -61,11 +61,15 @@ Realtek PCI devices, the Wi-Fi card as `WLAN` or similar with `device-id=b852`
 - A Hackintosh booting with **OpenCore**, with `Lilu.kext`.
 - `Misc -> Security -> SecureBootModel` set to `Disabled`.
 - The **old Wi-Fi stack**, which OpenCore loads in place of the one macOS ships
-  (Sonoma and later dropped what this driver needs): `IOSkywalkFamily.kext`
-  (Ventura's), `IO80211FamilyLegacy.kext` and `AMFIPass.kext`. These are
-  Apple's and the OpenCore Legacy Patcher project's, not part of this project;
-  [efi/README.md](efi/README.md) says where to download them. No root patch of
-  the system volume is needed.
+  (Sonoma and later dropped what this driver needs). Download all three from
+  OpenCore Legacy Patcher, where they are published (they are Apple's and
+  Dhinak G's, so this project does not include them):
+  - [IOSkywalkFamily.kext](https://github.com/dortania/OpenCore-Legacy-Patcher/raw/d9604c36a432eaf243ea18659ff4d208187452d7/payloads/Kexts/Wifi/IOSkywalkFamily-v1.2.0.zip) (Ventura's, v1.2.0)
+  - [IO80211FamilyLegacy.kext](https://github.com/dortania/OpenCore-Legacy-Patcher/raw/d9604c36a432eaf243ea18659ff4d208187452d7/payloads/Kexts/Wifi/IO80211FamilyLegacy-v1.0.0.zip) (v1.0.0)
+  - [AMFIPass.kext](https://github.com/dortania/OpenCore-Legacy-Patcher/raw/d9604c36a432eaf243ea18659ff4d208187452d7/payloads/Kexts/Acidanthera/AMFIPass-v1.4.1-RELEASE.zip) (v1.4.1)
+
+  Each link downloads a zip with the kext inside. No root patch of the system
+  volume is needed.
 - The development machine runs with `csr-active-config` `0xA03`; full SIP has
   not been tried.
 - Python 3, which the installer uses to edit `config.plist`: Apple's Command
@@ -76,17 +80,12 @@ Realtek PCI devices, the Wi-Fi card as `WLAN` or similar with `device-id=b852`
 1. **Keep a way back.** Copy your current OpenCore EFI to a USB stick and make
    sure you can boot from it. If macOS ever fails to start after installing,
    boot from the stick.
-2. Get the three kexts of the old Wi-Fi stack: the links are in the first
-   way below, and [efi/README.md](efi/README.md) says more about them.
+2. Download the three kexts of the old Wi-Fi stack from the links in
+   [Requirements](#requirements) and unzip them.
 3. Put them in, one way or the other:
    - **By hand**, as with any kext:
-     1. Download `AirPort_RTW89.kext` (the release's `AirPort_RTW89-<version>.zip`)
-        and the three kexts of the old Wi-Fi stack from OpenCore Legacy
-        Patcher, where they are published (they are Apple's and Dhinak G's,
-        so this project does not re-upload them):
-        [IOSkywalkFamily](https://github.com/dortania/OpenCore-Legacy-Patcher/raw/main/payloads/Kexts/Wifi/IOSkywalkFamily-v1.2.0.zip),
-        [IO80211FamilyLegacy](https://github.com/dortania/OpenCore-Legacy-Patcher/raw/main/payloads/Kexts/Wifi/IO80211FamilyLegacy-v1.0.0.zip),
-        [AMFIPass](https://github.com/dortania/OpenCore-Legacy-Patcher/raw/main/payloads/Kexts/Acidanthera/AMFIPass-v1.4.1-RELEASE.zip).
+     1. Download `AirPort_RTW89.kext` (the release's
+        `AirPort_RTW89-<version>.zip`); you have the other three from step 2.
      2. Copy the four `.kext`s into `EFI/OC/Kexts`. Delete
         `IO80211FamilyLegacy.kext/Contents/PlugIns/AirPortBrcmNIC.kext`
         (it is for Broadcom cards).
