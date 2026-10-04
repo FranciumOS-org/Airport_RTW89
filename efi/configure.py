@@ -35,6 +35,7 @@ OURS = [
     (FRONT, 'AirPortRTW89Front', 'Wi-Fi: rtw89 front (AirPort_RTW89)'),
 ]
 OLD_FRONT = 'AirPortRTW89Front.kext'     # the front as a kext of its own
+BRCM = 'IO80211FamilyLegacy.kext/Contents/PlugIns/AirPortBrcmNIC.kext'
 BLOCK_ID = 'com.apple.iokit.IOSkywalkFamily'
 
 
@@ -52,34 +53,40 @@ def install(config, changes):
     paths = [e.get('BundlePath') for e in add]
     if 'Lilu.kext' not in paths:
         sys.exit('Lilu.kext is not in Kernel -> Add; AMFIPass needs it')
-    after = paths.index('Lilu.kext')
+    ours = []
     for bundle, exe, comment in STACK + OURS:
         if bundle in paths:
             e = add[paths.index(bundle)]
             if not e.get('Enabled'):
                 e['Enabled'] = True
                 changes.append('switched on ' + bundle)
-            after = max(after, paths.index(bundle))
-            continue
-        # right after the previous one of the list, so the order holds
-        after += 1
-        add.insert(after, entry(bundle, exe, comment))
-        paths.insert(after, bundle)
-        changes.append('Kernel -> Add: ' + bundle)
-    # what each one links against must come first; the rest may be anywhere
-    # (the driver waits for the front at boot)
-    for before, later in (('Lilu.kext', 'AMFIPass.kext'),
-                          ('IOSkywalkFamily.kext', 'IO80211FamilyLegacy.kext'),
-                          ('IO80211FamilyLegacy.kext', FRONT),
-                          ('AirPort_RTW89.kext', FRONT)):
-        if paths.index(later) < paths.index(before):
-            sys.exit('%s comes before %s in Kernel -> Add; it links against it: '
-                     'fix the order by hand' % (later, before))
+        else:
+            e = entry(bundle, exe, comment)
+            changes.append('Kernel -> Add: ' + bundle)
+        ours.append(e)
+
+    # In load order right after Lilu: each must come after what it links
+    # against (AMFIPass after Lilu, IO80211FamilyLegacy after IOSkywalkFamily,
+    # the front after IO80211FamilyLegacy and after its own driver). OC Snapshot
+    # sorts AirPort_RTW89 before IO80211FamilyLegacy, and OpenCore then cannot
+    # inject the front ("Invalid Parameter").
+    old_order = [e.get('BundlePath') for e in add]
+    rest = [e for e in add if not any(e is o for o in ours)]
+    lilu = next(k for k, e in enumerate(rest) if e.get('BundlePath') == 'Lilu.kext')
+    add[:] = rest[:lilu + 1] + ours + rest[lilu + 1:]
+    # entries that were there already and have moved
+    new_order = [e.get('BundlePath') for e in add if e.get('BundlePath') in old_order]
+    if new_order != old_order:
+        changes.append('Kernel -> Add order: Lilu, ' +
+                       ', '.join(b.split('/')[-1] for b, _, _ in STACK + OURS))
 
     for e in add:
         if e.get('BundlePath') == OLD_FRONT and e.get('Enabled'):
             e['Enabled'] = False
             changes.append('switched off ' + OLD_FRONT + ' (the front is inside the driver now)')
+        if e.get('BundlePath') == BRCM and e.get('Enabled'):
+            e['Enabled'] = False
+            changes.append('switched off ' + BRCM + ' (for Broadcom cards)')
 
     for e in block:
         if e.get('Identifier') == BLOCK_ID:
@@ -95,10 +102,13 @@ def install(config, changes):
         })
         changes.append('Kernel -> Block: ' + BLOCK_ID)
 
-    security = config.get('Misc', {}).get('Security', {})
-    if security.get('SecureBootModel') != 'Disabled':
+    if secure_boot_model(config) != 'Disabled':
         print('note: Misc -> Security -> SecureBootModel is %r; the old Wi-Fi stack needs '
-              'Disabled' % security.get('SecureBootModel'))
+              'Disabled' % secure_boot_model(config))
+
+
+def secure_boot_model(config):
+    return config.get('Misc', {}).get('Security', {}).get('SecureBootModel')
 
 
 def uninstall(config, changes):
