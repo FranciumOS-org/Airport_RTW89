@@ -375,29 +375,35 @@ bundle: kext front
 	 [ "$$f" -gt "$$d" ] || { echo "  the front's IOProbeScore ($$f) must be above the driver's ($$d)"; exit 1; }
 	@echo "  BUNDLE $(BUNDLE) (the front in Contents/PlugIns)"
 
-# The downloads: AirPort_RTW89-<version>.zip, the kext and nothing else; and
-# AirPort_RTW89-<version>-tools.zip for testers: the installer (not
+# The downloads: AirPort_RTW89-<version>.zip, the kext and next to it the
+# Kext Installer (.command for macOS, .cmd for Windows, .sh for Linux, and the
+# .py they run, with efi/configure.py built in); and
+# AirPort_RTW89-<version>-tools.zip for testers: efi/install.sh (not
 # efi/tuf-a15/, this machine's own), rtw89ctl, the log collector, README and
 # TESTING.md. The old Wi-Fi stack is not Apple's to give away here.
 VERSION     := $(shell /usr/libexec/PlistBuddy -c 'Print CFBundleShortVersionString' src/kext/Info.plist)
 RELEASE     := AirPort_RTW89-$(VERSION)
 TOOLS       := $(RELEASE)-tools
 TOOLS_DIR   := $(BUILD_DIR)/release/$(TOOLS)
+KEXT_DIR    := $(BUILD_DIR)/release/$(RELEASE)
 
 release: bundle
 	@rm -rf $(BUILD_DIR)/release
-	@mkdir -p $(TOOLS_DIR)/efi/kit $(TOOLS_DIR)/tools
-	@cp -R $(BUNDLE) $(BUILD_DIR)/release/
+	@mkdir -p $(KEXT_DIR) $(TOOLS_DIR)/efi/kit $(TOOLS_DIR)/tools
+	@# the kext and, next to it, the installer for each OS
+	@cp -R $(BUNDLE) $(KEXT_DIR)/
+	@python3 tools/embed_installer.py "$(KEXT_DIR)/Kext Installer.py"
+	@cp "installer/Kext Installer.command" "installer/Kext Installer.cmd" "installer/Kext Installer.sh" $(KEXT_DIR)/
+	@chmod +x "$(KEXT_DIR)/Kext Installer.command" "$(KEXT_DIR)/Kext Installer.sh" "$(KEXT_DIR)/Kext Installer.py"
 	@cp efi/install.sh efi/uninstall.sh efi/configure.py efi/find_efi.sh efi/README.md $(TOOLS_DIR)/efi/
 	@printf 'Put IOSkywalkFamily.kext, IO80211FamilyLegacy.kext and AMFIPass.kext here:\nsee ../README.md, "Requirements".\n' > $(TOOLS_DIR)/efi/kit/PUT-KEXTS-HERE.txt
-	@printf 'Put AirPort_RTW89.kext (from %s.zip) in this folder, next to this file.\n' $(RELEASE) > $(TOOLS_DIR)/PUT-AirPort_RTW89.kext-HERE.txt
+	@printf 'Put AirPort_RTW89.kext (from %s.zip) in this folder for efi/install.sh.\n' $(RELEASE) > $(TOOLS_DIR)/PUT-AirPort_RTW89.kext-HERE.txt
 	@cp $(BUILD_DIR)/out/rtw89ctl tools/collect_logs.sh $(TOOLS_DIR)/tools/
-	@cp setup.py setup.command setup.cmd $(TOOLS_DIR)/
 	@cp README.md TESTING.md LICENSE $(TOOLS_DIR)/
 	@find $(BUILD_DIR)/release -name '.DS_Store' -delete
-	@cd $(BUILD_DIR)/release && COPYFILE_DISABLE=1 zip -qry $(RELEASE).zip AirPort_RTW89.kext && \
-	    COPYFILE_DISABLE=1 zip -qry $(TOOLS).zip $(TOOLS)
-	@echo "  ZIP  $(BUILD_DIR)/release/$(RELEASE).zip ($$(du -h $(BUILD_DIR)/release/$(RELEASE).zip | cut -f1)): AirPort_RTW89.kext, commit $$(cat $(BUNDLE)/Contents/Resources/COMMIT)"
+	@cd $(KEXT_DIR) && COPYFILE_DISABLE=1 zip -qry ../$(RELEASE).zip .
+	@cd $(BUILD_DIR)/release && COPYFILE_DISABLE=1 zip -qry $(TOOLS).zip $(TOOLS)
+	@echo "  ZIP  $(BUILD_DIR)/release/$(RELEASE).zip ($$(du -h $(BUILD_DIR)/release/$(RELEASE).zip | cut -f1)): AirPort_RTW89.kext and the Kext Installer, commit $$(cat $(BUNDLE)/Contents/Resources/COMMIT)"
 	@echo "  ZIP  $(BUILD_DIR)/release/$(TOOLS).zip ($$(du -h $(BUILD_DIR)/release/$(TOOLS).zip | cut -f1))"
 
 clean:

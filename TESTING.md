@@ -18,8 +18,9 @@ first boot on a new card to go wrong in some way: that is useful too.
    `logs/system.txt` now shows your card's PCI ID (`device-id=...` on the
    Wi-Fi line) and your macOS version. Check the card is in the table in the
    [README](README.md#cards).
-3. Install as the [README](README.md#installing) says, preferably with
-   setup (`setup.command` on macOS, `setup.cmd` on Windows), and restart.
+3. Install as the [README](README.md#installing) says, preferably with the
+   Kext Installer that comes with the kext (`Kext Installer.command` on
+   macOS, `Kext Installer.cmd` on Windows), and restart.
 
 ## What to try
 
