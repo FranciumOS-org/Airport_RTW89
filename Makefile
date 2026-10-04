@@ -392,6 +392,7 @@ release: bundle
 	@printf 'Put IOSkywalkFamily.kext, IO80211FamilyLegacy.kext and AMFIPass.kext here:\nsee ../README.md, "Requirements".\n' > $(TOOLS_DIR)/efi/kit/PUT-KEXTS-HERE.txt
 	@printf 'Put AirPort_RTW89.kext (from %s.zip) in this folder, next to this file.\n' $(RELEASE) > $(TOOLS_DIR)/PUT-AirPort_RTW89.kext-HERE.txt
 	@cp $(BUILD_DIR)/out/rtw89ctl tools/collect_logs.sh $(TOOLS_DIR)/tools/
+	@cp setup.py setup.command setup.cmd $(TOOLS_DIR)/
 	@cp README.md TESTING.md LICENSE $(TOOLS_DIR)/
 	@find $(BUILD_DIR)/release -name '.DS_Store' -delete
 	@cd $(BUILD_DIR)/release && COPYFILE_DISABLE=1 zip -qry $(RELEASE).zip AirPort_RTW89.kext && \

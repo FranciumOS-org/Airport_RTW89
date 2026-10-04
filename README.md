@@ -83,17 +83,37 @@ Realtek PCI devices, the Wi-Fi card as `WLAN` or similar with `device-id=b852`
 2. Download the three kexts of the old Wi-Fi stack from the links in
    [Requirements](#requirements) and unzip them.
 3. Put them in, one way or the other:
+   - **With setup (easiest)**, from `AirPort_RTW89-<version>-tools.zip`, on
+     macOS, Windows or Linux. Leave the downloaded kexts unzipped in your
+     Downloads folder (or next to `setup.py`), then run:
+     - macOS: double-click `setup.command` (the first time, right-click it ->
+       Open, as it comes from the internet);
+     - Windows: double-click `setup.cmd` (it asks for administrator rights:
+       the EFI partition needs them);
+     - Linux: `python3 setup.py`.
+
+     It asks for your `config.plist` (drag it into the window, or press Enter
+     and it looks for, and offers to mount, the EFI partition), shows what it
+     will do and asks before doing it: copies the kexts, leaves out the
+     Broadcom plugin, saves your config as `config.plist.pre-airport-rtw89`,
+     puts the entries in the order they must load in, adds the Block entry,
+     and offers to set SecureBootModel and, for Tahoe, `-amfipassbeta`.
+     Nothing else in your config is changed. It needs Python 3 (macOS:
+     `xcode-select --install`; Windows: python.org).
    - **By hand**, as with any kext:
      1. Download `AirPort_RTW89.kext` (the release's
         `AirPort_RTW89-<version>.zip`); you have the other three from step 2.
      2. Copy the four `.kext`s into `EFI/OC/Kexts`. Delete
         `IO80211FamilyLegacy.kext/Contents/PlugIns/AirPortBrcmNIC.kext`
         (it is for Broadcom cards).
-     3. In ProperTree, **OC Snapshot**. Check that `Kernel -> Add` has, after
-        Lilu, `IOSkywalkFamily`, `IO80211FamilyLegacy`, `AMFIPass`,
-        `AirPort_RTW89` and its plugin
-        `AirPort_RTW89.kext/Contents/PlugIns/AirPortRTW89Front.kext`, in that
-        order.
+     3. In ProperTree, **OC Snapshot**, then **check the order** of
+        `Kernel -> Add`: after Lilu, `IOSkywalkFamily`,
+        `IO80211FamilyLegacy`, `AMFIPass`, `AirPort_RTW89` and its plugin
+        `AirPort_RTW89.kext/Contents/PlugIns/AirPortRTW89Front.kext`. OC
+        Snapshot can put `AirPort_RTW89` before `IO80211FamilyLegacy`: if so,
+        drag it and its plugin below `AMFIPass`. In the wrong order
+        OpenCore cannot load the front ("Prelinked injection ...
+        AirPortRTW89Front.kext - Invalid Parameter" in its log).
      4. Add one entry to `Kernel -> Block` by hand (Snapshot does not):
         `Identifier` `com.apple.iokit.IOSkywalkFamily`, `Strategy` `Exclude`,
         `Arch` `x86_64`, `MinKernel` `23.0.0`, `Enabled` true. It keeps
@@ -101,9 +121,9 @@ Realtek PCI devices, the Wi-Fi card as `WLAN` or similar with `device-id=b852`
      5. If the same EFI also boots Ventura or older, give the four kexts
         `MinKernel` `23.0.0` too.
      6. `Misc -> Security -> SecureBootModel` must be `Disabled`.
-   - **With the installer**, from `AirPort_RTW89-<version>-tools.zip`: put the
-     three kexts in its `efi/kit/` and `AirPort_RTW89.kext` in the folder
-     itself, then
+   - **With the shell installer** (macOS, what setup does without the
+     questions), from the tools zip: put the three kexts in its `efi/kit/` and
+     `AirPort_RTW89.kext` in the folder itself, then
      ```sh
      sudo efi/install.sh
      ```
