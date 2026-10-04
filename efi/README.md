@@ -7,9 +7,9 @@ this project's kext:
 
 | What | Where it goes | From |
 |---|---|---|
-| `IOSkywalkFamily.kext` (Ventura's) | `EFI/OC/Kexts`, `Kernel -> Add` | OpenCore Legacy Patcher, `payloads/Kexts/Wifi/IOSkywalkFamily-v1.2.0.zip` |
-| `IO80211FamilyLegacy.kext` | `EFI/OC/Kexts`, `Kernel -> Add` | same folder, `IO80211FamilyLegacy-v1.0.0.zip` |
-| `AMFIPass.kext` 1.4.1 | `EFI/OC/Kexts`, `Kernel -> Add`, after Lilu | `payloads/Kexts/Acidanthera/AMFIPass-v1.4.1-RELEASE.zip` |
+| `IOSkywalkFamily.kext` (Ventura's) | `EFI/OC/Kexts`, `Kernel -> Add` | [OpenCore Legacy Patcher, IOSkywalkFamily-v1.2.0.zip](https://github.com/dortania/OpenCore-Legacy-Patcher/raw/d9604c36a432eaf243ea18659ff4d208187452d7/payloads/Kexts/Wifi/IOSkywalkFamily-v1.2.0.zip) |
+| `IO80211FamilyLegacy.kext` | `EFI/OC/Kexts`, `Kernel -> Add` | [OpenCore Legacy Patcher, IO80211FamilyLegacy-v1.0.0.zip](https://github.com/dortania/OpenCore-Legacy-Patcher/raw/d9604c36a432eaf243ea18659ff4d208187452d7/payloads/Kexts/Wifi/IO80211FamilyLegacy-v1.0.0.zip) |
+| `AMFIPass.kext` 1.4.1 | `EFI/OC/Kexts`, `Kernel -> Add`, after Lilu | [OpenCore Legacy Patcher, AMFIPass-v1.4.1-RELEASE.zip](https://github.com/dortania/OpenCore-Legacy-Patcher/raw/d9604c36a432eaf243ea18659ff4d208187452d7/payloads/Kexts/Acidanthera/AMFIPass-v1.4.1-RELEASE.zip) |
 | block of `com.apple.iokit.IOSkywalkFamily` | `Kernel -> Block`, strategy Exclude | |
 | `AirPort_RTW89.kext` | `EFI/OC/Kexts`, `Kernel -> Add`, after AMFIPass | this project |
 | its plugin `Contents/PlugIns/AirPortRTW89Front.kext` | an entry of its own, right after the driver's | (inside the driver) |
@@ -18,8 +18,8 @@ All entries have MinKernel 23.0.0 (Sonoma). The `AirPortBrcmNIC.kext` plugin
 inside `IO80211FamilyLegacy.kext` is for Broadcom cards and is left out.
 `Misc -> Security -> SecureBootModel` must be `Disabled`.
 
-Apple's kexts are not part of this project. Download the three archives from
-OpenCore Legacy Patcher's repository and unpack them into `efi/kit/`, so that
+Apple's kexts are not part of this project. Download the three archives (the
+links in the table) and, for the installer, unpack them into `efi/kit/`, so that
 `efi/kit/IOSkywalkFamily.kext`, `efi/kit/IO80211FamilyLegacy.kext` and
 `efi/kit/AMFIPass.kext` exist.
 
