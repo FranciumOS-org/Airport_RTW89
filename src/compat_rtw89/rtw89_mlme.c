@@ -109,6 +109,8 @@ static struct {
     struct wiphy_work beacon_loss_work;
     struct wiphy_work probe_work;
     struct wiphy_delayed_work probe_timeout_work;
+    struct wiphy_delayed_work bcn_mon_work;     /* see mlme_bcn_mon_work() */
+    unsigned long last_beacon;                  /* jiffies of the AP's latest beacon */
 
     /* what the AP's beacons said last */
     u32 beacon_hash;
@@ -158,6 +160,8 @@ static const u8 mlme_rsn_ie_8021x[] = {
 };
 
 #define mlme_info(fmt, ...) IOLog("[rtw89 mlme] " fmt "\n", ##__VA_ARGS__)
+
+static void mlme_bcn_mon_start(void);
 
 /* Not in mlme: it holds across stopping and starting the radio. */
 static bool mlme_he_off;
@@ -493,6 +497,7 @@ static void mlme_teardown(u16 deauth_reason)
 
     wiphy_delayed_work_cancel(mlme.hw->wiphy, &mlme.timeout_work);
     wiphy_delayed_work_cancel(mlme.hw->wiphy, &mlme.probe_timeout_work);
+    wiphy_delayed_work_cancel(mlme.hw->wiphy, &mlme.bcn_mon_work);
     wiphy_delayed_work_cancel(mlme.hw->wiphy, &mlme.csa_work);
     mlme.poll = false;
     mlme.csa_pending = false;
@@ -568,7 +573,8 @@ static void mlme_teardown(u16 deauth_reason)
     /* ieee80211_link_release_channel() */
     if (mlme.chanctx) {
         if (mlme.chanctx_assigned) {
-            ops->unassign_vif_chanctx(mlme.hw, mlme.vif, conf, mlme.chanctx);
+            if (ops->unassign_vif_chanctx)      /* as above */
+                ops->unassign_vif_chanctx(mlme.hw, mlme.vif, conf, mlme.chanctx);
             conf->chanctx_conf = NULL;
             mlme.chanctx_assigned = false;
         }
@@ -1635,6 +1641,7 @@ static void mlme_rx_assoc_resp(const struct ieee80211_mgmt *mgmt, size_t len)
      * frames can pass; data waits for the keys. How long the sign-in may take
      * (a certificate to accept, a password to type) is its business. */
     mlme_set_state(mlme.rsn && !mlme.external ? RTW89_MLME_ASSOCIATED : RTW89_MLME_CONNECTED);
+    mlme_bcn_mon_start();
     /* an AP that never starts or finishes the handshake must not leave us
      * associated without keys for ever */
     if (mlme.rsn && !mlme.external)
@@ -2470,6 +2477,40 @@ static void mlme_beacon_loss_work(struct wiphy *wiphy, struct wiphy_work *work)
     mlme_probe_send();
 }
 
+/*
+ * ieee80211_sta_conn_mon_timer(): when the driver does not watch the beacons
+ * itself (no CONNECTION_MONITOR: rtw89 sets it only when the firmware filters
+ * beacons, which the RTL8851B's and RTL8852A's do not), mac80211 does. Seven
+ * beacon intervals without one, and never less than MLME_BEACON_LOSS_MIN (a
+ * connected scan takes the radio away for about a second): probe the AP as for
+ * a reported loss, which ends the connection if it does not answer.
+ */
+#define MLME_BEACON_LOSS_COUNT 7
+#define MLME_BEACON_LOSS_MIN (3 * HZ)
+
+static void mlme_bcn_mon_work(struct wiphy *wiphy, struct wiphy_work *work)
+{
+    unsigned int tu = mlme.bss.beacon_int ? mlme.bss.beacon_int : 100;
+    unsigned long limit = max_t(unsigned long, MLME_BEACON_LOSS_MIN,
+                                msecs_to_jiffies(MLME_BEACON_LOSS_COUNT * tu * 1024 / 1000));
+
+    if (!mlme.running || mlme.state < RTW89_MLME_ASSOCIATED)
+        return;
+    if (!mlme.poll && time_after(jiffies, mlme.last_beacon + limit)) {
+        mlme.last_beacon = jiffies;     /* one round of probing at a time */
+        mlme_beacon_loss_work(wiphy, NULL);
+    }
+    wiphy_delayed_work_queue(wiphy, &mlme.bcn_mon_work, HZ);
+}
+
+static void mlme_bcn_mon_start(void)
+{
+    if (ieee80211_hw_check(mlme.hw, CONNECTION_MONITOR))
+        return;
+    mlme.last_beacon = jiffies;
+    wiphy_delayed_work_queue(mlme.hw->wiphy, &mlme.bcn_mon_work, HZ);
+}
+
 /* Any context. */
 void rtw89_mlme_beacon_loss(void)
 {
@@ -2623,6 +2664,7 @@ static void mlme_rx_beacon(const struct ieee80211_mgmt *mgmt, size_t len, u16 fr
     ies_len = len - fixed;
 
     mlme.beacons++;
+    mlme.last_beacon = jiffies;
     if (mlme.poll) {
         mlme_info("a beacon arrived: still connected");
         mlme_reset_ap_probe();
@@ -2872,6 +2914,7 @@ void rtw89_mlme_start(struct ieee80211_hw *hw, struct ieee80211_vif *vif, void (
     wiphy_work_init(&mlme.beacon_loss_work, mlme_beacon_loss_work);
     wiphy_work_init(&mlme.probe_work, mlme_probe_work);
     wiphy_delayed_work_init(&mlme.probe_timeout_work, mlme_probe_work);
+    wiphy_delayed_work_init(&mlme.bcn_mon_work, mlme_bcn_mon_work);
     wiphy_delayed_work_init(&mlme.csa_work, mlme_csa_work);
     mlme.wmm_param_set = -1;
     mlme.mu_edca_param_set = -1;
@@ -2894,6 +2937,7 @@ void rtw89_mlme_stop(void)
     wiphy_work_cancel(mlme.hw->wiphy, &mlme.beacon_loss_work);
     wiphy_work_cancel(mlme.hw->wiphy, &mlme.probe_work);
     wiphy_delayed_work_cancel(mlme.hw->wiphy, &mlme.probe_timeout_work);
+    wiphy_delayed_work_cancel(mlme.hw->wiphy, &mlme.bcn_mon_work);
     wiphy_delayed_work_cancel(mlme.hw->wiphy, &mlme.csa_work);
     wiphy_work_cancel(mlme.hw->wiphy, &mlme.ba_work);
     wiphy_delayed_work_cancel(mlme.hw->wiphy, &mlme.ba_timeout_work);
@@ -3204,7 +3248,11 @@ static int mlme_connect(const struct rtw89_mlme_bss *bss, const u8 *pmk, bool ex
         goto err;
     }
     conf->chanreq.oper = chandef;
-    ret = ops->assign_vif_chanctx(mlme.hw, mlme.vif, conf, mlme.chanctx);
+    /* drv_assign_vif_chanctx(): absent when rtw89 emulates channel contexts
+     * (RTL8851B, RTL8852A: firmware without beacon filtering), where
+     * add_chanctx has already set the channel through ->config() */
+    ret = ops->assign_vif_chanctx ?
+          ops->assign_vif_chanctx(mlme.hw, mlme.vif, conf, mlme.chanctx) : 0;
     if (ret)
         goto err;
     conf->chanctx_conf = mlme.chanctx;

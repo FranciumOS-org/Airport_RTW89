@@ -36,6 +36,7 @@ void rtw89_glue_test_rx(const uint8_t *frame, size_t len, uint16_t freq, int8_t 
                         bool decrypted);
 /* ... left waiting for the chip's status report, as the driver leaves data frames */
 void rtw89_glue_test_scan_done(void);
+void rtw89_glue_test_emulate_chanctx(void);
 void rtw89_glue_test_beacon_loss(void);
 void rtw89_glue_test_rx_parked(const uint8_t *frame, size_t len, uint16_t freq, int8_t signal,
                                bool decrypted);
@@ -121,6 +122,9 @@ static const uint8_t *ap_cur_ies = ap_ies;
 static size_t ap_cur_ies_len = sizeof(ap_ies);
 static uint16_t ap_freq = 2437;
 static const char *ap_ssid = "testnet";
+/* round 2: no CONNECTION_MONITOR, so the MLME watches the beacons itself; the
+ * pretend AP sends one only when a test does */
+static int no_conn_monitor;
 
 static void ap_select(bool five_ghz)
 {
@@ -1092,6 +1096,24 @@ static int test_keep(void)
     rtw89_glue_link(&link);
     EXPECT(link.rx_rate.kbps == 1000 && link.rx_rate.mode == 0);
 
+    /* ---- no beacons for 3 s and nobody reporting it: the MLME probes ---- */
+    if (no_conn_monitor) {
+        uint32_t losses;
+
+        ap_send_beacon();
+        rtw89_glue_link(&link);
+        losses = link.beacon_losses;
+        n = ap.null_count;
+        /* 3 s without beacons, checked every second */
+        EXPECT(wait_count(&ap.null_count, n) || wait_count(&ap.null_count, n) ||
+               wait_count(&ap.null_count, n));
+        ap_send_beacon();                           /* ... and it answers */
+        usleep(900 * 1000);
+        rtw89_glue_link(&link);
+        EXPECT(link.state == RTW89_GLUE_LINK_CONNECTED && link.beacon_losses == losses + 1);
+        printf("== beacon monitor: probed the silent AP, still connected\n");
+    }
+
     /* ---- the driver misses beacons: the AP is probed with a null frame ---- */
     n = ap.null_count;
     rtw89_glue_test_beacon_loss();
@@ -1100,7 +1122,9 @@ static int test_keep(void)
     ap_send_beacon();
     usleep(900 * 1000);
     rtw89_glue_link(&link);
-    EXPECT(link.state == RTW89_GLUE_LINK_CONNECTED && link.beacon_losses == 1);
+    EXPECT(link.state == RTW89_GLUE_LINK_CONNECTED);
+    /* with the MLME watching too, the silent pretend AP may have been missed more */
+    EXPECT(no_conn_monitor ? link.beacon_losses >= 1 : link.beacon_losses == 1);
     /* no beacon and no acknowledgement (the pretend chip reports none): the
      * connection is given up after half a second; with rejoin off that is all */
     n = ap.auth_count;
@@ -1404,12 +1428,13 @@ static int test_join(void)
     rtw89_glue_link(&link);
     EXPECT(link.last_error == -110);
 
-    /* an AP that associates us and then never starts the handshake */
+    /* an AP that associates us and then never starts the handshake (nor
+     * beacons: watching them, the MLME may give up on that first, -ENOLINK) */
     EXPECT(join_testnet(AP_PASSWORD, 0));
     EXPECT(wait_link(RTW89_GLUE_LINK_ASSOCIATED));
     EXPECT(wait_link(RTW89_GLUE_LINK_DOWN));
     rtw89_glue_link(&link);
-    EXPECT(link.last_error == -110);
+    EXPECT(link.last_error == -110 || (no_conn_monitor && link.last_error == -67));
 
     /* leave while connected; then the radio goes down while connected */
     EXPECT(join_testnet(AP_PASSWORD, 0));
@@ -1816,6 +1841,13 @@ int main(int argc, char **argv)
                    info.tx_streams, info.rx_streams);
         if (expect_ok && ret)
             failed = 1;
+        /* the second round as a chip without real channel contexts: the
+         * RTL8852AE panicked joining, calling the missing assign_vif_chanctx */
+        if (!ret && round == 2 && expect_ok) {
+            rtw89_glue_test_emulate_chanctx();
+            no_conn_monitor = 1;
+            printf("== round 2: emulated channel contexts, beacons watched by the MLME (as RTL8851B, RTL8852A)\n");
+        }
         if (!ret && test_probed_device())
             failed = 1;
 

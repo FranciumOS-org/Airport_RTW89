@@ -1089,6 +1089,23 @@ static void glue_scan_done(void *ctx, bool aborted)
         glue.plat.scan_done(glue.plat.ctx, aborted);
 }
 
+/* For the smoke test: what rtw89's core does for a chip without real channel
+ * contexts (RTL8851B, RTL8852A), so the join runs that way too. */
+void rtw89_glue_test_emulate_chanctx(void);
+void rtw89_glue_test_emulate_chanctx(void)
+{
+    struct ieee80211_ops *ops = (struct ieee80211_ops *)hw_to_local(glue_hw())->ops;
+
+    ops->add_chanctx = ieee80211_emulate_add_chanctx;
+    ops->remove_chanctx = ieee80211_emulate_remove_chanctx;
+    ops->change_chanctx = ieee80211_emulate_change_chanctx;
+    ops->switch_vif_chanctx = ieee80211_emulate_switch_vif_chanctx;
+    ops->assign_vif_chanctx = NULL;
+    ops->unassign_vif_chanctx = NULL;
+    /* nor beacon filtering in their firmware: no CONNECTION_MONITOR */
+    __clear_bit(IEEE80211_HW_CONNECTION_MONITOR, glue_hw()->flags);
+}
+
 /* For the userspace smoke test, whose pretend chip never finishes a scan. */
 void rtw89_glue_test_scan_done(void);
 void rtw89_glue_test_scan_done(void)
