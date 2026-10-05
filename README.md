@@ -21,7 +21,7 @@ Wi-Fi menu and System Settings like a Mac's own.
 | RTL8852AE | `8852`, `A85A` | 6, 2×2 | boots (one tester, Tahoe); in 0.2.1 joins failed during scans, fixed in 0.2.2 (untested on it) |
 | RTL8852CE | `C852` | 6E, 2×2, 160 MHz | built in, untested; 6 GHz off (needs WPA3) |
 | RTL8922AE | `8922`, `892B` | 7, 2×2 | built in, untested; joins as Wi-Fi 6, 6 GHz off |
-| RTL8922DE | `892D`, `882D`, `895D` | 7, 2×2 | **works** (one tester, 0.2.0); joins as Wi-Fi 6, 6 GHz off |
+| RTL8922DE | `892D`, `882D`, `895D` | 7, 2×2 | **works** (one tester, 0.2.0, Tahoe 26.4); joins as Wi-Fi 6, 6 GHz off |
 
 All of them run the same Linux code, unmodified, with each chip's own Realtek
 firmware. To see which card you have before installing anything, run
@@ -53,8 +53,9 @@ Realtek PCI devices, the Wi-Fi card as `WLAN` or similar with `device-id=b852`
   (`rtw89ctl status` shows which: "tables of 00" is worldwide).
 - **6 GHz** is switched off (RTL8852CE, RTL8922AE/DE): every 6 GHz network
   needs WPA3. **Wi-Fi 7** cards join as Wi-Fi 6.
-- Only **Sequoia 15.8.1** is tested. Sonoma and Tahoe are expected to work
-  (the Tahoe join request is handled) but are untested.
+- Tested on **Sequoia 15.8.1** (the development machine) and **Tahoe**
+  (26.4 with an RTL8922DE, working; 26.6.2 with an RTL8852AE, being
+  fixed). Sonoma is expected to work but is untested.
 
 ## Requirements
 
