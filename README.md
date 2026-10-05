@@ -18,7 +18,7 @@ Wi-Fi menu and System Settings like a Mac's own.
 | RTL8852BE | `B852`, `B85B` | 6, 2×2 | **works** (the development machine) |
 | RTL8852BTE | `B520` | 6, 2×2 | built in, untested |
 | RTL8851BE | `B851` | 6, 1×1 | built in, untested |
-| RTL8852AE | `8852`, `A85A` | 6, 2×2 | boots (one tester, Tahoe); joining panicked in 0.2.0, fixed in 0.2.1 |
+| RTL8852AE | `8852`, `A85A` | 6, 2×2 | boots (one tester, Tahoe); joining panicked in 0.2.0; the fix in 0.2.1 is untested on it |
 | RTL8852CE | `C852` | 6E, 2×2, 160 MHz | built in, untested; 6 GHz off (needs WPA3) |
 | RTL8922AE | `8922`, `892B` | 7, 2×2 | built in, untested; joins as Wi-Fi 6, 6 GHz off |
 | RTL8922DE | `892D`, `882D`, `895D` | 7, 2×2 | built in, untested; joins as Wi-Fi 6, 6 GHz off |
