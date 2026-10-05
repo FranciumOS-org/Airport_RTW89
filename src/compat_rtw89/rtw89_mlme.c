@@ -111,6 +111,7 @@ static struct {
     struct wiphy_delayed_work probe_timeout_work;
     struct wiphy_delayed_work bcn_mon_work;     /* see mlme_bcn_mon_work() */
     unsigned long last_beacon;                  /* jiffies of the AP's latest beacon */
+    u32 eapol_reports;                          /* handshake replies reported on */
 
     /* what the AP's beacons said last */
     u32 beacon_hash;
@@ -2525,6 +2526,26 @@ void rtw89_mlme_tx_status(const struct sk_buff *skb)
     const struct ieee80211_hdr *hdr = (const void *)skb->data;
     const struct ieee80211_tx_info *info = IEEE80211_SKB_CB((struct sk_buff *)skb);
 
+    if (mlme.running && skb->len >= sizeof(struct ieee80211_hdr_3addr) &&
+        ieee80211_is_data(hdr->frame_control) &&
+        (info->flags & IEEE80211_TX_CTL_REQ_TX_STATUS)) {
+        size_t off = ieee80211_hdrlen(hdr->frame_control);
+
+        /* our reply in the key handshake: acknowledged by the AP and still
+         * no next message means it did not accept it (a wrong password); not
+         * acknowledged means it did not get there */
+        if (skb->len >= off + sizeof(mlme_eapol_llc) &&
+            !memcmp(skb->data + off, mlme_eapol_llc, sizeof(mlme_eapol_llc))) {
+            bool acked = info->flags & IEEE80211_TX_STAT_ACK;
+
+            if (mlme.eapol_reports < 8) {
+                mlme.eapol_reports++;
+                mlme_info("key handshake reply %s by the AP",
+                          acked ? "acknowledged" : "NOT acknowledged");
+            }
+            return;
+        }
+    }
     if (!mlme.running || !mlme.poll || skb->len < sizeof(struct ieee80211_hdr_3addr) ||
         !ieee80211_is_any_nullfunc(hdr->frame_control) ||
         !(info->flags & IEEE80211_TX_CTL_REQ_TX_STATUS))
@@ -3227,6 +3248,7 @@ static int mlme_connect(const struct rtw89_mlme_bss *bss, const u8 *pmk, bool ex
     rtw89_data_attach(mlme.vif, mlme.sta, bss->bssid, mlme.chan->band, mlme.rsn);
     rtw89_data_set_external(mlme.external);
 
+    mlme.eapol_reports = 0;
     /* from here on mlme_teardown() cleans up */
     mlme_set_state(RTW89_MLME_AUTHENTICATING);
 

@@ -1672,6 +1672,26 @@ static int glue_join_locked(const u8 *ssid, size_t ssid_len, const u8 *bssid, co
         return -ENOENT;
 
     hw = glue_hw();
+    /*
+     * Not in the middle of a scan: the firmware is hopping over 39 channels
+     * and the AP's answer to the authentication request is missed. macOS
+     * often asks to join while its own scan runs; on chips whose channel is
+     * set through ->config() (emulated channel contexts: RTL8852A, RTL8851B)
+     * every such join failed. mac80211 never authenticates during a scan
+     * either. Cancel it and give it a moment to stop.
+     */
+    if (glue.scanning) {
+        struct rtw89_m80211_local *local = hw_to_local(hw);
+
+        wiphy_lock(hw->wiphy);
+        if (glue.scanning && local->ops->cancel_hw_scan)
+            local->ops->cancel_hw_scan(hw, glue.vif);
+        wiphy_unlock(hw->wiphy);
+        for (i = 0; i < 50 && glue.scanning; i++)
+            msleep(20);
+        if (glue.scanning)
+            IOLog("[rtw89] the scan did not stop for the join; joining anyway\n");
+    }
     wiphy_lock(hw->wiphy);
     if (glue_ext)
         ret = rtw89_mlme_connect_ext(&bss, glue_ext_rsn_ie, glue_ext_rsn_len);

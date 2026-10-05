@@ -458,8 +458,11 @@ int rtw89_data_tx(struct sk_buff *skb)
     info->control.hw_key = key;
     info->band = data.band;
     info->hw_queue = data.vif->hw_queue[ac];
-    if (eapol)
+    if (eapol) {
         info->control.flags = IEEE80211_TX_CTRL_PORT_CTRL_PROTO;
+        /* tell the MLME whether the AP acknowledged it (rtw89_mlme_tx_status) */
+        info->flags |= IEEE80211_TX_CTL_REQ_TX_STATUS;
+    }
 
     /* what the driver looks at to recognise ARP, DHCP and ICMP */
     skb->protocol = htons(type);
