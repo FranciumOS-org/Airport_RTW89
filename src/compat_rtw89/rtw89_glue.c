@@ -90,6 +90,8 @@ static struct {
         u8 ssid_len;
         bool have_pmk;
         u8 pmk[32];
+        u8 password[RTW89_GLUE_MAX_PASSWORD];  /* for SAE (WPA3-Personal) */
+        u8 password_len;
     } want;
     u8 asked_bssid[ETH_ALEN];           /* macOS's choice, when a better one was joined */
     bool rejoin_off;                    /* rtw89_glue_set_rejoin(false) */
@@ -1271,6 +1273,8 @@ static void glue_forget_network(void)
     glue.want.valid = false;
     glue.rejoining = false;
     memset(glue.want.pmk, 0, sizeof(glue.want.pmk));
+    memset(glue.want.password, 0, sizeof(glue.want.password));
+    glue.want.password_len = 0;
 }
 
 static void glue_down_locked(void);
@@ -1643,22 +1647,25 @@ static bool glue_ext;
 #define GLUE_PREFER_5G_BONUS    15      /* dB */
 
 /* Whether the key for one access point of a network works with another:
- * open with open, WPA2-PSK with WPA2-PSK, 802.1X with 802.1X. */
+ * open with open, 802.1X with 802.1X, and a password with WPA2-PSK, or with
+ * WPA3 (SAE) when the password itself is there (@sae). */
 static bool glue_same_key(const struct rtw89_glue_bss_entry *a,
-                          const struct rtw89_glue_bss_entry *b)
+                          const struct rtw89_glue_bss_entry *b, bool sae)
 {
+    const u8 personal = RTW89_GLUE_SEC_WPA2_PSK | (sae ? RTW89_GLUE_SEC_WPA3_SAE : 0);
     u8 sa = a->pub.security, sb = b->pub.security;
 
     if (!sa || !sb)
         return !sa && !sb;
-    if (sa & RTW89_GLUE_SEC_WPA2_PSK)
-        return sb & RTW89_GLUE_SEC_WPA2_PSK;
+    if (sa & personal)
+        return sb & personal;
     if (sa & RTW89_GLUE_SEC_ENTERPRISE)
         return sb & RTW89_GLUE_SEC_ENTERPRISE;
     return false;
 }
 
-static int glue_join_locked(const u8 *ssid, size_t ssid_len, const u8 *bssid, const u8 *pmk)
+static int glue_join_locked(const u8 *ssid, size_t ssid_len, const u8 *bssid, const u8 *pmk,
+                            const u8 *password, size_t password_len)
 {
     static u8 ies[RTW89_GLUE_MAX_IES];  /* under cmd_lock */
     struct rtw89_glue_bss_entry *best = NULL;
@@ -1698,7 +1705,7 @@ static int glue_join_locked(const u8 *ssid, size_t ssid_len, const u8 *bssid, co
             if (e->pub.ssid_len != ssid_len || memcmp(e->pub.ssid, ssid, ssid_len) ||
                 !e->ies_len || e->pub.freq < 5000 || e->pub.signal < GLUE_PREFER_5G_MIN ||
                 e->pub.signal + GLUE_PREFER_5G_BONUS <= best->pub.signal ||
-                !glue_same_key(best, e))
+                !glue_same_key(best, e, password_len > 0))
                 continue;
             if (!alt || e->pub.signal > alt->pub.signal)
                 alt = e;
@@ -1751,12 +1758,13 @@ static int glue_join_locked(const u8 *ssid, size_t ssid_len, const u8 *bssid, co
     if (glue_ext)
         ret = rtw89_mlme_connect_ext(&bss, glue_ext_rsn_ie, glue_ext_rsn_len);
     else
-        ret = rtw89_mlme_connect(&bss, pmk);
+        ret = rtw89_mlme_connect(&bss, pmk, password, password_len);
     wiphy_unlock(hw->wiphy);
     return ret;
 }
 
-static int glue_join_request(const u8 *ssid, size_t ssid_len, const u8 *bssid, const u8 *pmk)
+static int glue_join_request(const u8 *ssid, size_t ssid_len, const u8 *bssid, const u8 *pmk,
+                             const u8 *password, size_t password_len)
 {
     typeof(glue.want) old;
     int ret;
@@ -1786,9 +1794,12 @@ static int glue_join_request(const u8 *ssid, size_t ssid_len, const u8 *bssid, c
     glue.want.have_pmk = pmk != NULL;
     if (pmk)
         memcpy(glue.want.pmk, pmk, sizeof(glue.want.pmk));
+    if (password_len)
+        memcpy(glue.want.password, password, password_len);
+    glue.want.password_len = (u8)password_len;
     glue.want.valid = true;
 
-    ret = glue_join_locked(ssid, ssid_len, bssid, pmk);
+    ret = glue_join_locked(ssid, ssid_len, bssid, pmk, password, password_len);
     if (ret)
         glue.want = old;
     else
@@ -1816,7 +1827,9 @@ int rtw89_glue_join(const uint8_t *ssid, size_t ssid_len,
             return ret;
         have_pmk = true;
     }
-    ret = glue_join_request(ssid, ssid_len, NULL, have_pmk ? pmk : NULL);
+    ret = glue_join_request(ssid, ssid_len, NULL, have_pmk ? pmk : NULL,
+                            (const u8 *)passphrase,
+                            passphrase_len <= RTW89_GLUE_MAX_PASSWORD ? passphrase_len : 0);
     memset(pmk, 0, sizeof(pmk));
     return ret;
 }
@@ -1837,7 +1850,7 @@ int rtw89_glue_join_ext(const uint8_t *ssid, size_t ssid_len, const uint8_t *bss
     glue_ext = true;
     glue_ext_rsn_ie = rsn_ie;
     glue_ext_rsn_len = rsn_len;
-    ret = glue.up ? glue_join_locked(ssid, ssid_len, bssid, NULL) : -ENETDOWN;
+    ret = glue.up ? glue_join_locked(ssid, ssid_len, bssid, NULL, NULL, 0) : -ENETDOWN;
     glue_ext = false;
     glue_ext_rsn_ie = NULL;
     mutex_unlock(&glue.cmd_lock);
@@ -1884,7 +1897,27 @@ int rtw89_glue_join_pmk(const uint8_t *ssid, size_t ssid_len, const uint8_t *bss
         return -ENETDOWN;
     if (!ssid_len || ssid_len > IEEE80211_MAX_SSID_LEN)
         return -EINVAL;
-    return glue_join_request(ssid, ssid_len, bssid, pmk);
+    return glue_join_request(ssid, ssid_len, bssid, pmk, NULL, 0);
+}
+
+int rtw89_glue_join_password(const uint8_t *ssid, size_t ssid_len, const uint8_t *bssid,
+                             const char *password, size_t password_len)
+{
+    bool have_pmk;
+    u8 pmk[32];
+    int ret;
+
+    if (!glue.up)
+        return -ENETDOWN;
+    if (!ssid_len || ssid_len > IEEE80211_MAX_SSID_LEN || !password_len ||
+        password_len > RTW89_GLUE_MAX_PASSWORD)
+        return -EINVAL;
+    /* not every SAE password is a WPA2 passphrase: then WPA3 alone */
+    have_pmk = !glue_derive_pmk(ssid, ssid_len, password, password_len, pmk);
+    ret = glue_join_request(ssid, ssid_len, bssid, have_pmk ? pmk : NULL,
+                            (const u8 *)password, password_len);
+    memset(pmk, 0, sizeof(pmk));
+    return ret;
 }
 
 void rtw89_glue_leave(void)
@@ -1941,7 +1974,8 @@ static void glue_rejoin_work(struct work_struct *work)
     glue.rejoin_scanned = false;
     glue.rejoin_tries++;
     ret = glue_join_locked(glue.want.ssid, glue.want.ssid_len, NULL,
-                           glue.want.have_pmk ? glue.want.pmk : NULL);
+                           glue.want.have_pmk ? glue.want.pmk : NULL,
+                           glue.want.password, glue.want.password_len);
     if (ret) {
         IOLog("[rtw89] attempt %u to join \"%.*s\" again failed: %d\n", glue.rejoin_tries,
               glue.want.ssid_len, glue.want.ssid, ret);

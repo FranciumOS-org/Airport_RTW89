@@ -20,6 +20,7 @@
 
 #include "rtw89_crypto.h"
 #include "rtw89_glue.h"
+#include "rtw89_sae.h"
 
 #define MMIO_LEN (1u << 20)
 
@@ -231,6 +232,16 @@ static struct {
     uint8_t assoc_req[400];
     size_t assoc_req_len;
     volatile int auth_count;    /* authentication requests */
+    uint16_t auth_alg, auth_seq;            /* ... and the last one's */
+    uint8_t auth_body[600];
+    size_t auth_body_len;
+    /* the last protected SA Query frame from the station, decrypted here */
+    uint8_t paction[64];
+    size_t paction_len;
+    bool paction_ok;            /* its MIC verified with the pairwise key */
+    volatile int paction_count;
+    volatile int pback_count;   /* protected BlockAck frames that verified */
+    uint64_t mgmt_pn;           /* packet numbers of our protected management frames */
     volatile int null_count;    /* null data frames */
     /* BlockAck action frames from the station, by TID */
     struct {
@@ -288,8 +299,38 @@ static void ap_tx_tap(const uint8_t *frame, size_t len)
         memcpy(ap.assoc_req, frame, len);
         ap.assoc_req_len = len;
     }
-    if (frame[0] == 0xb0)
+    if (frame[0] == 0xb0) {
+        if (len >= 30 && len - 30 <= sizeof(ap.auth_body)) {
+            ap.auth_alg = (uint16_t)(frame[24] | frame[25] << 8);
+            ap.auth_seq = (uint16_t)(frame[26] | frame[27] << 8);
+            memcpy(ap.auth_body, frame + 30, len - 30);
+            ap.auth_body_len = len - 30;
+        }
         ap.auth_count++;
+    }
+    if (frame[0] == 0xd0 && prot) {                 /* protected action frame (802.11w) */
+        const uint8_t *c = frame + 24;
+        uint64_t pn = c[0] | c[1] << 8 | (uint64_t)c[4] << 16 | (uint64_t)c[5] << 24 |
+                      (uint64_t)c[6] << 32 | (uint64_t)c[7] << 40;
+
+        uint8_t body[64];
+        size_t blen = len - 40;
+        bool ok;
+
+        if (len < 24 + 8 + 2 + 8 || blen > sizeof(body))
+            return;
+        memcpy(body, frame + 32, blen);
+        ok = rtw89_ccmp_decrypt(ap.tk, frame, 24, pn, body, blen, frame + 32 + blen);
+        if (ok && body[0] == 3) {
+            ap.pback_count++;
+        } else if (!ok || body[0] == 8) {
+            memcpy(ap.paction, body, blen);
+            ap.paction_len = blen;
+            ap.paction_ok = ok;
+            ap.paction_count++;
+        }
+        return;
+    }
     if ((frame[0] & 0x4c) == 0x48) {                /* data without a body */
         ap.null_count++;
         return;
@@ -407,7 +448,10 @@ static void ap_send_key(uint16_t key_info, const uint8_t *kd, size_t kd_len, boo
     else if (kd_len)
         memcpy(k + 95, kd, kd_len);
     if (key_info & 0x0100) {
-        rtw89_hmac_sha1(ap.kck, 16, e, 4 + 95 + wrapped, mic);
+        if ((key_info & 7) == 2)
+            rtw89_hmac_sha1(ap.kck, 16, e, 4 + 95 + wrapped, mic);
+        else                            /* PSK-SHA256, SAE */
+            rtw89_aes_cmac(ap.kck, e, 4 + 95 + wrapped, mic);
         memcpy(k + 77, mic, 16);
     }
 
@@ -424,27 +468,44 @@ static int ap_check_sta_key(void)
         return -1;
     memcpy(copy, ap.eapol, ap.eapol_len);
     memset(copy + 4 + 77, 0, 16);
-    rtw89_hmac_sha1(ap.kck, 16, copy, ap.eapol_len, mic);
+    if ((ap.eapol[6] & 7) == 2)
+        rtw89_hmac_sha1(ap.kck, 16, copy, ap.eapol_len, mic);
+    else
+        rtw89_aes_cmac(ap.kck, copy, ap.eapol_len, mic);
     if (memcmp(mic, ap.eapol + 4 + 77, 16))
         return -1;
     return ap.eapol[5] << 8 | ap.eapol[6];
 }
 
+/* The EAPOL-Key descriptor version of the handshakes: 2 for WPA2-PSK, 0 for
+ * SAE (AES-CMAC MICs, keys by KDF-SHA-256); and whether message 3 carries an
+ * integrity group key (management frame protection). */
+static uint16_t ap_key_ver = 2;
+static bool ap_igtk;
+
 /* Message 3: our RSN element and the group key, encrypted with the KEK. */
 static void ap_send_msg3(const uint8_t gtk[16], int gtk_idx)
 {
-    uint8_t kd[64];
-    size_t kd_len;
+    const uint8_t *rsn = ap_find_ie(0x30);          /* the RSN element of the beacon */
+    uint8_t kd[128];
+    size_t kd_len = 2 + rsn[1];
 
-    memcpy(kd, ap_find_ie(0x30), 22);               /* the RSN element of the beacon */
-    kd[22] = 0xdd; kd[23] = 22; kd[24] = 0x00; kd[25] = 0x0f; kd[26] = 0xac; kd[27] = 1;
-    kd[28] = (uint8_t)gtk_idx; kd[29] = 0;
-    memcpy(kd + 30, gtk, 16);
-    kd_len = 46;
+    memcpy(kd, rsn, kd_len);
+    memcpy(kd + kd_len, "\xdd\x16\x00\x0f\xac\x01", 6);
+    kd[kd_len + 6] = (uint8_t)gtk_idx;
+    kd[kd_len + 7] = 0;
+    memcpy(kd + kd_len + 8, gtk, 16);
+    kd_len += 24;
+    if (ap_igtk) {
+        /* IGTK KDE: key id 4, IPN 0 */
+        memcpy(kd + kd_len, "\xdd\x1c\x00\x0f\xac\x09\x04\x00\x00\x00\x00\x00\x00\x00", 14);
+        memset(kd + kd_len + 14, 0x77, 16);
+        kd_len += 30;
+    }
     kd[kd_len++] = 0xdd;                            /* pad to a multiple of 8 */
     while (kd_len % 8)
         kd[kd_len++] = 0;
-    ap_send_key(0x13ca, kd, kd_len, false);
+    ap_send_key(0x13c8 | ap_key_ver, kd, kd_len, false);
 }
 
 /* Part of an 802.1X sign-in: an EAP request for the station's identity. */
@@ -474,13 +535,13 @@ static int ap_handshake_pmk(const uint8_t gtk[16], int gtk_idx)
     memset(ap.anonce, 0x5a, sizeof(ap.anonce));
     ap.anonce[0] = (uint8_t)ap.replay;              /* fresh per handshake */
 
-    ap_send_key(0x008a, NULL, 0, false);            /* message 1: pairwise, ack */
+    ap_send_key(0x0088 | ap_key_ver, NULL, 0, false);   /* message 1: pairwise, ack */
     if (!ap_wait_eapol(base + 1) || ap.eapol_len < 4 + 95 + 22)
         return -1;
     memcpy(ap.snonce, ap.eapol + 4 + 13, 32);
     /* our retry of message 1 crosses the answer: the station must stay with
      * the SNonce it already sent, or message 3 would not verify */
-    ap_send_key(0x008a, NULL, 0, false);
+    ap_send_key(0x0088 | ap_key_ver, NULL, 0, false);
     if (!ap_wait_eapol(base + 2) || memcmp(ap.snonce, ap.eapol + 4 + 13, 32))
         return -1;
 
@@ -489,7 +550,10 @@ static int ap_handshake_pmk(const uint8_t gtk[16], int gtk_idx)
     memcpy(data + 6, memcmp(ap_mac, sta_mac, 6) < 0 ? sta_mac : ap_mac, 6);
     memcpy(data + 12, memcmp(ap.anonce, ap.snonce, 32) < 0 ? ap.anonce : ap.snonce, 32);
     memcpy(data + 44, memcmp(ap.anonce, ap.snonce, 32) < 0 ? ap.snonce : ap.anonce, 32);
-    rtw89_sha1_prf(ap.pmk, 32, "Pairwise key expansion", data, sizeof(data), ptk, 48);
+    if (ap_key_ver == 2)
+        rtw89_sha1_prf(ap.pmk, 32, "Pairwise key expansion", data, sizeof(data), ptk, 48);
+    else
+        rtw89_kdf_sha256(ap.pmk, 32, "Pairwise key expansion", data, sizeof(data), ptk, 48);
     memcpy(ap.kck, ptk, 16);
     memcpy(ap.kek, ptk + 16, 16);
     memcpy(ap.tk, ptk + 32, 16);
@@ -497,7 +561,7 @@ static int ap_handshake_pmk(const uint8_t gtk[16], int gtk_idx)
     info = ap_check_sta_key();
     if (info < 0)
         return 1;                                   /* MIC does not verify */
-    if (info != 0x010a || ap.eapol_protected)
+    if (info != (0x0108 | ap_key_ver) || ap.eapol_protected)
         return -1;
     /* message 2 carries the RSN element from the association request */
     if (ap.eapol[4 + 93] != 0 || ap.eapol[4 + 94] != 22 || ap.eapol[4 + 95] != 0x30)
@@ -507,7 +571,7 @@ static int ap_handshake_pmk(const uint8_t gtk[16], int gtk_idx)
     if (!ap_wait_eapol(base + 3))
         return -1;
     info = ap_check_sta_key();
-    if (info != 0x030a || ap.eapol_protected)       /* message 4: pairwise, mic, secure */
+    if (info != (0x0308 | ap_key_ver) || ap.eapol_protected)   /* message 4: pairwise, mic, secure */
         return -1;
     return 0;
 }
@@ -529,13 +593,13 @@ static int ap_group_rekey(const uint8_t gtk[16], int gtk_idx)
     kd[0] = 0xdd; kd[1] = 22; kd[2] = 0x00; kd[3] = 0x0f; kd[4] = 0xac; kd[5] = 1;
     kd[6] = (uint8_t)gtk_idx; kd[7] = 0;
     memcpy(kd + 8, gtk, 16);
-    ap_send_key(0x1382, kd, 24, true);              /* ack, mic, secure, encrypted */
+    ap_send_key(0x1380 | ap_key_ver, kd, 24, true);     /* ack, mic, secure, encrypted */
 
     if (!ap_wait_eapol(base + 1))
         return -1;
     info = ap_check_sta_key();
     /* the answer is group message 2, and now it must be encrypted */
-    return info == 0x0302 && ap.eapol_protected ? 0 : -1;
+    return info == (0x0300 | ap_key_ver) && ap.eapol_protected ? 0 : -1;
 }
 
 /* ---- data frames, once connected ---- */
@@ -1367,6 +1431,301 @@ static int test_keep(void)
 }
 
 /* Join the pretend network, playing the AP's side of each exchange. */
+/* ---- WPA3-Personal: SAE, the handshake after it, protected management frames ---- */
+
+/* Wait for an authentication frame from the station after the @count-th. */
+static int ap_wait_auth(int count)
+{
+    int i;
+
+    for (i = 0; i < 200 && ap.auth_count <= count; i++)
+        usleep(25 * 1000);
+    return ap.auth_count > count;
+}
+
+static void ap_send_sae(uint16_t seq, uint16_t status, const uint8_t *body, size_t len)
+{
+    uint8_t b[6 + 256] = { 3, 0, (uint8_t)seq, (uint8_t)(seq >> 8),
+                           (uint8_t)status, (uint8_t)(status >> 8) };
+
+    memcpy(b + 6, body, len);
+    ap_send(0xb0, b, 6 + len);
+}
+
+/*
+ * The AP's side of SAE, the station's commit being the authentication frame
+ * after the @base-th: optionally first ask for an anti-clogging token, then
+ * our commit, check its confirm, our confirm. The PMK ends up in ap.pmk.
+ * Returns 0, 1 if the station's confirm does not verify (another password:
+ * the AP then says nothing), -1 if anything else is wrong.
+ */
+static int ap_sae(int base, const char *password, bool want_token)
+{
+    static const uint8_t token[8] = { 0x11, 0x22, 0x33, 0x44, 0x55, 0x66, 0x77, 0x88 };
+    struct rtw89_sae *sae;
+    uint8_t body[256], pmkid[16];
+    int n, ret = -1;
+
+    /* group 19, a 32-byte scalar and a 64-byte element */
+    if (!ap_wait_auth(base) || ap.auth_alg != 3 || ap.auth_seq != 1 || ap.auth_body_len != 2 + 96)
+        return -1;
+    if (want_token) {
+        uint8_t req[2 + 8] = { 19, 0 };
+
+        memcpy(req + 2, token, 8);
+        base = ap.auth_count;
+        ap_send_sae(1, 76, req, sizeof(req));
+        /* the commit again, the token after the group */
+        if (!ap_wait_auth(base) || ap.auth_seq != 1 || ap.auth_body_len != 2 + 8 + 96 ||
+            memcmp(ap.auth_body + 2, token, 8))
+            return -1;
+        memmove(ap.auth_body + 2, ap.auth_body + 10, 96);
+        ap.auth_body_len = 2 + 96;
+    }
+    sae = rtw89_sae_begin(ap_mac, sta_mac, (const uint8_t *)password, strlen(password));
+    if (!sae)
+        return -1;
+    if (rtw89_sae_rx_commit(sae, ap.auth_body, ap.auth_body_len))
+        goto out;
+    n = rtw89_sae_write_commit(sae, NULL, 0, body, sizeof(body));
+    if (n < 0)
+        goto out;
+    base = ap.auth_count;
+    ap_send_sae(1, 0, body, (size_t)n);
+    if (!ap_wait_auth(base) || ap.auth_alg != 3 || ap.auth_seq != 2)
+        goto out;
+    if (rtw89_sae_rx_confirm(sae, ap.auth_body, ap.auth_body_len)) {
+        ret = 1;
+        goto out;
+    }
+    n = rtw89_sae_write_confirm(sae, body, sizeof(body));
+    if (n < 0)
+        goto out;
+    rtw89_sae_keys(sae, ap.pmk, pmkid);
+    ap_send_sae(2, 0, body, (size_t)n);
+    ret = 0;
+out:
+    rtw89_sae_end(sae);
+    return ret;
+}
+
+/* A management frame from the AP, protected with the pairwise key; @hw: as if
+ * the hardware had decrypted it (plaintext body, CCMP header and MIC left). */
+static void ap_send_protected(uint8_t subtype, const uint8_t *body, size_t body_len, bool hw)
+{
+    uint8_t frame[24 + 8 + 64 + 8];
+
+    memset(frame, 0, sizeof(frame));
+    frame[0] = subtype;
+    frame[1] = 0x40;
+    memcpy(frame + 4, sta_mac, 6);
+    memcpy(frame + 10, ap_mac, 6);
+    memcpy(frame + 16, ap_mac, 6);
+    ap.mgmt_pn++;
+    frame[24] = (uint8_t)ap.mgmt_pn;
+    frame[25] = (uint8_t)(ap.mgmt_pn >> 8);
+    frame[27] = 0x20;
+    frame[28] = (uint8_t)(ap.mgmt_pn >> 16);
+    memcpy(frame + 32, body, body_len);
+    if (hw)
+        memset(frame + 32 + body_len, 0xee, 8);
+    else
+        rtw89_ccmp_encrypt(ap.tk, frame, 24, ap.mgmt_pn, frame + 32, body_len,
+                           frame + 32 + body_len);
+    rtw89_glue_test_rx(frame, 32 + body_len + 8, ap_freq, -40, hw);
+}
+
+static int wait_paction(int count)
+{
+    int i;
+
+    for (i = 0; i < 100 && ap.paction_count <= count; i++)
+        usleep(20 * 1000);
+    return ap.paction_count > count;
+}
+
+/* Join "testnet" with its password, play SAE and the association. */
+static int join_sae(const char *password, bool want_token)
+{
+    int base = ap.auth_count, ret;
+
+    if (rtw89_glue_join_password((const uint8_t *)"testnet", 7, NULL, AP_PASSWORD,
+                                 strlen(AP_PASSWORD)))
+        return -1;
+    ret = ap_sae(base, password, want_token);
+    if (ret)
+        return ret;
+    usleep(300 * 1000);
+    ap_send_assoc_resp(0);
+    return 0;
+}
+
+/* The RSN element of a WPA2/WPA3 network: PSK and SAE, frame protection optional. */
+static uint8_t ap_ies_mixed[sizeof(ap_ies) + 4];
+
+static int test_wpa3(const uint8_t *gtk)
+{
+    const size_t rsn = AP_RSN_AKM - 19;     /* where the RSN element starts */
+    static const uint8_t mixed_rsn[26] = {
+        0x30, 24, 1, 0, 0x00, 0x0f, 0xac, 4, 1, 0, 0x00, 0x0f, 0xac, 4,
+        2, 0, 0x00, 0x0f, 0xac, 2, 0x00, 0x0f, 0xac, 8, 0x80, 0x00,
+    };
+    struct rtw89_glue_link link;
+    const uint8_t *ie;
+    int failures = 0, n;
+
+#define EXPECT(cond) do { if (!(cond)) { failures++; printf("== FAIL %s\n", #cond); } } while (0)
+    /* ---- WPA3-only: SAE, frame protection required ---- */
+    ap_select(false);
+    ap_ies[AP_RSN_AKM] = 8;
+    ap_ies[AP_RSN_AKM + 1] = 0xc0;          /* MFPR, MFPC */
+    ap_send_beacon();
+    /* the PMK from a passphrase is no good for it */
+    EXPECT(rtw89_glue_join((const uint8_t *)"testnet", 7, NULL, 0) == -13);
+
+    EXPECT(join_sae(AP_PASSWORD, false) == 0);
+    EXPECT(wait_link(RTW89_GLUE_LINK_ASSOCIATED));
+    ie = sta_assoc_ie(48);
+    EXPECT(ie && ie[1] == 20 && ie[19] == 8 && ie[20] == 0xc0);     /* SAE, MFPC and MFPR */
+    ap_key_ver = 0;
+    ap_igtk = true;
+    EXPECT(ap_handshake_pmk(gtk, 1) == 0);
+    EXPECT(wait_link(RTW89_GLUE_LINK_CONNECTED));
+    EXPECT(sta_tx_test() == 0);
+    rtw89_glue_link(&link);
+    EXPECT(!link.last_error);
+    printf("== connected with SAE: confirm, PMK and handshake verified by the test AP\n");
+    /* the station's BlockAck requests are robust frames: protected now */
+    {
+        int i;
+
+        for (i = 0; i < 50 && !ap.pback_count; i++)
+            usleep(20 * 1000);
+        EXPECT(ap.pback_count > 0);
+    }
+
+    /* the AP asks whether we are still there: a protected answer, same id */
+    n = ap.paction_count;
+    ap_send_protected(0xd0, (const uint8_t *)"\x08\x00\xab\xcd", 4, false);
+    EXPECT(wait_paction(n) && ap.paction_ok && ap.paction_len == 4 &&
+           !memcmp(ap.paction, "\x08\x01\xab\xcd", 4));
+    /* the same, decrypted by the hardware */
+    n = ap.paction_count;
+    ap_send_protected(0xd0, (const uint8_t *)"\x08\x00\x12\x34", 4, true);
+    EXPECT(wait_paction(n) && ap.paction_ok && !memcmp(ap.paction, "\x08\x01\x12\x34", 4));
+    /* a replayed packet number is dropped */
+    n = ap.paction_count;
+    ap.mgmt_pn--;
+    ap_send_protected(0xd0, (const uint8_t *)"\x08\x00\x56\x78", 4, false);
+    usleep(200 * 1000);
+    EXPECT(ap.paction_count == n);
+    /* as is one that does not decrypt */
+    {
+        uint8_t tk[16];
+
+        memcpy(tk, ap.tk, 16);
+        memset(ap.tk, 0, 4);
+        ap_send_protected(0xd0, (const uint8_t *)"\x08\x00\x56\x78", 4, false);
+        usleep(200 * 1000);
+        EXPECT(ap.paction_count == n);
+        memcpy(ap.tk, tk, 16);
+    }
+
+    /* an unprotected deauthentication is checked with the AP, which answers */
+    ap_send_beacon();
+    n = ap.paction_count;
+    ap_send_deauth(7);
+    EXPECT(wait_paction(n) && ap.paction_ok && ap.paction_len == 4 &&
+           ap.paction[0] == 8 && ap.paction[1] == 0);
+    {
+        uint8_t resp[4] = { 8, 1, ap.paction[2], ap.paction[3] };
+
+        ap_send_protected(0xd0, resp, sizeof(resp), false);
+    }
+    usleep(700 * 1000);
+    EXPECT(link_state() == RTW89_GLUE_LINK_CONNECTED);
+    ap_send_beacon();
+    /* ... and when it does not answer, it did drop us */
+    ap_send_deauth(7);
+    EXPECT(wait_link(RTW89_GLUE_LINK_DOWN));
+    rtw89_glue_link(&link);
+    EXPECT(link.last_error == -2007);
+
+    /* again, the AP asking for an anti-clogging token first; then a protected
+     * deauthentication, which counts at once */
+    EXPECT(join_sae(AP_PASSWORD, true) == 0);
+    EXPECT(wait_link(RTW89_GLUE_LINK_ASSOCIATED));
+    EXPECT(ap_handshake_pmk(gtk, 1) == 0);
+    EXPECT(wait_link(RTW89_GLUE_LINK_CONNECTED));
+    ap_send_protected(0xc0, (const uint8_t *)"\x03\x00", 2, false);
+    EXPECT(wait_link(RTW89_GLUE_LINK_DOWN));
+    rtw89_glue_link(&link);
+    EXPECT(link.last_error == -2003);
+
+    /* another password: the AP does not answer our confirm */
+    {
+        int base = ap.auth_count;
+
+        EXPECT(rtw89_glue_join_password((const uint8_t *)"testnet", 7, NULL, "not the password",
+                                        16) == 0);
+        EXPECT(ap_sae(base, AP_PASSWORD, false) == 1);
+        EXPECT(wait_link(RTW89_GLUE_LINK_DOWN));
+        rtw89_glue_link(&link);
+        EXPECT(link.last_error == -2002);
+    }
+
+    /* ---- WPA2/WPA3: SAE where it works, WPA2 where it does not ---- */
+    memcpy(ap_ies_mixed, ap_ies, rsn);
+    memcpy(ap_ies_mixed + rsn, mixed_rsn, sizeof(mixed_rsn));
+    memcpy(ap_ies_mixed + rsn + sizeof(mixed_rsn), ap_ies + rsn + 22, sizeof(ap_ies) - rsn - 22);
+    ap_cur_ies = ap_ies_mixed;
+    ap_cur_ies_len = sizeof(ap_ies_mixed);
+    ap_send_beacon();
+    EXPECT(join_sae(AP_PASSWORD, false) == 0);
+    EXPECT(wait_link(RTW89_GLUE_LINK_ASSOCIATED));
+    ie = sta_assoc_ie(48);
+    EXPECT(ie && ie[19] == 8 && ie[20] == 0xc0);
+    EXPECT(ap_handshake_pmk(gtk, 1) == 0);
+    EXPECT(wait_link(RTW89_GLUE_LINK_CONNECTED));
+    rtw89_glue_leave();
+
+    /* the AP turns SAE down (it wants hash-to-element): WPA2 instead */
+    {
+        int base = ap.auth_count;
+
+        EXPECT(rtw89_glue_join_password((const uint8_t *)"testnet", 7, NULL, AP_PASSWORD,
+                                        strlen(AP_PASSWORD)) == 0);
+        EXPECT(ap_wait_auth(base) && ap.auth_alg == 3);
+        base = ap.auth_count;
+        ap_send_sae(1, 126, (const uint8_t *)"\x13\x00", 2);
+        EXPECT(ap_wait_auth(base) && ap.auth_alg == 0 && ap.auth_seq == 1);
+        ap_send_auth(0);
+        usleep(300 * 1000);
+        ap_send_assoc_resp(0);
+        EXPECT(wait_link(RTW89_GLUE_LINK_ASSOCIATED));
+        ie = sta_assoc_ie(48);
+        EXPECT(ie && ie[19] == 2 && ie[20] == 0);   /* PSK; protection optional, not used */
+        ap_key_ver = 2;
+        ap_igtk = false;
+        rtw89_pbkdf2_sha1((const uint8_t *)AP_PASSWORD, strlen(AP_PASSWORD),
+                          (const uint8_t *)"testnet", 7, 4096, ap.pmk, 32);
+        EXPECT(ap_handshake_pmk(gtk, 1) == 0);
+        EXPECT(wait_link(RTW89_GLUE_LINK_CONNECTED));
+        EXPECT(sta_tx_test() == 0);
+        rtw89_glue_leave();
+    }
+
+    ap_key_ver = 2;
+    ap_igtk = false;
+    ap_ies[AP_RSN_AKM] = 2;
+    ap_ies[AP_RSN_AKM + 1] = 0;
+    ap_select(false);
+    ap_send_beacon();
+#undef EXPECT
+    printf("== WPA3 test: %d failure(s)\n", failures);
+    return failures;
+}
+
 static int test_join(void)
 {
     static const uint8_t gtk1[16] = { 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16 };
@@ -1684,6 +2043,7 @@ static int test_join(void)
     ap_send_beacon();
 
     ap_select(false);
+    failures += test_wpa3(gtk1);
     failures += test_keep();
 #undef EXPECT
     printf("== join test: %d failure(s)\n", failures);

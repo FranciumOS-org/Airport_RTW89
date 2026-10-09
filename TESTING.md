@@ -30,8 +30,9 @@ Note what happens at each step; stop at the first one that fails and report.
    and run `sudo tools/collect_logs.sh` there: it picks up the panic report.
 2. **Wi-Fi appears.** Within about 30 seconds of the desktop, is there a Wi-Fi
    icon in the menu bar, and does it list networks?
-3. **Join** your WPA2 (or WPA2/WPA3) network. Does it connect, and do web pages
-   load?
+3. **Join** your network. Does it connect, and do web pages load? If you can,
+   also try a **WPA3** one (a phone hotspot set to WPA3, or a router's WPA3
+   setting): `sudo tools/rtw89ctl log | grep -iE "SAE|WPA3"` shows how it went.
 4. **Speed**, with any speed test site: once next to the router, once a room
    or two away. Note the band (2.4 or 5 GHz) and, if you can, what the same
    spot gets in Windows or Linux.
@@ -58,7 +59,7 @@ macOS:           (e.g. 15.8.1)
 OpenCore:        (e.g. 1.0.8)
 1 Boot:          ok / panic / hang
 2 Wi-Fi appears: yes / no
-3 Join:          yes / no (network security: WPA2, WPA2/WPA3, ...)
+3 Join:          yes / no (network security: WPA2, WPA2/WPA3, WPA3, ...)
 4 Speed:         near: __ Mb/s on __ GHz; far: __ Mb/s on __ GHz (other OS: __)
 5 Restart/off:   ok / ...
 6 Sleep/wake:    ok / ...

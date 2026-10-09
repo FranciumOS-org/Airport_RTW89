@@ -17,6 +17,7 @@
 #include <IOKit/IOCatalogue.h>
 #include <IOKit/IOLib.h>
 #include <libkern/version.h>
+#include <pexpert/pexpert.h>
 #include <sys/errno.h>
 #include <sys/kpi_mbuf.h>
 #include <sys/systm.h>
@@ -62,13 +63,23 @@ struct AirPort_RTW89::NativeState {
  */
 /*
  * Whether macOS is told the card does SAE and protected management frames
- * (capability bytes 9 and 6, see APPLE80211_IOC_CARD_CAPABILITIES). Off until
- * the WPA3 join itself is done: told so, macOS picks SAE on WPA2/WPA3 mixed
- * networks too and the join fails where WPA2 would have worked, and it may
- * choose WPA2 networks that require frame protection. With it off, WPA3-only
- * networks are refused by macOS before they reach the driver.
+ * (capability bytes 9 and 6, see APPLE80211_IOC_CARD_CAPABILITIES). Told so,
+ * macOS sends WPA3 joins (and WPA2 ones) with the password itself, and picks
+ * SAE on WPA2/WPA3 mixed networks too; the MLME falls back to WPA2 there if
+ * SAE does not get through. Without it, WPA3-only networks are refused by
+ * macOS before they reach the driver. Boot-arg -rtw89nowpa3 turns it off.
  */
-static const bool kAdvertiseWPA3 = false;
+static bool advertiseWPA3()
+{
+    static int state;   /* 0: not read yet, 1: on, 2: off */
+
+    if (!state) {
+        int dummy;
+
+        state = PE_parse_boot_argn("-rtw89nowpa3", &dummy, sizeof(dummy)) ? 2 : 1;
+    }
+    return state == 1;
+}
 
 struct Scratch {
     void *p;
@@ -114,6 +125,10 @@ static const uint32_t kEnterpriseAuth = APPLE80211_AUTHTYPE_WPA | APPLE80211_AUT
                                         APPLE80211_AUTHTYPE_8021X | APPLE80211_AUTHTYPE_SHA256_8021X;
 static const uint32_t kPersonalAuth = APPLE80211_AUTHTYPE_WPA_PSK | APPLE80211_AUTHTYPE_WPA2_PSK |
                                       APPLE80211_AUTHTYPE_SHA256_PSK;
+
+/* SAE (WPA3-Personal): the header's bit, and the one Sequoia's IO80211
+ * framework builds for its SAE joins (Apple80211Associate2). */
+static const uint32_t kSaeAuth = APPLE80211_AUTHTYPE_WPA3_SAE | 0x1000;
 
 static bool isEnterprise(uint32_t upper)
 {
@@ -215,11 +230,15 @@ static bool decodeHostAssoc(const uint8_t *p, struct HostAssoc *out)
     if (le32(p) != 1 || le32(p + 4) != 2 || le32(p + 8) != 1 || le32(p + 60) != 1)
         return false;
     const uint32_t cipher = le32(p + 68);
-    const bool passphrase = upper == 8 && cipher == kHostCipherPassphrase;
+    /* SAE, alone or with WPA2-PSK (a mixed network) */
+    const bool sae = (upper & kSaeAuth) && !(upper & ~(kSaeAuth | 8));
+    const bool passphrase = (upper == 8 || sae) && cipher == kHostCipherPassphrase;
 
-    if ((upper != 0 && upper != 8 && !isEnterprise(upper)) || !ssidLen || ssidLen > 32)
+    if ((upper != 0 && upper != 8 && !sae && !isEnterprise(upper)) || !ssidLen || ssidLen > 32)
         return false;
-    if (passphrase ? keyLen < 8 || keyLen > 64 : upper == 8 ? keyLen != 32 : keyLen != 0)
+    if (sae && !passphrase)
+        return false;
+    if (passphrase ? keyLen < 1 || keyLen > 64 : upper == 8 ? keyLen != 32 : keyLen != 0)
         return false;
     for (uint32_t i = 0; i < ssidLen; i++)
         if (!p[20 + i])
@@ -829,10 +848,9 @@ int AirPort_RTW89::nativeAssociate(void *data)
     struct apple80211_assoc_data *d = static_cast<struct apple80211_assoc_data *>(data);
     static const uint8_t zero[6] = {};
     const uint32_t personal = APPLE80211_AUTHTYPE_WPA_PSK | APPLE80211_AUTHTYPE_WPA2_PSK |
-                              APPLE80211_AUTHTYPE_SHA256_PSK;
+                              APPLE80211_AUTHTYPE_SHA256_PSK | kSaeAuth;
     struct rtw89_glue_link link;
     const uint8_t *bssid, *pmk = nullptr;
-    uint8_t derived[32];
     bool secure, enterprise, fromPassphrase = false;
     int ret;
 
@@ -858,12 +876,8 @@ int AirPort_RTW89::nativeAssociate(void *data)
     if (enterprise) {
         /* nothing to check: the keys come later */
     } else if (secure && _ns->joinPassLen) {
-        /* the passphrase itself (macOS sends it so to a card that does SAE):
-         * the pairwise master key is derived here */
-        if (rtw89_glue_derive_pmk(d->ad_ssid, d->ad_ssid_len, (const char *)_ns->joinPass,
-                                  _ns->joinPassLen, derived))
-            return kIOReturnUnsupported;
-        pmk = derived;
+        /* the password itself (macOS sends it so to a card that does SAE):
+         * SAE with it, or the WPA2 pairwise master key derived from it */
         fromPassphrase = true;
     } else if (secure) {
         /* IO80211 hands over the pairwise master key; the 4-way handshake is
@@ -883,7 +897,6 @@ int AirPort_RTW89::nativeAssociate(void *data)
         (!bssid || !memcmp(bssid, link.bssid, 6) || !memcmp(bssid, link.asked_bssid, 6))) {
         /* the same request again while it is being carried out */
         IOLockUnlock(_commandLock);
-        bzero(derived, sizeof(derived));
         return kIOReturnSuccess;
     }
     if (link.state != RTW89_GLUE_LINK_DOWN)
@@ -898,15 +911,22 @@ int AirPort_RTW89::nativeAssociate(void *data)
         ret = rtw89_glue_join_ext(d->ad_ssid, d->ad_ssid_len, bssid, ie, ieLen);
         if (ret == -2 && bssid)
             ret = rtw89_glue_join_ext(d->ad_ssid, d->ad_ssid_len, nullptr, ie, ieLen);
+    } else if (fromPassphrase) {
+        const char *pass = (const char *)_ns->joinPass;
+
+        ret = rtw89_glue_join_password(d->ad_ssid, d->ad_ssid_len, bssid, pass, _ns->joinPassLen);
+        if (ret == -2 && bssid)
+            ret = rtw89_glue_join_password(d->ad_ssid, d->ad_ssid_len, nullptr, pass,
+                                           _ns->joinPassLen);
     } else {
         ret = rtw89_glue_join_pmk(d->ad_ssid, d->ad_ssid_len, bssid, pmk);
         if (ret == -2 && bssid) /* that access point is not in the list: any of the network's */
             ret = rtw89_glue_join_pmk(d->ad_ssid, d->ad_ssid_len, nullptr, pmk);
     }
     IOLockUnlock(_commandLock);
-    bzero(derived, sizeof(derived));
     LOG("join requested by macOS (%s, upper auth 0x%x, %u-byte name): %d",
-        enterprise ? "802.1X" : !secure ? "open" : fromPassphrase ? "WPA2, passphrase" : "WPA2",
+        enterprise ? "802.1X" : !secure ? "open" :
+        (d->ad_auth_upper & kSaeAuth) ? "WPA3, password" : fromPassphrase ? "WPA2, passphrase" : "WPA2",
         d->ad_auth_upper, d->ad_ssid_len, ret);
     if (ret == -2)
         return ENOENT;
@@ -1407,7 +1427,7 @@ int AirPort_RTW89::nativeRequest(bool isSet, int number, void *data)
          * supported" and never sends a WPA3 join, bit 0x10 (76) for picking
          * the SAE key management suite.
          */
-        if (kAdvertiseWPA3)
+        if (advertiseWPA3())
             static_cast<uint8_t *>(d->capabilities)[9] |= 0x08 | 0x10;
         /*
          * Byte 6, bit 0x01 (capability 48): protected management frames.
@@ -1416,7 +1436,7 @@ int AirPort_RTW89::nativeRequest(bool isSet, int number, void *data)
          * network (MFP required) is refused with -3900 before any request
          * leaves macOS (traced with tools/assoctrace.py).
          */
-        if (kAdvertiseWPA3)
+        if (advertiseWPA3())
             d->capabilities[6] |= 0x01;
         return kIOReturnSuccess;
     }
@@ -1541,7 +1561,7 @@ int AirPort_RTW89::nativeRequest(bool isSet, int number, void *data)
         bzero(d, sizeof(*d));
         d->version = APPLE80211_VERSION;
         if (number == APPLE80211_IOC_DRIVER_VERSION)
-            snprintf(d->string, sizeof(d->string), "%s (AirPort_RTW89 0.2.2)",
+            snprintf(d->string, sizeof(d->string), "%s (AirPort_RTW89 0.3.0)",
                      rtw89_chip_name(_deviceID));
         else
             strlcpy(d->string, rtw89_chip_name(_deviceID), sizeof(d->string));

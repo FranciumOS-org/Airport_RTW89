@@ -68,6 +68,20 @@ void rtw89_aes_cmac_vector(const uint8_t key[16], size_t num, const uint8_t *con
                            const size_t lens[], uint8_t mac[16]);
 void rtw89_aes_cmac(const uint8_t key[16], const uint8_t *data, size_t len, uint8_t mac[16]);
 
+/*
+ * CCMP (IEEE 802.11 12.5.3) in software, for the management frames protected
+ * under 802.11w that most of these chips leave to the host: AES-CCM with an
+ * 8-byte MIC. @hdr is the 802.11 header (its frame control with the
+ * Protected bit as sent); @payload is encrypted or decrypted in place.
+ * decrypt returns false if the MIC does not match (and @payload is then
+ * garbage).
+ */
+#define RTW89_CCMP_MIC_LEN 8
+void rtw89_ccmp_encrypt(const uint8_t tk[16], const uint8_t *hdr, size_t hdr_len, uint64_t pn,
+                        uint8_t *payload, size_t len, uint8_t mic[RTW89_CCMP_MIC_LEN]);
+bool rtw89_ccmp_decrypt(const uint8_t tk[16], const uint8_t *hdr, size_t hdr_len, uint64_t pn,
+                        uint8_t *payload, size_t len, const uint8_t mic[RTW89_CCMP_MIC_LEN]);
+
 /* Compare without leaking where the difference is. */
 bool rtw89_crypto_equal(const uint8_t *a, const uint8_t *b, size_t len);
 

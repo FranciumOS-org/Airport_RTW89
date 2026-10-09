@@ -209,6 +209,11 @@ size_t rtw89_glue_assoc_rsn_ie(uint8_t *buf, size_t max);
  * open network), and optionally one access point picked by @bssid. */
 int rtw89_glue_join_pmk(const uint8_t *ssid, size_t ssid_len, const uint8_t *bssid,
                         const uint8_t *pmk);
+/* The same with the network's password itself: WPA3-Personal (SAE) where the
+ * network offers it, else WPA2-PSK with the key derived from it. */
+#define RTW89_GLUE_MAX_PASSWORD 64
+int rtw89_glue_join_password(const uint8_t *ssid, size_t ssid_len, const uint8_t *bssid,
+                             const char *password, size_t password_len);
 /* WPA2-PSK's pairwise master key from the network's name and its passphrase
  * (8-63 characters, or the key itself as 64 hex digits). -EACCES if the
  * passphrase is not one. */

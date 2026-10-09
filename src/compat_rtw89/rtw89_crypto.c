@@ -668,6 +668,126 @@ void rtw89_aes_cmac(const uint8_t key[16], const uint8_t *data, size_t len, uint
     rtw89_aes_cmac_vector(key, 1, &data, &len, mac);
 }
 
+/* CCM nonce (12.5.3.3.4): flags (priority, or the management bit), A2, PN. */
+static void ccmp_nonce(const uint8_t *hdr, size_t hdr_len, uint64_t pn, uint8_t nonce[13])
+{
+    unsigned int i;
+
+    nonce[0] = 0;
+    if ((hdr[0] & 0x0c) == 0x00)                /* management frame */
+        nonce[0] = 0x10;
+    else if ((hdr[0] & 0x8c) == 0x88)           /* QoS data: the TID */
+        nonce[0] = hdr[hdr_len - 2] & 0x0f;
+    memcpy(nonce + 1, hdr + 10, 6);
+    for (i = 0; i < 6; i++)
+        nonce[7 + i] = (uint8_t)(pn >> (8 * (5 - i)));
+}
+
+/* Additional authenticated data (12.5.3.3.3), with its 2-byte length in
+ * front; returns the whole length. */
+static size_t ccmp_aad(const uint8_t *hdr, size_t hdr_len, uint8_t aad[32])
+{
+    bool data = (hdr[0] & 0x0c) == 0x08, qos = (hdr[0] & 0x8c) == 0x88;
+    size_t n = 2;
+
+    aad[n++] = data ? hdr[0] & 0x8f : hdr[0];   /* data: subtype bits 4-6 masked */
+    /* retry, power management, more data masked; protected set; order
+     * masked in QoS data */
+    aad[n++] = (hdr[1] & (qos ? 0x47 : 0xc7)) | 0x40;
+    memcpy(aad + n, hdr + 4, 18);               /* A1, A2, A3 */
+    n += 18;
+    aad[n++] = hdr[22] & 0x0f;                  /* fragment number alone */
+    aad[n++] = 0;
+    if (hdr_len >= 30 && (hdr[1] & 0x03) == 0x03) {
+        memcpy(aad + n, hdr + 24, 6);           /* A4 */
+        n += 6;
+    }
+    if (qos) {
+        aad[n++] = hdr[hdr_len - 2] & 0x0f;     /* QoS control: the TID */
+        aad[n++] = 0;
+    }
+    aad[0] = 0;
+    aad[1] = (uint8_t)(n - 2);
+    return n;
+}
+
+/* CBC-MAC over B0, the AAD and the plaintext: the unencrypted MIC. */
+static void ccmp_cbc_mac(const uint8_t tk[16], const uint8_t nonce[13], const uint8_t *aad,
+                         size_t aad_len, const uint8_t *plain, size_t len, uint8_t x[16])
+{
+    uint8_t b[16];
+    size_t i, j;
+
+    b[0] = 0x59;                /* AAD present, 8-byte MIC, 2-byte length */
+    memcpy(b + 1, nonce, 13);
+    b[14] = (uint8_t)(len >> 8);
+    b[15] = (uint8_t)len;
+    rtw89_aes128_encrypt(tk, b, x);
+    for (i = 0; i < aad_len; i += 16) {
+        for (j = 0; j < 16; j++)
+            x[j] ^= i + j < aad_len ? aad[i + j] : 0;
+        rtw89_aes128_encrypt(tk, x, x);
+    }
+    for (i = 0; i < len; i += 16) {
+        for (j = 0; j < 16 && i + j < len; j++)
+            x[j] ^= plain[i + j];
+        rtw89_aes128_encrypt(tk, x, x);
+    }
+}
+
+/* Counter mode over @data, and the first counter block's key stream for the MIC. */
+static void ccmp_ctr(const uint8_t tk[16], const uint8_t nonce[13], uint8_t *data, size_t len,
+                     uint8_t s0[16])
+{
+    uint8_t a[16], s[16];
+    size_t i, j;
+
+    a[0] = 0x01;
+    memcpy(a + 1, nonce, 13);
+    a[14] = 0;
+    a[15] = 0;
+    rtw89_aes128_encrypt(tk, a, s0);
+    for (i = 0; i < len; i += 16) {
+        uint16_t ctr = (uint16_t)(i / 16 + 1);
+
+        a[14] = (uint8_t)(ctr >> 8);
+        a[15] = (uint8_t)ctr;
+        rtw89_aes128_encrypt(tk, a, s);
+        for (j = 0; j < 16 && i + j < len; j++)
+            data[i + j] ^= s[j];
+    }
+    memset(s, 0, sizeof(s));
+}
+
+void rtw89_ccmp_encrypt(const uint8_t tk[16], const uint8_t *hdr, size_t hdr_len, uint64_t pn,
+                        uint8_t *payload, size_t len, uint8_t mic[RTW89_CCMP_MIC_LEN])
+{
+    uint8_t nonce[13], aad[32], x[16], s0[16];
+    size_t aad_len, i;
+
+    ccmp_nonce(hdr, hdr_len, pn, nonce);
+    aad_len = ccmp_aad(hdr, hdr_len, aad);
+    ccmp_cbc_mac(tk, nonce, aad, aad_len, payload, len, x);
+    ccmp_ctr(tk, nonce, payload, len, s0);
+    for (i = 0; i < RTW89_CCMP_MIC_LEN; i++)
+        mic[i] = x[i] ^ s0[i];
+}
+
+bool rtw89_ccmp_decrypt(const uint8_t tk[16], const uint8_t *hdr, size_t hdr_len, uint64_t pn,
+                        uint8_t *payload, size_t len, const uint8_t mic[RTW89_CCMP_MIC_LEN])
+{
+    uint8_t nonce[13], aad[32], x[16], s0[16];
+    size_t aad_len, i;
+
+    ccmp_nonce(hdr, hdr_len, pn, nonce);
+    aad_len = ccmp_aad(hdr, hdr_len, aad);
+    ccmp_ctr(tk, nonce, payload, len, s0);
+    ccmp_cbc_mac(tk, nonce, aad, aad_len, payload, len, x);
+    for (i = 0; i < RTW89_CCMP_MIC_LEN; i++)
+        x[i] ^= s0[i];
+    return rtw89_crypto_equal(x, mic, RTW89_CCMP_MIC_LEN);
+}
+
 bool rtw89_crypto_equal(const uint8_t *a, const uint8_t *b, size_t len)
 {
     uint8_t diff = 0;

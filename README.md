@@ -4,7 +4,7 @@ Native Wi-Fi on macOS for **Realtek's rtw89 PCIe cards**, by porting the Linux
 **rtw89** driver. The card shows up as Wi-Fi in macOS and is used from the
 Wi-Fi menu and System Settings like a Mac's own.
 
-> **Preview (0.2.2).** It has been developed and tested on **one machine**
+> **Preview (0.3.0).** It has been developed and tested on **one machine**
 > (ASUS TUF A15 FA507NU with an RTL8852BE, macOS Sequoia 15.8.1). It works
 > there every day; on every other card it has **never run on real hardware**.
 > A driver bug can panic the machine: keep a way to boot without it (see
@@ -33,7 +33,8 @@ Realtek PCI devices, the Wi-Fi card as `WLAN` or similar with `device-id=b852`
 
 | | |
 |---|---|
-| Networks | WPA2-Personal, WPA2-Enterprise (802.1X, tested with PEAP), open; WPA2/WPA3 mixed networks (joined with WPA2) |
+| Networks | WPA3-Personal (SAE, new in 0.3.0, not yet tested on hardware), WPA2-Personal, WPA2-Enterprise (802.1X, tested with PEAP), open; WPA2/WPA3 mixed networks (WPA3, falling back to WPA2); protected management frames (802.11w) |
+| Band | Prefers a network's 5 GHz side over its 2.4 GHz side when the 5 GHz signal is good, as Windows does |
 | Speed | 802.11ax (Wi-Fi 6), up to 80 MHz, 2 streams: about 500 Mb/s down measured on a 5 GHz 80 MHz network |
 | macOS | Wi-Fi menu, joining and forgetting networks, saved passwords, Personal Hotspot from an iPhone, scanning while connected |
 | Startup | Loaded by OpenCore at boot, Wi-Fi up without anything run by hand |
@@ -41,8 +42,10 @@ Realtek PCI devices, the Wi-Fi card as `WLAN` or similar with `device-id=b852`
 
 ## What does not (yet)
 
-- **WPA3-only networks** (SAE). Mixed WPA2/WPA3 networks work over WPA2.
-  On a phone hotspot set to WPA3 only, choose WPA2/WPA3 instead.
+- **WPA3 networks that require hash-to-element** (SAE H2E): some routers
+  and every 6 GHz network. A mixed WPA2/WPA3 network then joins over WPA2.
+  If WPA3 causes trouble, add the boot-arg `-rtw89nowpa3`: macOS then joins
+  everything as before 0.3.0 (WPA3-only networks are refused).
 - **Sleep and wake**: the driver handles it, but it has not been tested on
   hardware (the development machine does not really sleep).
 - **AirDrop, AWDL, Continuity** over Wi-Fi.
@@ -52,7 +55,7 @@ Realtek PCI devices, the Wi-Fi card as `WLAN` or similar with `device-id=b852`
   announces none leaves the driver on Realtek's cautious worldwide limits
   (`rtw89ctl status` shows which: "tables of 00" is worldwide).
 - **6 GHz** is switched off (RTL8852CE, RTL8922AE/DE): every 6 GHz network
-  needs WPA3. **Wi-Fi 7** cards join as Wi-Fi 6.
+  needs WPA3 with hash-to-element. **Wi-Fi 7** cards join as Wi-Fi 6.
 - Tested on **Sequoia 15.8.1** (the development machine) and **Tahoe**
   (26.4 with an RTL8922DE; 26.6.2 with an RTL8852AE). Sonoma is expected to work but is untested.
 
@@ -185,7 +188,7 @@ development loop.
 | `src/compat/` | Linux-API shims inherited from AirPort_RTW88 |
 | `third_party/rtw89/` | Linux rtw89: the core and the PCIe chips, **unmodified** |
 | `third_party/linux-include/` | Linux 802.11 headers, unmodified |
-| `third_party/hostap/`, `third_party/mbedtls/` | For WPA3, not in use yet; unmodified |
+| `third_party/hostap/`, `third_party/mbedtls/` | SAE for WPA3 (hostap's protocol code, Mbed TLS's elliptic curves); unmodified |
 | `efi/` | Installing into OpenCore |
 | `tools/` | `rtw89ctl`, log collection, the userspace tests |
 

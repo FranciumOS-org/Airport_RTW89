@@ -282,6 +282,32 @@ static void test_crypto(void)
             CHECK(hex_is(out, "51f0bebf7e3b9d92fc49741779363cfe", 16));
         }
     }
+    {
+        /* CCMP, IEEE 802.11-2016 J.6.4 */
+        static const u8 tk[16] = {
+            0xc9, 0x7c, 0x1f, 0x67, 0xce, 0x37, 0x11, 0x85,
+            0x51, 0x4a, 0x8a, 0x19, 0xf2, 0xbd, 0xd5, 0x2f,
+        };
+        static const u8 hdr[24] = {
+            0x08, 0x48, 0xc3, 0x2c, 0x0f, 0xd2, 0xe1, 0x28, 0xa5, 0x7c, 0x50, 0x30,
+            0xf1, 0x84, 0x44, 0x08, 0xab, 0xae, 0xa5, 0xb8, 0xfc, 0xba, 0x80, 0x33,
+        };
+        static const u8 plain[20] = {
+            0xf8, 0xba, 0x1a, 0x55, 0xd0, 0x2f, 0x85, 0xae, 0x96, 0x7b,
+            0xb6, 0x2f, 0xb6, 0xcd, 0xa8, 0xeb, 0x7e, 0x78, 0xa0, 0x50,
+        };
+        u8 buf[20], mic[8];
+
+        memcpy(buf, plain, sizeof(buf));
+        rtw89_ccmp_encrypt(tk, hdr, sizeof(hdr), 0xb5039776e70cULL, buf, sizeof(buf), mic);
+        CHECK(hex_is(buf, "f3d0a2fe9a3dbf2342a643e43246e80c3c04d019", 20));
+        CHECK(hex_is(mic, "7845ce0b16f97623", 8));
+        CHECK(rtw89_ccmp_decrypt(tk, hdr, sizeof(hdr), 0xb5039776e70cULL, buf, sizeof(buf), mic));
+        CHECK(!memcmp(buf, plain, sizeof(buf)));
+        /* a changed address or packet number fails the MIC */
+        rtw89_ccmp_encrypt(tk, hdr, sizeof(hdr), 0xb5039776e70cULL, buf, sizeof(buf), mic);
+        CHECK(!rtw89_ccmp_decrypt(tk, hdr, sizeof(hdr), 0xb5039776e70dULL, buf, sizeof(buf), mic));
+    }
 }
 
 /* ---- cfg80211 helpers ---- */

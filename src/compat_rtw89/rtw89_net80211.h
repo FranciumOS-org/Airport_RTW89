@@ -242,7 +242,8 @@ struct rtw89_mlme_status {
 void rtw89_mlme_start(struct ieee80211_hw *hw, struct ieee80211_vif *vif, void (*notify)(void));
 void rtw89_mlme_stop(void);
 /* @pmk: the 32-byte pairwise master key for a WPA2-PSK network, else NULL. */
-int rtw89_mlme_connect(const struct rtw89_mlme_bss *bss, const u8 *pmk);
+int rtw89_mlme_connect(const struct rtw89_mlme_bss *bss, const u8 *pmk,
+                       const u8 *password, size_t password_len);
 int rtw89_mlme_connect_ext(const struct rtw89_mlme_bss *bss, const u8 *rsn_ie, size_t rsn_len);
 int rtw89_mlme_set_key(bool pairwise, int idx, const u8 *key, size_t len, u64 rsc);
 int rtw89_mlme_set_pmk(const u8 *pmk, size_t len);
