@@ -33,7 +33,7 @@ Realtek PCI devices, the Wi-Fi card as `WLAN` or similar with `device-id=b852`
 
 | | |
 |---|---|
-| Networks | WPA3-Personal (SAE, new in 0.3.0, not yet tested on hardware), WPA2-Personal, WPA2-Enterprise (802.1X, tested with PEAP), open; WPA2/WPA3 mixed networks (WPA3, falling back to WPA2); protected management frames (802.11w) |
+| Networks | WPA3-Personal (SAE, new in 0.3.0, tested with the RTL8852BE), WPA2-Personal, WPA2-Enterprise (802.1X, tested with PEAP), open; WPA2/WPA3 mixed networks (WPA3, falling back to WPA2); protected management frames (802.11w) |
 | Band | Prefers a network's 5 GHz side over its 2.4 GHz side when the 5 GHz signal is good, as Windows does |
 | Speed | 802.11ax (Wi-Fi 6), up to 80 MHz, 2 streams: about 500 Mb/s down measured on a 5 GHz 80 MHz network |
 | macOS | Wi-Fi menu, joining and forgetting networks, saved passwords, Personal Hotspot from an iPhone, scanning while connected |
