@@ -76,6 +76,8 @@ static uint8_t ap_ies[] = {
 #define AP_HT_CHANNEL   (sizeof(ap_ies) - 26 - 22)      /* in the HT operation element, */
 #define AP_WMM_COUNT    (sizeof(ap_ies) - 26 + 8)       /* and the WMM parameter set count */
 
+#define AP5_RSN_AKM     45      /* the key management type in ap5_ies' RSN element */
+
 /* A second network: 5 GHz channel 36, 80 MHz wide (centre channel 42), 802.11ac. */
 static uint8_t ap5_ies[] = {
     0x00, 0x08, 't', 'e', 's', 't', 'n', 'e', 't', '5',              /* SSID */
@@ -982,6 +984,50 @@ static int join_testnet(const char *password, uint16_t assoc_status)
     return 1;
 }
 
+/* A beacon of the 8-character network @ssid from access point @last (the last
+ * byte of its address), with the rest of @ies (which start with their own SSID
+ * element). */
+static void dual_beacon(const char *ssid, uint8_t last, const uint8_t *ies, size_t ies_len, uint16_t freq,
+                        int8_t signal)
+{
+    uint8_t frame[24 + 12 + 400] = { 0x80 };
+    size_t skip = 2 + ies[1], len = 24;
+
+    memset(frame + 4, 0xff, 6);
+    memcpy(frame + 10, ap_mac, 5);
+    frame[15] = last;
+    memcpy(frame + 16, frame + 10, 6);
+    frame[len + 8] = 0x64;
+    frame[len + 10] = 0x11;
+    frame[len + 11] = 0x04;
+    len += 12;
+    frame[len++] = 0;
+    frame[len++] = 8;
+    memcpy(frame + len, ssid, 8);
+    len += 8;
+    memcpy(frame + len, ies + skip, ies_len - skip);
+    len += ies_len - skip;
+    rtw89_glue_test_rx(frame, len, freq, signal, false);
+}
+
+/* Which frequency a join of @ssid goes to; @last asks for that access point. */
+static uint16_t dual_join(const char *ssid, int last)
+{
+    static const uint8_t pmk[32] = { 1 };
+    struct rtw89_glue_link link;
+    uint8_t bssid[6];
+
+    memcpy(bssid, ap_mac, 5);
+    bssid[5] = (uint8_t)last;
+    if (rtw89_glue_join_pmk((const uint8_t *)ssid, 8, last >= 0 ? bssid : NULL, pmk))
+        return 0;
+    rtw89_glue_link(&link);
+    rtw89_glue_leave();
+    if (last >= 0 && link.bssid[5] != last && memcmp(link.asked_bssid, bssid, 6))
+        return 1;   /* another one joined, and not noted as macOS's choice */
+    return link.freq;
+}
+
 /* The station is trying to get back: let its scan end if it started one, then
  * play the AP's side of the join. Returns 1 once it is connected again. */
 static int ap_answer_rejoin(const uint8_t *gtk, int gtk_id)
@@ -1483,6 +1529,29 @@ static int test_join(void)
     EXPECT(wait_link(RTW89_GLUE_LINK_CONNECTED));
     EXPECT(sta_tx_test() == 0);
     rtw89_glue_leave();
+    EXPECT(link_state() == RTW89_GLUE_LINK_DOWN);
+
+    /* One network on both bands, as most home routers have it: the 5 GHz side
+     * when its signal is good, even if the 2.4 GHz one is stronger, and even
+     * when macOS asks for the 2.4 GHz one; not when the 5 GHz one is weak, nor
+     * when its key would not work there (WPA3 only). */
+    dual_beacon("dualban1", 0xa1, ap_ies, sizeof(ap_ies), 2437, -30);
+    dual_beacon("dualban1", 0xa5, ap5_ies, sizeof(ap5_ies), 5180, -37);
+    EXPECT(dual_join("dualban1", -1) == 5180);
+    EXPECT(dual_join("dualban1", 0xa1) == 5180);
+    EXPECT(dual_join("dualban1", 0xa5) == 5180);
+    dual_beacon("dualban2", 0xb1, ap_ies, sizeof(ap_ies), 2437, -30);
+    dual_beacon("dualban2", 0xb5, ap5_ies, sizeof(ap5_ies), 5180, -75);
+    EXPECT(dual_join("dualban2", -1) == 2437);
+    EXPECT(dual_join("dualban2", 0xb1) == 2437);
+    dual_beacon("dualban3", 0xc1, ap_ies, sizeof(ap_ies), 2437, -30);
+    dual_beacon("dualban3", 0xc5, ap5_ies, sizeof(ap5_ies), 5180, -50);
+    EXPECT(dual_join("dualban3", -1) == 2437);  /* 20 dB weaker: more than the 15 allowed */
+    ap5_ies[AP5_RSN_AKM] = 8;
+    dual_beacon("dualban4", 0xd1, ap_ies, sizeof(ap_ies), 2437, -30);
+    dual_beacon("dualban4", 0xd5, ap5_ies, sizeof(ap5_ies), 5180, -37);
+    ap5_ies[AP5_RSN_AKM] = 2;
+    EXPECT(dual_join("dualban4", -1) == 2437);
     EXPECT(link_state() == RTW89_GLUE_LINK_DOWN);
 
     /* the same AP on 160 MHz (channels 36-64, centre 50): this card stays in

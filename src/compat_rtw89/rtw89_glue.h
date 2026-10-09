@@ -235,6 +235,7 @@ struct rtw89_glue_rate {
 struct rtw89_glue_link {
     enum rtw89_glue_link_state state;
     uint8_t  bssid[6];
+    uint8_t  asked_bssid[6];        /* the one macOS asked for, if another was joined */
     char     ssid[33];
     uint16_t freq;
     uint16_t aid;

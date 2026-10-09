@@ -91,6 +91,7 @@ static struct {
         bool have_pmk;
         u8 pmk[32];
     } want;
+    u8 asked_bssid[ETH_ALEN];           /* macOS's choice, when a better one was joined */
     bool rejoin_off;                    /* rtw89_glue_set_rejoin(false) */
     bool rejoining;                     /* trying to get back */
     bool rejoin_scanned;                /* this attempt has had its scan */
@@ -1635,6 +1636,28 @@ static const u8 *glue_ext_rsn_ie;
 static size_t glue_ext_rsn_len;
 static bool glue_ext;
 
+/* See glue_join_locked(): a 5 or 6 GHz access point of the network is
+ * preferred to a 2.4 GHz one when its signal is at least this good, and no
+ * more than this much weaker. */
+#define GLUE_PREFER_5G_MIN      (-70)   /* dBm */
+#define GLUE_PREFER_5G_BONUS    15      /* dB */
+
+/* Whether the key for one access point of a network works with another:
+ * open with open, WPA2-PSK with WPA2-PSK, 802.1X with 802.1X. */
+static bool glue_same_key(const struct rtw89_glue_bss_entry *a,
+                          const struct rtw89_glue_bss_entry *b)
+{
+    u8 sa = a->pub.security, sb = b->pub.security;
+
+    if (!sa || !sb)
+        return !sa && !sb;
+    if (sa & RTW89_GLUE_SEC_WPA2_PSK)
+        return sb & RTW89_GLUE_SEC_WPA2_PSK;
+    if (sa & RTW89_GLUE_SEC_ENTERPRISE)
+        return sb & RTW89_GLUE_SEC_ENTERPRISE;
+    return false;
+}
+
 static int glue_join_locked(const u8 *ssid, size_t ssid_len, const u8 *bssid, const u8 *pmk)
 {
     static u8 ies[RTW89_GLUE_MAX_IES];  /* under cmd_lock */
@@ -1655,6 +1678,38 @@ static int glue_join_locked(const u8 *ssid, size_t ssid_len, const u8 *bssid, co
             continue;
         if (!best || e->pub.signal > best->pub.signal)
             best = e;
+    }
+    /*
+     * The same network on 5 or 6 GHz when its signal is good, as Windows and
+     * wpa_supplicant choose: on 2.4 GHz the link is 20 MHz wide, a quarter of
+     * an 80 MHz channel. An RTL8852AE tester got 287 Mb/s on 2.4 GHz at
+     * -30 dBm where Windows took the same router's 5 GHz side at -37 dBm and
+     * 1201 Mb/s. airportd asks for an access point by its signal alone, so
+     * its choice of a 2.4 GHz one is overridden too, but only for one of the
+     * same network the same key works with.
+     */
+    memset(glue.asked_bssid, 0, ETH_ALEN);
+    if (best && best->pub.freq < 5000) {
+        struct rtw89_glue_bss_entry *alt = NULL;
+
+        for (i = 0; i < glue.n_bss; i++) {
+            struct rtw89_glue_bss_entry *e = &glue.bss[i];
+
+            if (e->pub.ssid_len != ssid_len || memcmp(e->pub.ssid, ssid, ssid_len) ||
+                !e->ies_len || e->pub.freq < 5000 || e->pub.signal < GLUE_PREFER_5G_MIN ||
+                e->pub.signal + GLUE_PREFER_5G_BONUS <= best->pub.signal ||
+                !glue_same_key(best, e))
+                continue;
+            if (!alt || e->pub.signal > alt->pub.signal)
+                alt = e;
+        }
+        if (alt) {
+            IOLog("[rtw89] the network on %u MHz (%d dBm) rather than %u MHz (%d dBm)\n",
+                  alt->pub.freq, alt->pub.signal, best->pub.freq, best->pub.signal);
+            if (bssid)
+                memcpy(glue.asked_bssid, bssid, ETH_ALEN);
+            best = alt;
+        }
     }
     if (best) {
         memcpy(bss.bssid, best->pub.bssid, ETH_ALEN);
@@ -1999,6 +2054,7 @@ void rtw89_glue_link(struct rtw89_glue_link *link)
         break;
     }
     memcpy(link->bssid, st.bssid, ETH_ALEN);
+    memcpy(link->asked_bssid, glue.asked_bssid, ETH_ALEN);
     memcpy(link->ssid, st.ssid, sizeof(link->ssid));
     link->freq = st.freq;
     link->aid = st.aid;

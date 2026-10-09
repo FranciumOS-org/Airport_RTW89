@@ -880,7 +880,7 @@ int AirPort_RTW89::nativeAssociate(void *data)
     rtw89_glue_link(&link);
     if ((isConnected(link) || isJoining(link)) && strlen(link.ssid) == d->ad_ssid_len &&
         !memcmp(link.ssid, d->ad_ssid, d->ad_ssid_len) &&
-        (!bssid || !memcmp(bssid, link.bssid, 6))) {
+        (!bssid || !memcmp(bssid, link.bssid, 6) || !memcmp(bssid, link.asked_bssid, 6))) {
         /* the same request again while it is being carried out */
         IOLockUnlock(_commandLock);
         bzero(derived, sizeof(derived));
