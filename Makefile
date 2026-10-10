@@ -3,13 +3,12 @@
 # Workflow (run from the repo root):
 #   make fetch-firmware          # once
 #   make -k compile              # compile every object, keep going on errors
-#   make errors                  # group errors into docs/compile-status.md
+#   make errors                  # group errors into build/log/compile-status.md
 #   make link                    # partial-link all objects, check what is left
-#                                # for the kernel (docs/kernel-imports.md)
+#                                # for the kernel (build/log/kernel-imports.md)
 #   make hosttest                # run probe()/remove() and the self-test in userspace
 #   make kext                    # build/out/AirPort_RTW89.kext (runs hosttest first)
 #
-# Loading the kext is never done from here; see CLAUDE.md.
 
 HOST_CPUS    := $(shell sysctl -n hw.logicalcpu 2>/dev/null || echo 4)
 MAKEFLAGS    += -j$(HOST_CPUS)
@@ -144,7 +143,7 @@ ALL_OBJS      := $(DRIVER_OBJS) $(COMPAT_OBJS) $(COMPAT89_OBJS) $(FW_OBJS) $(SAE
 # Targets                                                              #
 # ------------------------------------------------------------------ #
 
-.PHONY: front deptest all compile errors link hosttest saetest kext fetch-firmware bundle release clean
+.PHONY: front all compile errors link hosttest saetest kext fetch-firmware bundle release clean
 
 all: compile
 
@@ -188,7 +187,7 @@ $(BUILD_DIR)/fw/fw_blobs.o: $(FW_BLOBS_C)
 	@$(CC) $(FW_CFLAGS) -c $< -o $@ 2> $(BUILD_DIR)/log/fw_fw_blobs.log || { cat $(BUILD_DIR)/log/fw_fw_blobs.log >&2; exit 1; }
 
 errors:
-	@python3 tools/errsum.py $(BUILD_DIR)/log docs/compile-status.md
+	@python3 tools/errsum.py $(BUILD_DIR)/log $(BUILD_DIR)/log/compile-status.md
 
 # Everything except the IOKit glue in one relocatable object. Fails if a symbol
 # is left that the kernel does not have, i.e. a Linux function nobody provides.
@@ -196,7 +195,7 @@ LINKED_OBJ := $(BUILD_DIR)/out/AirPort_RTW89.o
 link: compile
 	@mkdir -p $(dir $(LINKED_OBJ))
 	@ld -r $(ARCH) -o $(LINKED_OBJ) $(ALL_OBJS)
-	@python3 tools/check_imports.py $(LINKED_OBJ) docs/kernel-imports.md
+	@python3 tools/check_imports.py $(LINKED_OBJ) $(BUILD_DIR)/log/kernel-imports.md
 
 # rtw89 asks for the highest firmware format it knows first (RTW8852B_FW_FORMAT_MAX
 # = 2 -> rtw8852b_fw-2.bin) and only then falls back to older ones.
@@ -314,19 +313,6 @@ front:
 	@codesign --force --sign - $(FRONT_BUNDLE) 2>/dev/null || true
 	@echo "  KEXT $(FRONT_BUNDLE)"
 
-# A kext that does nothing but depend on IO80211FamilyLegacy, for tools/deptest.sh.
-DEPTEST_BUNDLE := $(BUILD_DIR)/out/RTW89DepTest.kext
-deptest:
-	@rm -rf $(DEPTEST_BUNDLE)
-	@mkdir -p $(DEPTEST_BUNDLE)/Contents/MacOS $(BUILD_DIR)/kext
-	@cp tools/deptest/Info.plist $(DEPTEST_BUNDLE)/Contents/Info.plist
-	@$(CC) $(FW_CFLAGS) -c tools/deptest/deptest.c -o $(BUILD_DIR)/kext/deptest.o
-	@$(CXX) $(ARCH) $(MINOS) -isysroot $(SDK) -nostdlib -Xlinker -kext \
-	    -L$(MKSDK)/Library/x86_64 $(BUILD_DIR)/kext/deptest.o -lkmod -lcc_kext \
-	    -o $(DEPTEST_BUNDLE)/Contents/MacOS/RTW89DepTest
-	@codesign --force --sign - $(DEPTEST_BUNDLE) 2>/dev/null || true
-	@echo "  KEXT $(DEPTEST_BUNDLE)"
-
 # The smoke test gates the bundle: nothing gets packaged that crashed there.
 kext: hosttest $(KEXT_OBJS) $(KEXT_SRC)/Info.plist
 	@rm -rf $(BUILD_DIR)/out/AirPort_RTW89.kext
@@ -380,8 +366,7 @@ bundle: kext front
 # The downloads: AirPort_RTW89-<version>.zip, the kext and next to it the
 # Kext Installer (.command for macOS, .cmd for Windows, .sh for Linux, and the
 # .py they run, with efi/configure.py built in); and
-# AirPort_RTW89-<version>-tools.zip for testers: efi/install.sh (not
-# efi/tuf-a15/, this machine's own), rtw89ctl, the log collector, README and
+# AirPort_RTW89-<version>-tools.zip for testers: efi/install.sh, rtw89ctl, the log collector, README and
 # TESTING.md. The old Wi-Fi stack is not Apple's to give away here.
 VERSION     := $(shell /usr/libexec/PlistBuddy -c 'Print CFBundleShortVersionString' src/kext/Info.plist)
 RELEASE     := AirPort_RTW89-$(VERSION)

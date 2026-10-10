@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: GPL-2.0
 /*
  * Userspace stand-ins for the kernel symbols the driver object imports
- * (docs/kernel-imports.md), so the very same build/out/AirPort_RTW89.o that
+ * (build/log/kernel-imports.md), so the very same build/out/AirPort_RTW89.o that
  * goes into the kext can be linked into a normal program and exercised
  * without risking a panic. Semantics are close enough for a smoke test:
  * IOLocks are pthread mutexes, kernel threads are pthreads, thread calls are

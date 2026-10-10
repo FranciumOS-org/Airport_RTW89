@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """Group clang errors from build/log/*.log into a shim work list.
 
-Usage: python3 tools/errsum.py build/log docs/compile-status.md
+Usage: python3 tools/errsum.py build/log build/log/compile-status.md
 
 Errors are grouped by what has to be done about them (a missing identifier, a
 missing struct member, a type mismatch, ...) so one shim fix can be matched to

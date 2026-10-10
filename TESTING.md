@@ -1,8 +1,8 @@
 # Testing AirPort_RTW89
 
-Thank you for trying it. Only the RTL8852BE has run this driver on real
-hardware so far; your report decides whether your card works. Expect the
-first boot on a new card to go wrong in some way: that is useful too.
+Thank you for trying it. Your report decides whether your card works.
+Expect the first boot on a new card to go wrong in some way: that is useful
+too.
 
 ## Before you start
 
@@ -17,7 +17,7 @@ first boot on a new card to go wrong in some way: that is useful too.
    ```
    `logs/system.txt` now shows your card's PCI ID (`device-id=...` on the
    Wi-Fi line) and your macOS version. Check the card is in the table in the
-   [README](README.md#cards).
+   [README](README.md#supported-cards).
 3. Install as the [README](README.md#installing) says, preferably with the
    Kext Installer that comes with the kext (`Kext Installer.command` on
    macOS, `Kext Installer.cmd` on Windows), and restart.

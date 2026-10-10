@@ -2,7 +2,7 @@
 /*
  * AirPortRTW89Front: the Wi-Fi device as macOS sees it. See rtw89_front_api.h
  * for why this is a kext of its own and what it leaves to the driver proper.
- * The IO80211Controller lifecycle follows AirPort_RTW88 (reference/), which
+ * The IO80211Controller lifecycle follows AirPort_RTW88, which
  * follows AirportItlwm.
  */
 #pragma once

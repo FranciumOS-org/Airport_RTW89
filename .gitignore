@@ -6,3 +6,5 @@ __pycache__/
 .DS_Store
 efi/kit/
 logs/
+CLAUDE.md
+efi/tuf-a15/

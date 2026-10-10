@@ -8,7 +8,6 @@
 | `linux/average.h` | `DECLARE_EWMA` used `_weight_rcp` directly as a shift and shifted `val` by `precision - weight`; for `DECLARE_EWMA(rssi, 10, 16)` that is a negative shift (UB; x86 shifts by 58). Now matches Linux: shift by `ilog2(weight)`, blend `(old·(w−1)+val)/w`. Affects rtw88's rssi/evm/snr/thermal/tp averages too. | ⬆ |
 | `linux/bitfield.h` | `le64_get_bits` called `u64_encode_bits` (shift left) instead of extracting the field. | ⬆ |
 | `fw_blobs.c/.h` | Removed; regenerated from `firmware/` for rtw89. | — |
-| `net/mac80211.h` | **No longer used by rtw89** (it builds against the upstream header, see PORTING.md → Status); kept for reference because `reference/rtw88_kext` was written against it. Earlier change, now moot: `struct wiphy` gained `struct mutex mtx` and the wiphy_work runner fields. | — |
 | `linux/skbuff.h` | `struct sk_buff` gains `network_header`/`transport_header`/`mac_header` offsets (rtw89 `ip_hdr`/`udp_hdr`); TX glue must set them. | — |
 | `rtw88_compat.h` | Under `RTW89_MACOS`: does not include `net/mac80211.h` (rtw89_compat.h includes the upstream one instead) and skips its own `refcount_t`, `WLAN_*` and `IEEE80211_MAX_QUEUES` definitions, which the upstream `linux/ieee80211.h` and rtw89_compat.h provide. | — |
 | `rtw88_compat.c` | Under `RTW89_MACOS`: the rtw88 mini-mac80211 (`ieee80211_*`, `cfg80211_*`, `regulatory_hint`, kext callback table), `get_random_mask_addr` and everything that reaches into `struct rtw_dev` are compiled out. Logging, workqueues, timers, IRQ/NAPI emulation and init/exit stay. | — |

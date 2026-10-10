@@ -1,7 +1,6 @@
 /* SPDX-License-Identifier: GPL-2.0 OR BSD-3-Clause
  * rtw89 additions on top of the inherited rtw88 compat layer.
  * Force-included after rtw88_compat.h for every rtw89 driver file.
- * Contents come from tools/api_gap.py (docs/api-gap.md); keep sections in that order.
  */
 #ifndef _RTW89_COMPAT_H
 #define _RTW89_COMPAT_H

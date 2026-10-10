@@ -5,7 +5,7 @@
  * does not publish an Ethernet interface of its own; it connects to the front
  * and answers what IO80211 asks: scan, join, state, and the data frames of the
  * Wi-Fi interface. The requests and their answers follow AirPort_RTW88's
- * controller (reference/airport_rtw88/kext/AirportRTW88.cpp), which follows
+ * controller (AirPort_RTW88's AirportRTW88.cpp), which follows
  * AirportItlwm; the structures are the old family's (Ventura), which is what
  * OpenCore puts back on later systems.
  */
@@ -1444,7 +1444,7 @@ int AirPort_RTW89::nativeRequest(bool isSet, int number, void *data)
          * __getMFPCaps tests byte 6 & 0x11, and Apple80211Associate2 takes
          * the SAE suite only from a card that has it, so without it a WPA3
          * network (MFP required) is refused with -3900 before any request
-         * leaves macOS (traced with tools/assoctrace.py).
+         * leaves macOS (traced in IO80211.framework under lldb).
          */
         if (advertiseWPA3())
             d->capabilities[6] |= 0x01;

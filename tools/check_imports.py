@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """List the symbols a partially linked object still needs from the kernel.
 
-Usage: python3 tools/check_imports.py build/out/AirPort_RTW89.o [docs/kernel-imports.md]
+Usage: python3 tools/check_imports.py build/out/AirPort_RTW89.o [build/log/kernel-imports.md]
 
 Every undefined symbol must be something the running kernel has; anything else
 is a function the compat layer still has to provide, and the script fails.
