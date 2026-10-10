@@ -4,7 +4,7 @@ Native Wi-Fi on macOS for **Realtek's rtw89 PCIe cards**, by porting the Linux
 **rtw89** driver. The card shows up as Wi-Fi in macOS and is used from the
 Wi-Fi menu and System Settings like a Mac's own.
 
-> **Preview (0.3.0).** It has been developed and tested on **one machine**
+> **Preview (0.4.0).** It has been developed and tested on **one machine**
 > (ASUS TUF A15 FA507NU with an RTL8852BE, macOS Sequoia 15.8.1). It works
 > there every day; on every other card it has **never run on real hardware**.
 > A driver bug can panic the machine: keep a way to boot without it (see
@@ -19,9 +19,9 @@ Wi-Fi menu and System Settings like a Mac's own.
 | RTL8852BTE | `B520` | 6, 2×2 | built in, untested |
 | RTL8851BE | `B851` | 6, 1×1 | built in, untested |
 | RTL8852AE | `8852`, `A85A` | 6, 2×2 | **works** (one tester, 0.2.2, Tahoe 26.6.2) |
-| RTL8852CE | `C852` | 6E, 2×2, 160 MHz | built in, untested; 6 GHz off (needs WPA3) |
-| RTL8922AE | `8922`, `892B` | 7, 2×2 | built in, untested; joins as Wi-Fi 6, 6 GHz off |
-| RTL8922DE | `892D`, `882D`, `895D` | 7, 2×2 | **works** (one tester, 0.2.0, Tahoe 26.4); joins as Wi-Fi 6, 6 GHz off |
+| RTL8852CE | `C852` | 6E, 2×2, 160 MHz | built in, untested; 6 GHz new in 0.4.0, untested |
+| RTL8922AE | `8922`, `892B` | 7, 2×2 | built in, untested; 6 GHz and Wi-Fi 7 new in 0.4.0, untested |
+| RTL8922DE | `892D`, `882D`, `895D` | 7, 2×2 | **works** (one tester, 0.2.0, Tahoe 26.4); 6 GHz and Wi-Fi 7 new in 0.4.0, untested |
 
 All of them run the same Linux code, unmodified, with each chip's own Realtek
 firmware. To see which card you have before installing anything, run
@@ -33,18 +33,17 @@ Realtek PCI devices, the Wi-Fi card as `WLAN` or similar with `device-id=b852`
 
 | | |
 |---|---|
-| Networks | WPA3-Personal (SAE, new in 0.3.0, tested with the RTL8852BE), WPA2-Personal, WPA2-Enterprise (802.1X, tested with PEAP), open; WPA2/WPA3 mixed networks (WPA3, falling back to WPA2); protected management frames (802.11w) |
+| Networks | WPA3-Personal (SAE, tested with the RTL8852BE; hash-to-element new in 0.4.0), WPA2-Personal, WPA2-Enterprise (802.1X, tested with PEAP), open; WPA2/WPA3 mixed networks (WPA3, falling back to WPA2); protected management frames (802.11w) |
 | Band | Prefers a network's 5 GHz side over its 2.4 GHz side when the 5 GHz signal is good, as Windows does |
 | Speed | 802.11ax (Wi-Fi 6), up to 80 MHz, 2 streams: about 500 Mb/s down measured on a 5 GHz 80 MHz network |
+| 6 GHz and Wi-Fi 7 | New in 0.4.0, not yet tested on hardware: 6 GHz networks (RTL8852CE, RTL8922AE/DE) on the 15 channels macOS lists them on; Wi-Fi 7 (802.11be) on one link, up to 80 MHz, with punctured channels (RTL8922AE/DE). Testers with these cards and a 6E or Wi-Fi 7 router wanted |
 | macOS | Wi-Fi menu, joining and forgetting networks, saved passwords, Personal Hotspot from an iPhone, scanning while connected |
 | Startup | Loaded by OpenCore at boot, Wi-Fi up without anything run by hand |
 | Restart and shutdown | The chip is powered down cleanly |
 
 ## What does not (yet)
 
-- **WPA3 networks that require hash-to-element** (SAE H2E): some routers
-  and every 6 GHz network. A mixed WPA2/WPA3 network then joins over WPA2.
-  If WPA3 causes trouble, add the boot-arg `-rtw89nowpa3`: macOS then joins
+- If WPA3 causes trouble, add the boot-arg `-rtw89nowpa3`: macOS then joins
   everything as before 0.3.0 (WPA3-only networks are refused).
 - **Sleep and wake**: the driver handles it, but it has not been tested on
   hardware (the development machine does not really sleep).
@@ -54,8 +53,11 @@ Realtek PCI devices, the Wi-Fi card as `WLAN` or similar with `device-id=b852`
   Transmit power follows the country the router announces; a router that
   announces none leaves the driver on Realtek's cautious worldwide limits
   (`rtw89ctl status` shows which: "tables of 00" is worldwide).
-- **6 GHz** is switched off (RTL8852CE, RTL8922AE/DE): every 6 GHz network
-  needs WPA3 with hash-to-element. **Wi-Fi 7** cards join as Wi-Fi 6.
+- **Wi-Fi 7 multi-link (MLO)** and **160/320 MHz** channels: a Wi-Fi 7
+  router is joined on one of its links, 80 MHz wide at most. macOS's Wi-Fi
+  stack used here (Ventura's) has no notion of multi-link.
+- **6 GHz networks off the 15 preferred scanning channels** are not looked
+  for (macOS would not list them either).
 - Tested on **Sequoia 15.8.1** (the development machine) and **Tahoe**
   (26.4 with an RTL8922DE; 26.6.2 with an RTL8852AE). Sonoma is expected to work but is untested.
 

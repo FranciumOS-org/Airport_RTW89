@@ -104,5 +104,11 @@ int rtw89_chip_info_setup(struct rtw89_dev *rtwdev)
     rtw89_core_setup_rfe_parms(rtwdev);
     rtwdev->ps_mode = rtw89_update_ps_mode(rtwdev);
 
+    /* The hardware radio switch, where a chip has one (RTL8922A: a GPIO
+     * input): on, as on a laptop with Wi-Fi enabled. Zeroed registers read as
+     * "off", and the radio would refuse to start. */
+    if (chip->rfkill_init)
+        rtw89_write32_set(rtwdev, chip->rfkill_get.addr, chip->rfkill_get.mask);
+
     return 0;
 }

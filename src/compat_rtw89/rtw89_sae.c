@@ -10,11 +10,14 @@
 
 struct rtw89_sae {
     struct sae_data data;
+    struct sae_pt *pt;          /* hash-to-element: the password's point */
 };
 
 struct rtw89_sae *rtw89_sae_begin(const uint8_t own[6], const uint8_t peer[6],
-                                  const uint8_t *password, size_t password_len)
+                                  const uint8_t *ssid, size_t ssid_len,
+                                  const uint8_t *password, size_t password_len, bool h2e)
 {
+    static const int groups[] = { 19, 0 };
     struct rtw89_sae *sae = os_zalloc(sizeof(*sae));
 
     if (!sae)
@@ -24,7 +27,13 @@ struct rtw89_sae *rtw89_sae_begin(const uint8_t own[6], const uint8_t peer[6],
         return NULL;
     }
     sae->data.akmp = WPA_KEY_MGMT_SAE;
-    if (sae_prepare_commit(own, peer, password, password_len, &sae->data)) {
+    if (h2e) {
+        sae->pt = sae_derive_pt(groups, ssid, ssid_len, password, password_len, NULL, 0);
+        if (!sae->pt || sae_prepare_commit_pt(&sae->data, sae->pt, own, peer, NULL, NULL)) {
+            rtw89_sae_end(sae);
+            return NULL;
+        }
+    } else if (sae_prepare_commit(own, peer, password, password_len, &sae->data)) {
         rtw89_sae_end(sae);
         return NULL;
     }
@@ -36,6 +45,7 @@ void rtw89_sae_end(struct rtw89_sae *sae)
 {
     if (!sae)
         return;
+    sae_deinit_pt(sae->pt);
     sae_clear_data(&sae->data);
     bin_clear_free(sae, sizeof(*sae));
 }
@@ -84,7 +94,8 @@ int rtw89_sae_rx_commit(struct rtw89_sae *sae, const uint8_t *body, size_t len)
     size_t token_len = 0;
     u16 status;
 
-    status = sae_parse_commit(&sae->data, body, len, &token, &token_len, groups, 0, NULL);
+    status = sae_parse_commit(&sae->data, body, len, &token, &token_len, groups,
+                              sae->data.h2e, NULL);
     if (status != WLAN_STATUS_SUCCESS)
         return status;
     if (sae_process_commit(&sae->data))

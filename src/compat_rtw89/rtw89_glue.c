@@ -591,6 +591,22 @@ void rtw89_glue_set_ax(bool on)
     rtw89_mlme_set_he(on);
 }
 
+void rtw89_glue_set_country(const char *alpha2)
+{
+    struct ieee80211_hw *hw;
+    char cc[2];
+    int i;
+
+    if (!glue.probed || !alpha2)
+        return;
+    for (i = 0; i < 2; i++)
+        cc[i] = alpha2[i] >= 'a' && alpha2[i] <= 'z' ? (char)(alpha2[i] - 'a' + 'A') : alpha2[i];
+    hw = glue_hw();
+    wiphy_lock(hw->wiphy);
+    rtw89_cfg80211_set_country(hw->wiphy, cc);
+    wiphy_unlock(hw->wiphy);
+}
+
 /*
  * Remember how a frame was sent to us: mode, rate index, streams, width and
  * guard interval in one word, so that readers on other threads never see half
@@ -653,7 +669,7 @@ static void glue_rate_describe(const struct rate_info *ri, struct rtw89_glue_rat
     out->kbps = cfg80211_calculate_bitrate((struct rate_info *)ri) * 100;
     if (!out->kbps)
         return;
-    out->mode = ri->flags & RATE_INFO_FLAGS_HE_MCS ? 3 : ri->flags & RATE_INFO_FLAGS_VHT_MCS ? 2 :
+    out->mode = ri->flags & RATE_INFO_FLAGS_EHT_MCS ? 4 : ri->flags & RATE_INFO_FLAGS_HE_MCS ? 3 : ri->flags & RATE_INFO_FLAGS_VHT_MCS ? 2 :
                 ri->flags & RATE_INFO_FLAGS_MCS ? 1 : 0;
     out->mcs = out->mode ? ri->mcs : 0;
     /* 802.11n numbers its rates through the streams: 8 to a stream */
@@ -826,6 +842,20 @@ void rtw89_glue_note_bss(const u8 *frame, size_t len, u16 freq, s8 signal)
     spin_unlock(&glue.bss_lock);
 }
 
+/*
+ * Whether a scan visits @chan: every channel that is allowed, but on 6 GHz the
+ * 15 preferred scanning channels only (every fourth 20 MHz channel: 5, 21,
+ * ..., 229). Access points there are expected on them, macOS shows networks
+ * found elsewhere only when a 2.4/5 GHz neighbour report points to them, and
+ * listening on all 59 would add seconds to each scan.
+ */
+static bool glue_scan_channel(const struct ieee80211_channel *chan)
+{
+    if (chan->flags & IEEE80211_CHAN_DISABLED)
+        return false;
+    return chan->band != NL80211_BAND_6GHZ || chan->hw_value % 16 == 5;
+}
+
 /* Mode, width and security of a network, from its elements. */
 static void glue_bss_describe(struct rtw89_glue_bss_entry *e)
 {
@@ -858,8 +888,23 @@ static void glue_bss_describe(struct rtw89_glue_bss_entry *e)
         else if (oper->chan_width == IEEE80211_VHT_CHANWIDTH_160MHZ)
             e->pub.width = 160;
     }
-    if (cfg80211_find_ext_elem(WLAN_EID_EXT_HE_CAPABILITY, e->ies, e->ies_len))
+    if (cfg80211_find_ext_elem(WLAN_EID_EXT_HE_CAPABILITY, e->ies, e->ies_len)) {
+        const struct ieee80211_he_6ghz_oper *op6 = NULL;
+
         e->pub.mode = 3;
+        /* 6 GHz has no HT or VHT: the width is in the HE operation element */
+        elem = cfg80211_find_ext_elem(WLAN_EID_EXT_HE_OPERATION, e->ies, e->ies_len);
+        if (elem && elem->datalen >= 1 + sizeof(struct ieee80211_he_operation) &&
+            elem->datalen >= ieee80211_he_oper_size(elem->data + 1))
+            op6 = ieee80211_he_6ghz_oper((const void *)(elem->data + 1));
+        if (op6) {
+            static const u8 widths[] = { 20, 40, 80, 160 };
+
+            e->pub.width = widths[op6->control & IEEE80211_HE_6GHZ_OPER_CTRL_CHANWIDTH];
+        }
+        if (cfg80211_find_ext_elem(WLAN_EID_EXT_EHT_CAPABILITY, e->ies, e->ies_len))
+            e->pub.mode = 4;
+    }
 
     /* RSN: version, group cipher, pairwise list, AKM list, capabilities */
     elem = cfg80211_find_elem(WLAN_EID_RSN, e->ies, e->ies_len);
@@ -1107,6 +1152,35 @@ void rtw89_glue_test_emulate_chanctx(void)
     ops->unassign_vif_chanctx = NULL;
     /* nor beacon filtering in their firmware: no CONNECTION_MONITOR */
     __clear_bit(IEEE80211_HW_CONNECTION_MONITOR, glue_hw()->flags);
+}
+
+/*
+ * For the smoke test: 802.11be capabilities on the 6 GHz band of a chip that
+ * has none (the pretend RTL8852CE), as an RTL8922A's would read: 2 streams up
+ * to MCS 13, no PPE thresholds. The RTL8922A itself cannot be pretended: its
+ * radio does not start without firmware answers. This exercises the MLME's
+ * 802.11be join, not rtw89's handling of a real 802.11be chip.
+ */
+void rtw89_glue_test_fake_eht(void);
+void rtw89_glue_test_fake_eht(void)
+{
+    struct ieee80211_supported_band *sband = glue_hw()->wiphy->bands[NL80211_BAND_6GHZ];
+    struct ieee80211_sband_iftype_data *data;
+    int i;
+
+    if (!sband)
+        return;
+    for (i = 0; i < sband->n_iftype_data; i++) {
+        data = (struct ieee80211_sband_iftype_data *)&sband->iftype_data[i];
+        if (!(data->types_mask & BIT(NL80211_IFTYPE_STATION)))
+            continue;
+        memset(&data->eht_cap, 0, sizeof(data->eht_cap));
+        data->eht_cap.has_eht = true;
+        data->eht_cap.eht_mcs_nss_supp.bw._80.rx_tx_mcs9_max_nss = 0x22;
+        data->eht_cap.eht_mcs_nss_supp.bw._80.rx_tx_mcs11_max_nss = 0x22;
+        data->eht_cap.eht_mcs_nss_supp.bw._80.rx_tx_mcs13_max_nss = 0x22;
+        data->eht_cap.eht_mcs_nss_supp.bw._160 = data->eht_cap.eht_mcs_nss_supp.bw._80;
+    }
 }
 
 /* For the userspace smoke test, whose pretend chip never finishes a scan. */
@@ -1432,7 +1506,7 @@ static int glue_scan_locked(void)
         for (band = 0; band < NUM_NL80211_BANDS; band++) {
             sband = hw->wiphy->bands[band];
             for (i = 0; sband && i < sband->n_channels; i++) {
-                if (sband->channels[i].flags & IEEE80211_CHAN_DISABLED)
+                if (!glue_scan_channel(&sband->channels[i]))
                     continue;
                 if (k++ < from)
                     continue;
@@ -1579,7 +1653,7 @@ unsigned int rtw89_glue_channels(struct rtw89_glue_channel *out, unsigned int ma
         for (i = 0; sband && i < sband->n_channels && n < max; i++) {
             const struct ieee80211_channel *chan = &sband->channels[i];
 
-            if (chan->flags & IEEE80211_CHAN_DISABLED)
+            if (!glue_scan_channel(chan))
                 continue;
             out[n].freq = (u16)chan->center_freq;
             out[n].channel = (u8)chan->hw_value;

@@ -233,7 +233,21 @@ static void rtw89_cfg80211_reg_work(struct work_struct *work)
 {
     struct rtw89_cfg80211_rdev *rdev =
         container_of(work, struct rtw89_cfg80211_rdev, reg_work);
+    struct ieee80211_supported_band *sband = rdev->wiphy.bands[NL80211_BAND_6GHZ];
+    int i;
 
+    /*
+     * The Linux core recomputes every channel's flags from the database on a
+     * change of country; rtw89's notifier then takes 6 GHz away where its
+     * policy says (the world domain included). Without the first step 6 GHz,
+     * once off, never came back. Back to listen-only, then the notifier.
+     */
+    if (sband) {
+        wiphy_lock(&rdev->wiphy);
+        for (i = 0; i < sband->n_channels; i++)
+            sband->channels[i].flags = sband->channels[i].orig_flags | IEEE80211_CHAN_NO_IR;
+        wiphy_unlock(&rdev->wiphy);
+    }
     if (rdev->wiphy.reg_notifier)
         rdev->wiphy.reg_notifier(&rdev->wiphy, &rdev->reg_request);
 }
@@ -249,9 +263,9 @@ static void rtw89_cfg80211_reg_work(struct work_struct *work)
  * The world regulatory domain ("00" in the Linux regulatory database), which
  * is what applies until a country is known: 2.4 GHz channels 1-11 as usual,
  * 12-14 and all of 5 GHz listen-only (NO_IR: no probe requests, no
- * beaconing), radar detection required on 5250-5730 MHz, and nothing above
- * 5835 MHz (6 GHz included, see below). The driver decides active vs passive scanning per channel from
- * these flags.
+ * beaconing), radar detection required on 5250-5730 MHz, nothing above
+ * 5835 MHz on 5 GHz, and 6 GHz listen-only (see below). The driver decides
+ * active vs passive scanning per channel from these flags.
  */
 static void rtw89_cfg80211_apply_world_regdom(struct wiphy *wiphy)
 {
@@ -287,12 +301,17 @@ static void rtw89_cfg80211_apply_world_regdom(struct wiphy *wiphy)
                 if (freq >= 5260 && freq <= 5720)
                     flags |= IEEE80211_CHAN_RADAR;
                 break;
+            case NL80211_BAND_6GHZ:
+                /* 6 GHz (RTL8852CE, RTL8922AE/DE): listen-only, as in the
+                 * world domain of the Linux regulatory database; a station
+                 * there only answers access points it has heard. rtw89's
+                 * own 6 GHz policy (regd.c) then takes the channels away in
+                 * countries where they are not allowed. Scans visit only the
+                 * 15 preferred scanning channels (rtw89_glue.c), the ones
+                 * macOS shows networks on. */
+                flags = IEEE80211_CHAN_NO_IR;
+                break;
             default:
-                /* 6 GHz (RTL8852CE, RTL8922AE/DE): off. Every network there
-                 * needs WPA3, which is not in yet, and the native layer
-                 * tells the bands apart by channel number, which 6 GHz
-                 * reuses; scanning its 59 listen-only channels would only
-                 * make every scan longer. */
                 flags = IEEE80211_CHAN_DISABLED;
                 break;
             }
@@ -310,6 +329,9 @@ int wiphy_register(struct wiphy *wiphy)
     struct rtw89_cfg80211_rdev *rdev = wiphy_to_rdev(wiphy);
 
     rtw89_cfg80211_apply_world_regdom(wiphy);
+    rdev->base_alpha2[0] = '0';
+    rdev->base_alpha2[1] = '0';
+    rdev->ie_country = false;
 
     memset(&rdev->reg_request, 0, sizeof(rdev->reg_request));
     rdev->reg_request.initiator = NL80211_REGDOM_SET_BY_CORE;
@@ -357,10 +379,33 @@ int regulatory_hint(struct wiphy *wiphy, const char *alpha2)
  * worldwide tables, 4.5 dB below the Canadian or US ones on 2.4 GHz.
  * Under the wiphy mutex; the notifier runs from reg_work.
  */
+static void rtw89_cfg80211_request(struct rtw89_cfg80211_rdev *rdev, char a0, char a1,
+                                   enum nl80211_reg_initiator initiator)
+{
+    struct regulatory_request *req = &rdev->reg_request;
+
+    if (req->alpha2[0] == a0 && req->alpha2[1] == a1)
+        return;
+    req->alpha2[0] = a0;
+    req->alpha2[1] = a1;
+    req->alpha2[2] = '\0';
+    req->initiator = initiator;
+    req->dfs_region = NL80211_DFS_UNSET;
+    queue_work(rdev->wq, &rdev->reg_work);
+}
+
+/* What applies without an AP's country: macOS's, else the world domain. */
+static void rtw89_cfg80211_request_base(struct rtw89_cfg80211_rdev *rdev)
+{
+    bool world = rdev->base_alpha2[0] == '0';
+
+    rtw89_cfg80211_request(rdev, rdev->base_alpha2[0], rdev->base_alpha2[1],
+                           world ? NL80211_REGDOM_SET_BY_CORE : NL80211_REGDOM_SET_BY_DRIVER);
+}
+
 void rtw89_cfg80211_country_ie(struct wiphy *wiphy, const u8 *alpha2)
 {
     struct rtw89_cfg80211_rdev *rdev = wiphy_to_rdev(wiphy);
-    struct regulatory_request *req = &rdev->reg_request;
     char a0 = alpha2 ? alpha2[0] : '0', a1 = alpha2 ? alpha2[1] : '0';
 
     if (wiphy->regulatory_flags & REGULATORY_COUNTRY_IE_IGNORE)
@@ -368,14 +413,33 @@ void rtw89_cfg80211_country_ie(struct wiphy *wiphy, const u8 *alpha2)
     /* "XX" and the like: not a country the tables know */
     if (alpha2 && (a0 < 'A' || a0 > 'Z' || a1 < 'A' || a1 > 'Z'))
         return;
-    if (req->alpha2[0] == a0 && req->alpha2[1] == a1)
+    rdev->ie_country = alpha2 != NULL;
+    if (!alpha2) {
+        /* leaving: back to macOS's country, not the world domain */
+        rtw89_cfg80211_request_base(rdev);
         return;
-    req->alpha2[0] = a0;
-    req->alpha2[1] = a1;
-    req->alpha2[2] = '\0';
-    req->initiator = alpha2 ? NL80211_REGDOM_SET_BY_COUNTRY_IE : NL80211_REGDOM_SET_BY_CORE;
-    req->dfs_region = NL80211_DFS_UNSET;
-    queue_work(rdev->wq, &rdev->reg_work);
+    }
+    rtw89_cfg80211_request(rdev, a0, a1, NL80211_REGDOM_SET_BY_COUNTRY_IE);
+}
+
+/*
+ * The country macOS sets (APPLE80211_IOC_COUNTRY_CODE: airportd's, from the
+ * location and the networks around). A driver hint, not a user setting: as
+ * on Linux with a user-set country, rtw89 would otherwise stop following the
+ * AP's Country element, and with it its TX power tables. It is what applies
+ * when no AP's country does, so 6 GHz, which rtw89 keeps off in the world
+ * domain, can be scanned before any join. Under the wiphy mutex.
+ */
+void rtw89_cfg80211_set_country(struct wiphy *wiphy, const char *alpha2)
+{
+    struct rtw89_cfg80211_rdev *rdev = wiphy_to_rdev(wiphy);
+
+    if (!alpha2 || alpha2[0] < 'A' || alpha2[0] > 'Z' || alpha2[1] < 'A' || alpha2[1] > 'Z')
+        return;
+    rdev->base_alpha2[0] = alpha2[0];
+    rdev->base_alpha2[1] = alpha2[1];
+    if (!rdev->ie_country)
+        rtw89_cfg80211_request_base(rdev);
 }
 
 /* ------------------------------------------------------------------ */

@@ -33,6 +33,10 @@ Note what happens at each step; stop at the first one that fails and report.
 3. **Join** your network. Does it connect, and do web pages load? If you can,
    also try a **WPA3** one (a phone hotspot set to WPA3, or a router's WPA3
    setting): `sudo tools/rtw89ctl log | grep -iE "SAE|WPA3"` shows how it went.
+   With an RTL8852CE or RTL8922AE/DE and a 6E or Wi-Fi 7 router: does its
+   6 GHz network show up and connect? `sudo tools/rtw89ctl status` shows the
+   band (frequencies from 5955 MHz are 6 GHz) and the mode (802.11be is
+   Wi-Fi 7).
 4. **Speed**, with any speed test site: once next to the router, once a room
    or two away. Note the band (2.4 or 5 GHz) and, if you can, what the same
    spot gets in Windows or Linux.

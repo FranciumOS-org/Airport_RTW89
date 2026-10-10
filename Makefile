@@ -259,6 +259,8 @@ hosttest: link
 	@if ls $(BUILD_DIR)/log/hosttest_*.failed >/dev/null 2>&1; then \
 	    cat $(BUILD_DIR)/log/hosttest_*.failed; rm -f $(BUILD_DIR)/log/hosttest_*.failed; exit 1; fi
 	$(call hostrun,$(HOSTTEST)_fakechip,00 ok,hosttest_fakechip)
+	$(call hostrun,$(HOSTTEST)_fakechip,00 wide c852,hosttest_wide_8852ce)
+	$(call hostrun,$(HOSTTEST)_fakechip,00 wide c852 eht,hosttest_wide_eht)
 	@cc -c -O1 -g -w $(filter-out -DMBEDTLS%,$(SAE_INC)) tools/hosttest/sae_test.c -o $(BUILD_DIR)/out/sae_test_main.o
 	@cc $(ARCH) -o $(SAETEST)_kernel $(BUILD_DIR)/out/sae_test_main.o $(SAE_KOBJS) \
 	    $(BUILD_DIR)/fw/rtw89_crypto.o $(BUILD_DIR)/out/host_kernel.o

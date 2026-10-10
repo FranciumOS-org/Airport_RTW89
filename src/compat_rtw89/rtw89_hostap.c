@@ -395,7 +395,18 @@ int crypto_bignum_mod(const struct crypto_bignum *a, const struct crypto_bignum 
 int crypto_bignum_exptmod(const struct crypto_bignum *a, const struct crypto_bignum *b,
                           const struct crypto_bignum *c, struct crypto_bignum *d)
 {
-    return mbedtls_mpi_exp_mod(MPI(d), CMPI(a), CMPI(b), CMPI(c), NULL) ? -1 : 0;
+    mbedtls_mpi t;
+    int ret;
+
+    /* Mbed TLS's exp_mod must not write over its exponent while reading it,
+     * and hostap passes the same number for both (sswu(): gx1^((p-1)/2)
+     * into the (p-1)/2 it came from); that gave a wrong quadratic residue
+     * test and a hash-to-element point off the curve */
+    mbedtls_mpi_init(&t);
+    ret = mbedtls_mpi_exp_mod(&t, CMPI(a), CMPI(b), CMPI(c), NULL) ||
+          mbedtls_mpi_copy(MPI(d), &t) ? -1 : 0;
+    mbedtls_mpi_free(&t);
+    return ret;
 }
 
 int crypto_bignum_inverse(const struct crypto_bignum *a, const struct crypto_bignum *b,

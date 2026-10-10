@@ -10,6 +10,7 @@
 #ifndef _RTW89_SAE_H
 #define _RTW89_SAE_H
 
+#include <stdbool.h>
 #include <stddef.h>
 #include <stdint.h>
 
@@ -20,9 +21,12 @@ extern "C" {
 struct rtw89_sae;
 
 /* Password element and own commit for this station and access point. NULL
- * if there is no memory or the password makes no element. */
+ * if there is no memory or the password makes no element. @h2e: the element
+ * by hash-to-element (from the network name too; 12.4.4.2.3), which 6 GHz
+ * and some access points require, rather than by hunting and pecking. */
 struct rtw89_sae *rtw89_sae_begin(const uint8_t own[6], const uint8_t peer[6],
-                                  const uint8_t *password, size_t password_len);
+                                  const uint8_t *ssid, size_t ssid_len,
+                                  const uint8_t *password, size_t password_len, bool h2e);
 void rtw89_sae_end(struct rtw89_sae *sae);
 
 /* Own commit, with the anti-clogging token the AP asked for (or none).

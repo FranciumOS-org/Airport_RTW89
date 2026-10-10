@@ -132,7 +132,7 @@ struct rtw89_glue_bss {
     int8_t   signal;            /* dBm */
     uint16_t capability;
     uint32_t seen;              /* beacons and probe responses heard */
-    uint8_t  mode;              /* 0: 802.11a/b/g, 1: n, 2: ac, 3: ax */
+    uint8_t  mode;              /* 0: 802.11a/b/g, 1: n, 2: ac, 3: ax, 4: be */
     uint8_t  width;             /* MHz the AP operates on */
     uint8_t  security;          /* RTW89_GLUE_SEC_* bits; 0: open */
 };
@@ -337,6 +337,10 @@ void rtw89_glue_drop(void);
  * do not get on with this card's 802.11ax.
  */
 void rtw89_glue_set_ax(bool on);
+/* The country macOS says the machine is in (two letters): the regulatory
+ * domain when no access point's Country element is in force. 6 GHz, which
+ * rtw89 keeps off in the world domain, needs one. */
+void rtw89_glue_set_country(const char *alpha2);
 
 /*
  * Transmit one Ethernet frame (destination, source, type, payload; no FCS) of

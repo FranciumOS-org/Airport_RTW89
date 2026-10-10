@@ -99,6 +99,10 @@ static unsigned int channelOfFreq(unsigned int freq)
         return (freq - 2407) / 5;
     if (freq >= 5000 && freq < 5925)
         return (freq - 5000) / 5;
+    if (freq == 5935)
+        return 2;
+    if (freq >= 5955 && freq <= 7115)       /* 6 GHz */
+        return (freq - 5950) / 5;
     return 0;
 }
 
@@ -145,12 +149,18 @@ static bool isJoining(const struct rtw89_glue_link &link)
     return link.state == RTW89_GLUE_LINK_JOINING || link.state == RTW89_GLUE_LINK_ASSOCIATED;
 }
 
-static uint32_t channelFlags(unsigned int channel, unsigned int width)
+/* 6 GHz: not in the SDK's list. Read off IO80211.framework (Sequoia), which
+ * tests this bit before it treats a scan channel as 6 GHz (PSC or not). */
+enum { kChannelFlag6GHz = 0x2000 };
+
+/* The band comes from the frequency: 6 GHz reuses the channel numbers. */
+static uint32_t channelFlags(unsigned int freq, unsigned int width)
 {
     return APPLE80211_C_FLAG_ACTIVE |
            (width >= 80 ? APPLE80211_C_FLAG_80MHZ :
             width >= 40 ? APPLE80211_C_FLAG_40MHZ : APPLE80211_C_FLAG_20MHZ) |
-           (channel <= 14 ? APPLE80211_C_FLAG_2GHZ : APPLE80211_C_FLAG_5GHZ);
+           (freq < 3000 ? APPLE80211_C_FLAG_2GHZ :
+            freq < 5925 ? APPLE80211_C_FLAG_5GHZ : kChannelFlag6GHz);
 }
 
 /* A network of the scan list in the form IO80211 wants. @fullIes: all of its
@@ -163,7 +173,7 @@ static void fillScanResult(const struct rtw89_glue_bss &bss, const uint8_t *ies,
     d->asr_channel.version = APPLE80211_VERSION;
     d->asr_channel.channel = bss.channel;
     /* the AP's own width: macOS weighs it when it picks between networks */
-    d->asr_channel.flags = channelFlags(bss.channel, bss.width ? bss.width : 20);
+    d->asr_channel.flags = channelFlags(bss.freq, bss.width ? bss.width : 20);
     d->asr_noise = -95;
     d->asr_rssi = bss.signal;
     d->asr_snr = (int16_t)(bss.signal - d->asr_noise);
@@ -1244,7 +1254,7 @@ int AirPort_RTW89::nativeRequest(bool isSet, int number, void *data)
         d->version = APPLE80211_VERSION;
         d->channel.version = APPLE80211_VERSION;
         d->channel.channel = channelOfFreq(link.freq);
-        d->channel.flags = channelFlags(d->channel.channel, link.width);
+        d->channel.flags = channelFlags(link.freq, link.width);
         return kIOReturnSuccess;
     }
     case APPLE80211_IOC_BSSID: {
@@ -1490,6 +1500,11 @@ int AirPort_RTW89::nativeRequest(bool isSet, int number, void *data)
             if (d->cc[0] != 'x' && d->cc[0] != 'X') {
                 memcpy(_ns->countryCode, d->cc, sizeof(_ns->countryCode));
                 _ns->countryCode[APPLE80211_MAX_CC_LEN - 1] = 0;
+                /* the regulatory domain while not connected: 6 GHz needs one */
+                IOLockLock(_commandLock);
+                rtw89_glue_set_country(reinterpret_cast<const char *>(_ns->countryCode));
+                IOLockUnlock(_commandLock);
+                LOG("country set by macOS: %.2s", _ns->countryCode);
                 nativePost(APPLE80211_M_COUNTRY_CODE_CHANGED, nullptr, 0);
             }
             return kIOReturnSuccess;
@@ -1526,7 +1541,7 @@ int AirPort_RTW89::nativeRequest(bool isSet, int number, void *data)
         for (unsigned int i = 0; i < n; i++) {
             d->supported_channels[i].version = APPLE80211_VERSION;
             d->supported_channels[i].channel = channels[i].channel;
-            d->supported_channels[i].flags = channelFlags(channels[i].channel, 20);
+            d->supported_channels[i].flags = channelFlags(channels[i].freq, 20);
         }
         return kIOReturnSuccess;
     }
@@ -1546,7 +1561,7 @@ int AirPort_RTW89::nativeRequest(bool isSet, int number, void *data)
             d->passive[i] = channels[i].passive;
             d->radar_dfs[i] = channels[i].radar;
             d->support_40Mhz[i] = channels[i].channel != 14;
-            d->support_80Mhz[i] = channels[i].channel > 14;
+            d->support_80Mhz[i] = channels[i].freq > 5000;
             d->chan_spec[i] = channels[i].channel;
         }
         d->num_chan_specs = (uint16_t)n;
@@ -1561,7 +1576,7 @@ int AirPort_RTW89::nativeRequest(bool isSet, int number, void *data)
         bzero(d, sizeof(*d));
         d->version = APPLE80211_VERSION;
         if (number == APPLE80211_IOC_DRIVER_VERSION)
-            snprintf(d->string, sizeof(d->string), "%s (AirPort_RTW89 0.3.0)",
+            snprintf(d->string, sizeof(d->string), "%s (AirPort_RTW89 0.4.0)",
                      rtw89_chip_name(_deviceID));
         else
             strlcpy(d->string, rtw89_chip_name(_deviceID), sizeof(d->string));

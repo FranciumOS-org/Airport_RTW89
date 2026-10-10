@@ -33,6 +33,9 @@ struct rtw89_cfg80211_rdev {
 
     struct regulatory_request reg_request;
     struct work_struct reg_work;        /* delivers reg_request to wiphy->reg_notifier */
+    char base_alpha2[2];                /* macOS's country, "00" until it says;
+                                         * an AP's Country element goes over it */
+    bool ie_country;                    /* an AP's country is in force */
 
     /* Must be last: wiphy->priv[] (the mac80211 state) follows it. */
     struct wiphy wiphy __aligned(NETDEV_ALIGN);
@@ -46,6 +49,7 @@ static inline struct rtw89_cfg80211_rdev *wiphy_to_rdev(struct wiphy *wiphy)
 /* The access point's country (its Country element) while connected, or
  * NULL once not: rtw89's TX power tables follow it. */
 void rtw89_cfg80211_country_ie(struct wiphy *wiphy, const u8 *alpha2);
+void rtw89_cfg80211_set_country(struct wiphy *wiphy, const char *alpha2);
 
 /* ------------------------------------------------------------------ */
 /*  mac80211 side: what Linux keeps in ieee80211_local / sdata / sta    */

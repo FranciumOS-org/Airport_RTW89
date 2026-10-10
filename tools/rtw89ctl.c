@@ -215,14 +215,15 @@ static void print_link(io_service_t service)
     else
         printf("%-10s %s\n", "link", state);
     if (strcmp(state, "down")) {
-        static const char *const modes[] = { "802.11a/b/g", "802.11n", "802.11ac", "802.11ax" };
+        static const char *const modes[] = { "802.11a/b/g", "802.11n", "802.11ac", "802.11ax",
+                                            "802.11be" };
         long mode = get_long(service, CFSTR("RTW89 Link Mode"));
 
         printf("%-10s %s, %ld MHz, AID %ld\n", "network", bssid,
                get_long(service, CFSTR("RTW89 Link Frequency")),
                get_long(service, CFSTR("RTW89 Link AID")));
         printf("%-10s %s, %ld MHz wide (centre %ld MHz), %ld stream(s)%s\n", "channel",
-               mode >= 0 && mode <= 3 ? modes[mode] : "?",
+               mode >= 0 && mode <= 4 ? modes[mode] : "?",
                get_long(service, CFSTR("RTW89 Link Width")),
                get_long(service, CFSTR("RTW89 Link Center")),
                get_long(service, CFSTR("RTW89 Link Streams")),
@@ -364,11 +365,11 @@ static void print_results(io_service_t service)
         }
         name[out] = 0;
         {
-            static const char *const modes[] = { "a/b/g", "n", "ac", "ax" };
+            static const char *const modes[] = { "a/b/g", "n", "ac", "ax", "be" };
             long mode = get_number(bss, CFSTR("mode")), sec = get_number(bss, CFSTR("security"));
             char how[24], security[24];
 
-            snprintf(how, sizeof(how), "%s %ld", mode >= 0 && mode <= 3 ? modes[mode] : "?",
+            snprintf(how, sizeof(how), "%s %ld", mode >= 0 && mode <= 4 ? modes[mode] : "?",
                      get_number(bss, CFSTR("width")));
             /* what this driver can join: open and WPA2-PSK without required PMF */
             snprintf(security, sizeof(security), "%s%s",

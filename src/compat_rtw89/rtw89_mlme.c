@@ -41,6 +41,9 @@
 #define AKM_PSK_SHA256      6
 #define AKM_SAE             8
 
+#define WLAN_RSNX_CAPAB_SAE_H2E             5   /* RSNXE bit: hash-to-element */
+#define WLAN_EID_EXT_ANTI_CLOGGING_TOKEN    93  /* the token's container (H2E) */
+
 #define RSN_CAP_MFPR        BIT(6)      /* management frame protection required */
 #define RSN_CAP_MFPC        BIT(7)      /* ... capable */
 
@@ -63,6 +66,7 @@ static struct {
     bool ht;                    /* AP and card both do 802.11n */
     bool vht;                   /* ... and 802.11ac */
     bool he;                    /* ... and 802.11ax */
+    bool eht;                   /* ... and 802.11be (Wi-Fi 7, one link) */
     unsigned int bw_limit;      /* MHz: the widest channel we may claim to the AP */
     struct cfg80211_chan_def chandef;   /* the channel and width we operate on */
     bool wmm;
@@ -88,6 +92,11 @@ static struct {
 
     /* WPA3-Personal: SAE authentication (12.4) */
     struct rtw89_sae *sae;
+    bool sae_h2e;               /* password element by hash-to-element */
+    u8 sae_password[64];        /* kept to start again with hash-to-element */
+    u8 sae_password_len;
+    u8 own_rsnxe[3];            /* RSN extension element (H2E), or none */
+    u8 own_rsnxe_len;
     bool sae_confirm_sent;      /* own confirm out: waiting for the AP's */
     bool sae_fallback;          /* the network takes WPA2 too: SAE may fail over to it */
     u8 sae_token[64];           /* anti-clogging token the AP asked for */
@@ -267,6 +276,33 @@ static const struct ieee80211_he_operation *mlme_he_oper_ie(const u8 *ies, size_
 static const struct ieee80211_sta_he_cap *mlme_own_he_cap(void)
 {
     return ieee80211_get_he_iftype_cap_vif(mlme.sband, mlme.vif);
+}
+
+/* The 802.11be elements; the capabilities checked against @he_cap, the
+ * 802.11ax capabilities of the same side (their widths size the rate maps). */
+static const u8 *mlme_eht_cap_ie(const u8 *ies, size_t len, const u8 *he_cap, u8 *cap_len)
+{
+    const u8 *cap = mlme_ext_elem(WLAN_EID_EXT_EHT_CAPABILITY, ies, len,
+                                  sizeof(struct ieee80211_eht_cap_elem_fixed), cap_len);
+
+    return cap && he_cap && ieee80211_eht_capa_size_ok(he_cap, cap, *cap_len, true) ? cap : NULL;
+}
+
+static const struct ieee80211_eht_operation *mlme_eht_oper_ie(const u8 *ies, size_t len)
+{
+    u8 oper_len;
+    const u8 *oper = mlme_ext_elem(WLAN_EID_EXT_EHT_OPERATION, ies, len,
+                                   sizeof(struct ieee80211_eht_operation), &oper_len);
+
+    return oper && ieee80211_eht_oper_size_ok(oper, oper_len) ? (const void *)oper : NULL;
+}
+
+static const struct ieee80211_sta_eht_cap *mlme_own_eht_cap(void)
+{
+    const struct ieee80211_sta_eht_cap *cap = ieee80211_get_eht_iftype_cap_vif(mlme.sband,
+                                                                               mlme.vif);
+
+    return cap && cap->has_eht ? cap : NULL;
 }
 
 /*
@@ -744,6 +780,10 @@ static void mlme_teardown(u16 deauth_reason)
     mlme.sae = NULL;
     mlme.sae_confirm_sent = false;
     mlme.sae_token_len = 0;
+    mlme.sae_h2e = false;
+    mlme.own_rsnxe_len = 0;
+    memset(mlme.sae_password, 0, sizeof(mlme.sae_password));
+    mlme.sae_password_len = 0;
     wiphy_delayed_work_cancel(mlme.hw->wiphy, &mlme.sa_query_work);
     mlme.sa_query_pending = false;
     mlme.mgmt_rx_pn_valid = false;
@@ -768,6 +808,7 @@ static void mlme_teardown(u16 deauth_reason)
     /* set while the association response was being taken in, which can fail
      * before the interface counts as associated */
     conf->he_support = false;
+    conf->eht_support = false;
     conf->twt_requester = false;
     conf->twt_broadcast = false;
     conf->uora_exists = false;
@@ -837,7 +878,9 @@ static void mlme_send_auth(void)
     mgmt = mlme_mgmt_header(skb, IEEE80211_STYPE_AUTH, len);
     mgmt->u.auth.auth_alg = cpu_to_le16(mlme.sae ? WLAN_AUTH_SAE : WLAN_AUTH_OPEN);
     mgmt->u.auth.auth_transaction = cpu_to_le16(mlme.sae && mlme.sae_confirm_sent ? 2 : 1);
-    mgmt->u.auth.status_code = cpu_to_le16(0);
+    /* an H2E commit says so in its status */
+    mgmt->u.auth.status_code = cpu_to_le16(mlme.sae && mlme.sae_h2e && !mlme.sae_confirm_sent ?
+                                           WLAN_STATUS_SAE_HASH_TO_ELEMENT : 0);
     if (mlme.sae) {
         u8 *body = skb_tail_pointer(skb);
 
@@ -859,6 +902,51 @@ static void mlme_send_auth(void)
                              mlme.sae ? MLME_SAE_TIMEOUT : MLME_AUTH_TIMEOUT);
 }
 
+/* The AP does hash-to-element: its RSN extension element says so (bit 5),
+ * or its rates carry the "H2E only" BSS membership selector (123). */
+static bool mlme_ap_h2e(void)
+{
+    const struct element *elem;
+    unsigned int i;
+
+    elem = mlme_find_elem(WLAN_EID_RSNX, mlme.bss.ies, mlme.bss.ies_len);
+    if (elem && elem->datalen >= 1 && (elem->data[0] & BIT(WLAN_RSNX_CAPAB_SAE_H2E)))
+        return true;
+    for_each_element_id(elem, WLAN_EID_SUPP_RATES, mlme.bss.ies, mlme.bss.ies_len)
+        for (i = 0; i < elem->datalen; i++)
+            if (elem->data[i] == (0x80 | BSS_MEMBERSHIP_SELECTOR_SAE_H2E))
+                return true;
+    for_each_element_id(elem, WLAN_EID_EXT_SUPP_RATES, mlme.bss.ies, mlme.bss.ies_len)
+        for (i = 0; i < elem->datalen; i++)
+            if (elem->data[i] == (0x80 | BSS_MEMBERSHIP_SELECTOR_SAE_H2E))
+                return true;
+    return false;
+}
+
+/* The password element and our commit (the expensive part, done once per
+ * method), and with hash-to-element the RSN extension element that says so
+ * in the association request. */
+static int mlme_sae_start(bool h2e)
+{
+    rtw89_sae_end(mlme.sae);
+    mlme.sae = rtw89_sae_begin(mlme.vif->addr, mlme.bss.bssid, mlme.bss.ssid,
+                               mlme.bss.ssid_len, mlme.sae_password,
+                               mlme.sae_password_len, h2e);
+    if (!mlme.sae)
+        return -EINVAL;
+    mlme.sae_h2e = h2e;
+    mlme.sae_confirm_sent = false;
+    mlme.sae_token_len = 0;
+    mlme.own_rsnxe_len = 0;
+    if (h2e) {
+        mlme.own_rsnxe[0] = WLAN_EID_RSNX;
+        mlme.own_rsnxe[1] = 1;
+        mlme.own_rsnxe[2] = BIT(WLAN_RSNX_CAPAB_SAE_H2E);
+        mlme.own_rsnxe_len = 3;
+    }
+    return 0;
+}
+
 /*
  * SAE did not get through on a network that takes WPA2-PSK as well (the AP
  * wants hash-to-element, another group, or never answers): join it with WPA2
@@ -874,6 +962,7 @@ static bool mlme_sae_fall_back(const char *why)
     mlme.sae = NULL;
     mlme.sae_confirm_sent = false;
     mlme.sae_token_len = 0;
+    mlme.own_rsnxe_len = 0;
     mlme.have_pmk = true;
     mlme.tries = 0;
     wiphy_delayed_work_cancel(mlme.hw->wiphy, &mlme.timeout_work);
@@ -960,6 +1049,88 @@ static void mlme_chandef_downgrade(struct cfg80211_chan_def *def)
 }
 
 /*
+ * The 20 MHz channels an 802.11be AP has punctured (left out of its channel,
+ * EHT operation element), as they fall on @def; rtw89 takes them from the
+ * channel definition. Puncturing needs 80 MHz or more and never takes the
+ * control channel: otherwise narrower until none is left.
+ */
+static void mlme_eht_puncture(struct cfg80211_chan_def *def)
+{
+    const struct ieee80211_eht_operation *oper;
+    const struct ieee80211_eht_operation_info *info;
+    unsigned int ap_mhz, ap_low, mhz, low;
+    u16 bitmap;
+
+    def->punctured = 0;
+    oper = mlme.eht ? mlme_eht_oper_ie(mlme.bss.ies, mlme.bss.ies_len) : NULL;
+    bitmap = oper ? ieee80211_eht_oper_dis_subchan_bitmap(oper) : 0;
+    if (!bitmap)
+        return;
+    info = ieee80211_eht_oper_info(oper);
+    ap_mhz = 20u << min(info->control & IEEE80211_EHT_OPER_CHAN_WIDTH, 4);
+    ap_low = (u32)ieee80211_channel_to_frequency(ap_mhz >= 160 ? info->ccfs1 : info->ccfs0,
+                                                 mlme.chan->band) - ap_mhz / 2;
+    for (;;) {
+        mhz = mlme_chandef_mhz(def);
+        low = def->center_freq1 - mhz / 2;
+        if (low < ap_low || low + mhz > ap_low + ap_mhz) {
+            def->punctured = 0;             /* not the AP's channel: nothing known */
+            return;
+        }
+        def->punctured = (bitmap >> ((low - ap_low) / 20)) & (BIT(mhz / 20) - 1);
+        if (!def->punctured ||
+            (mhz >= 80 && !(def->punctured & BIT((def->chan->center_freq - 10 - low) / 20))))
+            return;
+        if (mhz == 20) {
+            def->punctured = 0;
+            return;
+        }
+        mlme_chandef_downgrade(def);
+        mlme.bw_limit = mlme_chandef_mhz(def);
+    }
+}
+
+/*
+ * A 6 GHz channel (ieee80211_chandef_he_6ghz_oper()): from the 6 GHz
+ * Operation Information of the HE operation element, there being no HT or VHT
+ * elements on 6 GHz. Returns the widest width the card may use there.
+ */
+static unsigned int mlme_chandef_6ghz(struct cfg80211_chan_def *def)
+{
+    const struct ieee80211_he_operation *he_oper =
+        mlme_he_oper_ie(mlme.bss.ies, mlme.bss.ies_len);
+    const struct ieee80211_he_6ghz_oper *op6 = ieee80211_he_6ghz_oper(he_oper);
+    u8 widths = mlme_own_he_cap()->he_cap_elem.phy_cap_info[0];
+    struct cfg80211_chan_def wide = *def;
+
+    cfg80211_chandef_create(def, mlme.chan, NL80211_CHAN_NO_HT);
+    def->width = NL80211_CHAN_WIDTH_20;
+    if (!op6)
+        return 20;
+    switch (op6->control & IEEE80211_HE_6GHZ_OPER_CTRL_CHANWIDTH) {
+    case IEEE80211_HE_6GHZ_OPER_CTRL_CHANWIDTH_40MHZ:
+        wide.width = NL80211_CHAN_WIDTH_40;
+        break;
+    case IEEE80211_HE_6GHZ_OPER_CTRL_CHANWIDTH_80MHZ:
+    case IEEE80211_HE_6GHZ_OPER_CTRL_CHANWIDTH_160MHZ:
+        /* for 160 MHz the first segment is the 80 MHz half with the
+         * primary channel, which is as wide as this goes */
+        wide.width = NL80211_CHAN_WIDTH_80;
+        break;
+    default:
+        return 20;
+    }
+    wide.center_freq1 = (u32)ieee80211_channel_to_frequency(op6->ccfs0, NL80211_BAND_6GHZ);
+    wide.center_freq2 = 0;
+    if (mlme_chandef_valid(&wide))
+        *def = wide;
+    else
+        mlme_info("the AP's 6 GHz channel information is invalid: 20 MHz");
+    /* the 802.11ax widths of the card: the 5 GHz bits stand for 6 GHz too */
+    return widths & IEEE80211_HE_PHY_CAP0_CHANNEL_WIDTH_SET_40MHZ_80MHZ_IN_5G ? 80 : 20;
+}
+
+/*
  * The channel the AP operates on, from its HT, VHT and HE operation elements,
  * cut down to what this card and the regulatory domain allow. Also settles
  * which of 802.11n/ac/ax the join uses: mlme.ht, mlme.vht and mlme.he go in
@@ -979,6 +1150,11 @@ static void mlme_determine_chandef(struct cfg80211_chan_def *def)
 
     cfg80211_chandef_create(def, mlme.chan, mlme.ht ? NL80211_CHAN_HT20 : NL80211_CHAN_NO_HT);
     mlme.bw_limit = 20;
+
+    if (mlme.chan->band == NL80211_BAND_6GHZ) {
+        max = mlme_chandef_6ghz(def);
+        goto fit;
+    }
 
     elem = mlme_find_elem(WLAN_EID_HT_OPERATION, mlme.bss.ies, mlme.bss.ies_len);
     if (mlme.ht && elem && elem->datalen >= sizeof(*ht_oper))
@@ -1089,6 +1265,7 @@ again:
                         IEEE80211_HE_PHY_CAP0_CHANNEL_WIDTH_SET_40MHZ_80MHZ_IN_5G)))
             max = 20;
     }
+fit:
     mlme.bw_limit = max;
 
     while (mlme_chandef_mhz(def) > max)
@@ -1104,6 +1281,9 @@ again:
         mlme_info("802.11ax is not allowed on this channel");
         mlme.he = false;
     }
+    if (!mlme.he)
+        mlme.eht = false;
+    mlme_eht_puncture(def);
 }
 
 /*
@@ -1174,7 +1354,7 @@ static void mlme_own_ht_cap(struct ieee80211_sta_ht_cap *own)
 
 /* ieee80211_put_he_cap(): our 802.11ax capabilities, without what goes beyond
  * the widest channel we may use (ieee80211_get_adjusted_he_cap()). */
-static void mlme_put_he_cap(struct sk_buff *skb)
+static void mlme_put_he_cap(struct sk_buff *skb, struct ieee80211_he_cap_elem *sent)
 {
     const struct ieee80211_sta_he_cap *own = mlme_own_he_cap();
     struct ieee80211_he_cap_elem elem = own->he_cap_elem;
@@ -1211,6 +1391,63 @@ static void mlme_put_he_cap(struct sk_buff *skb)
         skb_put_data(skb, own->ppe_thres,
                      ieee80211_he_ppe_size(own->ppe_thres[0], own->he_cap_elem.phy_cap_info));
     *len = (u8)(skb_tail_pointer(skb) - len - 1);
+    *sent = elem;
+}
+
+/*
+ * ieee80211_put_eht_cap(): our 802.11be capabilities, the rate maps for the
+ * widths the 802.11ax element just sent claims (@he), 320 MHz left out, this
+ * driver going to 80 MHz at most.
+ */
+static void mlme_put_eht_cap(struct sk_buff *skb, const struct ieee80211_he_cap_elem *he)
+{
+    const struct ieee80211_sta_eht_cap *own = mlme_own_eht_cap();
+    struct ieee80211_eht_cap_elem_fixed elem = own->eht_cap_elem;
+    u8 mcs_size, *len;
+
+    elem.phy_cap_info[0] &= ~IEEE80211_EHT_PHY_CAP0_320MHZ_IN_6GHZ;
+    mcs_size = ieee80211_eht_mcs_nss_size(he, &elem, false);
+
+    *(u8 *)skb_put(skb, 1) = WLAN_EID_EXTENSION;
+    len = skb_put(skb, 1);
+    *(u8 *)skb_put(skb, 1) = WLAN_EID_EXT_EHT_CAPABILITY;
+    skb_put_data(skb, &elem, sizeof(elem));
+    skb_put_data(skb, &own->eht_mcs_nss_supp, mcs_size);
+    if (elem.phy_cap_info[5] & IEEE80211_EHT_PHY_CAP5_PPE_THRESHOLD_PRESENT)
+        skb_put_data(skb, own->eht_ppe_thres,
+                     ieee80211_eht_ppe_size(get_unaligned_le16(own->eht_ppe_thres),
+                                            elem.phy_cap_info));
+    *len = (u8)(skb_tail_pointer(skb) - len - 1);
+}
+
+/* ieee80211_eht_cap_ie_to_sta_eht_cap(): the AP's 802.11be capabilities, in
+ * the station entry rtw89's rate control reads. */
+static void mlme_set_sta_eht_cap(const u8 *ie, u8 ie_len)
+{
+    struct ieee80211_link_sta *link_sta = &mlme.sta->deflink;
+    struct ieee80211_sta_eht_cap *eht_cap = &link_sta->eht_cap;
+    const struct ieee80211_eht_cap_elem_fixed *elem = (const void *)ie;
+    u8 mcs_size, ppe_size = 0;
+
+    memset(eht_cap, 0, sizeof(*eht_cap));
+    if (!ie || !link_sta->he_cap.has_he)
+        return;
+    mcs_size = ieee80211_eht_mcs_nss_size(&link_sta->he_cap.he_cap_elem, elem, true);
+    if (ie_len < sizeof(*elem) + mcs_size || mcs_size > sizeof(eht_cap->eht_mcs_nss_supp))
+        return;
+    if (elem->phy_cap_info[5] & IEEE80211_EHT_PHY_CAP5_PPE_THRESHOLD_PRESENT) {
+        if (ie_len < sizeof(*elem) + mcs_size + 2)
+            return;
+        ppe_size = ieee80211_eht_ppe_size(get_unaligned_le16(ie + sizeof(*elem) + mcs_size),
+                                          elem->phy_cap_info);
+        if (ie_len < sizeof(*elem) + mcs_size + ppe_size ||
+            ppe_size > sizeof(eht_cap->eht_ppe_thres))
+            return;
+    }
+    memcpy(&eht_cap->eht_cap_elem, elem, sizeof(*elem));
+    memcpy(&eht_cap->eht_mcs_nss_supp.bw, ie + sizeof(*elem), mcs_size);
+    memcpy(eht_cap->eht_ppe_thres, ie + sizeof(*elem) + mcs_size, ppe_size);
+    eht_cap->has_eht = true;
 }
 
 static void mlme_send_assoc(void)
@@ -1218,6 +1455,7 @@ static void mlme_send_assoc(void)
     static const u8 wmm_info[] = {
         WLAN_EID_VENDOR_SPECIFIC, 7, 0x00, 0x50, 0xf2, 2, 0, 1, 0,
     };
+    struct ieee80211_he_cap_elem he_sent = {};
     struct ieee80211_mgmt *mgmt;
     struct sk_buff *skb;
     u32 ap_rates, ap_basic, rates;
@@ -1271,6 +1509,8 @@ static void mlme_send_assoc(void)
         skb_put_data(skb, mlme.ext_rsn_ie, mlme.ext_rsn_len);
     else if (mlme.rsn)
         skb_put_data(skb, mlme.own_rsn_ie, mlme.own_rsn_len);
+    if (mlme.rsn && !mlme.external && mlme.own_rsnxe_len)
+        skb_put_data(skb, mlme.own_rsnxe, mlme.own_rsnxe_len);
 
     if (mlme.ht) {
         struct ieee80211_sta_ht_cap own;
@@ -1315,7 +1555,22 @@ static void mlme_send_assoc(void)
     }
 
     if (mlme.he)
-        mlme_put_he_cap(skb);
+        mlme_put_he_cap(skb, &he_sent);
+    if (mlme.he && mlme.sband->band == NL80211_BAND_6GHZ) {
+        /* ieee80211_put_he_6ghz_cap(): the card's, spatial multiplexing
+         * power save off */
+        u16 capa = le16_to_cpu(ieee80211_get_he_6ghz_capa(mlme.sband, NL80211_IFTYPE_STATION));
+
+        capa &= ~IEEE80211_HE_6GHZ_CAP_SM_PS;
+        capa |= u16_encode_bits(WLAN_HT_CAP_SM_PS_DISABLED, IEEE80211_HE_6GHZ_CAP_SM_PS);
+        pos = skb_put(skb, 5);
+        *pos++ = WLAN_EID_EXTENSION;
+        *pos++ = 3;
+        *pos++ = WLAN_EID_EXT_HE_6GHZ_CAPA;
+        put_unaligned_le16(capa, pos);
+    }
+    if (mlme.eht)
+        mlme_put_eht_cap(skb, &he_sent);
 
     if (mlme.wmm)
         skb_put_data(skb, wmm_info, sizeof(wmm_info));
@@ -1862,6 +2117,16 @@ static void mlme_rx_assoc_resp(const struct ieee80211_mgmt *mgmt, size_t len)
     he_oper = mlme.he ? mlme_he_oper_ie(ies, ies_len) : NULL;
     he_cap = he_oper ? mlme_he_cap_ie(ies, ies_len, &he_cap_len) : NULL;
     mlme_set_sta_he_cap(he_cap, he_cap_len);
+    /* 802.11be the same way: both elements in the response */
+    {
+        u8 eht_cap_len = 0;
+        const u8 *eht_cap = mlme.eht && he_cap && mlme_eht_oper_ie(ies, ies_len) ?
+                            mlme_eht_cap_ie(ies, ies_len, he_cap, &eht_cap_len) : NULL;
+
+        mlme_set_sta_eht_cap(eht_cap, eht_cap_len);
+        if (!mlme.sta->deflink.eht_cap.has_eht)
+            mlme.eht = false;
+    }
     mlme_set_sta_nss_bw();
 
     mlme.sta->aid = aid;
@@ -1883,6 +2148,7 @@ static void mlme_rx_assoc_resp(const struct ieee80211_mgmt *mgmt, size_t len)
               BSS_CHANGED_HT | BSS_CHANGED_BASIC_RATES | BSS_CHANGED_QOS |
               BSS_CHANGED_BEACON_INFO;
     changed |= mlme_set_bss_he(he_cap ? he_oper : NULL, ies, ies_len);
+    conf->eht_support = conf->he_support && mlme.eht;
 
     /* Linux takes the MU EDCA set from the response and then from every
      * beacon; beacons are not followed here, so the one from the scan stands in */
@@ -1935,6 +2201,7 @@ static void mlme_rx_assoc_resp(const struct ieee80211_mgmt *mgmt, size_t len)
               mlme.bss.bssid[0], mlme.bss.bssid[1], mlme.bss.bssid[2],
               mlme.bss.bssid[3], mlme.bss.bssid[4], mlme.bss.bssid[5],
               mlme.bss.freq, aid,
+              mlme.sta->deflink.eht_cap.has_eht ? "802.11be" :
               mlme.sta->deflink.he_cap.has_he ? "802.11ax" :
               mlme.sta->deflink.vht_cap.vht_supported ? "802.11ac" :
               mlme.sta->deflink.ht_cap.ht_supported ? "802.11n" : "802.11a/b/g",
@@ -1968,17 +2235,41 @@ static void mlme_rx_auth_sae(u16 transaction, u16 status, const u8 *body, size_t
 
     if (transaction == 1) {
         if (status == WLAN_STATUS_ANTI_CLOG_REQUIRED && !mlme.sae_confirm_sent) {
-            /* the group, then the token */
-            if (len < 2 || len - 2 > sizeof(mlme.sae_token))
+            /* the group, then the token; with H2E the token comes in a
+             * container element, which our commit puts back around it */
+            if (len < 2)
+                return;
+            body += 2;
+            len -= 2;
+            if (mlme.sae_h2e && len >= 3 && body[0] == WLAN_EID_EXTENSION &&
+                body[2] == WLAN_EID_EXT_ANTI_CLOGGING_TOKEN && body[1] >= 1 &&
+                (size_t)body[1] + 2 <= len) {
+                len = body[1] - 1;
+                body += 3;
+            }
+            if (len > sizeof(mlme.sae_token))
                 return;
             wiphy_delayed_work_cancel(mlme.hw->wiphy, &mlme.timeout_work);
-            memcpy(mlme.sae_token, body + 2, len - 2);
-            mlme.sae_token_len = (u8)(len - 2);
+            memcpy(mlme.sae_token, body, len);
+            mlme.sae_token_len = (u8)len;
             mlme.tries = 0;
             mlme_send_auth();
             return;
         }
-        if (status != WLAN_STATUS_SUCCESS) {
+        if (status == WLAN_STATUS_SAE_HASH_TO_ELEMENT && !mlme.sae_h2e &&
+            !mlme.sae_confirm_sent) {
+            /* the AP takes hash-to-element only: once more that way */
+            wiphy_delayed_work_cancel(mlme.hw->wiphy, &mlme.timeout_work);
+            mlme_info("the AP wants SAE with hash-to-element");
+            if (mlme_sae_start(true)) {
+                mlme_fail(-EINVAL, "could not start SAE with this password");
+                return;
+            }
+            mlme.tries = 0;
+            mlme_send_auth();
+            return;
+        }
+        if (status != (mlme.sae_h2e ? WLAN_STATUS_SAE_HASH_TO_ELEMENT : WLAN_STATUS_SUCCESS)) {
             char why[64];
 
             snprintf(why, sizeof(why), "the AP refused the SAE commit, status %u%s", status,
@@ -2312,9 +2603,15 @@ static void mlme_rx_eapol(const u8 *e, size_t len)
         if (mlme.external)
             mlme_send_eapol_key(&mlme.tptk, e[0], KEY_INFO_PAIRWISE, k + KEY_OFF_REPLAY,
                                 mlme.snonce, mlme.ext_rsn_ie, mlme.ext_rsn_len);
-        else
+        else {
+            /* ... and the RSN extension element, when there was one */
+            u8 kd[sizeof(mlme.own_rsn_ie) + sizeof(mlme.own_rsnxe)];
+
+            memcpy(kd, mlme.own_rsn_ie, mlme.own_rsn_len);
+            memcpy(kd + mlme.own_rsn_len, mlme.own_rsnxe, mlme.own_rsnxe_len);
             mlme_send_eapol_key(&mlme.tptk, e[0], KEY_INFO_PAIRWISE, k + KEY_OFF_REPLAY,
-                                mlme.snonce, mlme.own_rsn_ie, mlme.own_rsn_len);
+                                mlme.snonce, kd, mlme.own_rsn_len + mlme.own_rsnxe_len);
+        }
         return;
     }
 
@@ -3461,11 +3758,12 @@ void rtw89_mlme_get_status(struct rtw89_mlme_status *status)
         status->center_freq = (u16)mlme.chandef.center_freq1;
         /* once associated, what the AP's answer really gave us */
         if (mlme.sta && status->state >= RTW89_MLME_ASSOCIATED)
-            status->mode = mlme.sta->deflink.he_cap.has_he ? 3 :
+            status->mode = mlme.sta->deflink.eht_cap.has_eht ? 4 :
+                           mlme.sta->deflink.he_cap.has_he ? 3 :
                            mlme.sta->deflink.vht_cap.vht_supported ? 2 :
                            mlme.sta->deflink.ht_cap.ht_supported ? 1 : 0;
         else
-            status->mode = mlme.he ? 3 : mlme.vht ? 2 : mlme.ht ? 1 : 0;
+            status->mode = mlme.eht ? 4 : mlme.he ? 3 : mlme.vht ? 2 : mlme.ht ? 1 : 0;
         status->nss = mlme.sta ? mlme.sta->deflink.rx_nss : 0;
     }
     status->beacons = mlme.beacons;
@@ -3618,7 +3916,7 @@ static int mlme_connect(const struct rtw89_mlme_bss *bss, const u8 *pmk,
     const struct element *elem;
     const u8 *he_cap;
     u32 rates, basic;
-    u8 he_cap_len;
+    u8 he_cap_len, eht_cap_len;
     int ret;
 
     if (!mlme.running)
@@ -3658,11 +3956,27 @@ static int mlme_connect(const struct rtw89_mlme_bss *bss, const u8 *pmk,
     /* 802.11ax: on top of those */
     he_cap = mlme_he_cap_ie(mlme.ies, bss->ies_len, &he_cap_len);
     he_oper = mlme_he_oper_ie(mlme.ies, bss->ies_len);
-    mlme.he = mlme.ht && !mlme_he_off && mlme_own_he_cap() && he_cap && he_oper;
+    if (mlme.chan->band == NL80211_BAND_6GHZ) {
+        /* 6 GHz is 802.11ax (and newer) only: no 802.11n/ac, QoS required */
+        mlme.ht = false;
+        mlme.he = mlme.wmm && mlme_own_he_cap() && he_cap && he_oper &&
+                  ieee80211_he_6ghz_oper(he_oper) && mlme_he_mcs_ok(he_cap, he_oper);
+        if (!mlme.he) {
+            mlme_info("the AP's 802.11ax elements for 6 GHz are missing or unusable");
+            return -EOPNOTSUPP;
+        }
+    } else {
+        mlme.he = mlme.ht && !mlme_he_off && mlme_own_he_cap() && he_cap && he_oper;
+    }
+    /* 802.11be: on top of 802.11ax, one link (no multi-link element) */
+    mlme.eht = mlme.he && !mlme_he_off && mlme_own_eht_cap() &&
+               mlme_eht_cap_ie(mlme.ies, bss->ies_len, he_cap, &eht_cap_len) &&
+               mlme_eht_oper_ie(mlme.ies, bss->ies_len);
     mlme_determine_chandef(&mlme.chandef);
     if (mlme.he && !mlme_he_mcs_ok(he_cap, he_oper)) {
         mlme_info("the AP's 802.11ax rates are inconsistent or beyond this card: not using 802.11ax");
         mlme.he = false;
+        mlme.eht = false;
     }
 
     elem = mlme_find_elem(WLAN_EID_RSN, mlme.ies, bss->ies_len);
@@ -3692,6 +4006,8 @@ static int mlme_connect(const struct rtw89_mlme_bss *bss, const u8 *pmk,
             mlme_info("the network needs a password");
             return -EACCES;
         }
+        if (password_len > sizeof(mlme.sae_password))
+            password_len = 0;
         ret = mlme_choose_akm(password_len > 0, pmk != NULL);
         if (ret)
             return ret;
@@ -3718,7 +4034,8 @@ static int mlme_connect(const struct rtw89_mlme_bss *bss, const u8 *pmk,
               bss->ssid_len, bss->ssid, bss->bssid[0], bss->bssid[1], bss->bssid[2],
               bss->bssid[3], bss->bssid[4], bss->bssid[5], bss->freq,
               mlme_chandef_mhz(&mlme.chandef),
-              mlme.he ? ", 802.11ax" : mlme.vht ? ", 802.11ac" : mlme.ht ? ", 802.11n" : "",
+              mlme.eht ? ", 802.11be" : mlme.he ? ", 802.11ax" : mlme.vht ? ", 802.11ac" :
+              mlme.ht ? ", 802.11n" : "",
               !mlme.rsn ? ", open" : mlme.external ? ", WPA2 with 802.1X sign-in" :
               mlme.akm == AKM_SAE ? ", WPA3 (SAE)" :
               mlme.akm == AKM_PSK_SHA256 ? ", WPA2 (PSK-SHA256)" : ", WPA2",
@@ -3789,9 +4106,11 @@ static int mlme_connect(const struct rtw89_mlme_bss *bss, const u8 *pmk,
     rtw89_m80211_sta_set_uploaded(mlme.sta, true);
 
     if (mlme.rsn && !mlme.external && mlme.akm == AKM_SAE) {
-        /* the password element and our commit: the expensive part, once */
-        mlme.sae = rtw89_sae_begin(mlme.vif->addr, bss->bssid, password, password_len);
-        if (!mlme.sae) {
+        memcpy(mlme.sae_password, password, password_len);
+        mlme.sae_password_len = (u8)password_len;
+        /* hash-to-element whenever the AP does it: it is the better method,
+         * and on 6 GHz the only one */
+        if (mlme_sae_start(mlme_ap_h2e() || mlme.chan->band == NL80211_BAND_6GHZ)) {
             mlme_info("could not start SAE with this password");
             ret = -EINVAL;
             goto err;
