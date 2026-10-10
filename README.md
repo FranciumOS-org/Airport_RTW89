@@ -4,7 +4,7 @@ Native Wi-Fi on macOS for **Realtek's rtw89 PCIe cards**, by porting the Linux
 **rtw89** driver. The card shows up as Wi-Fi in macOS and is used from the
 Wi-Fi menu and System Settings like a Mac's own.
 
-> **Preview (0.2.0).** It has been developed and tested on **one machine**
+> **Preview (0.4.0).** It has been developed and tested on **one machine**
 > (ASUS TUF A15 FA507NU with an RTL8852BE, macOS Sequoia 15.8.1). It works
 > there every day; on every other card it has **never run on real hardware**.
 > A driver bug can panic the machine: keep a way to boot without it (see
