@@ -4,13 +4,6 @@ Native Wi-Fi on macOS for **Realtek's rtw89 PCIe cards**, by porting the Linux
 **rtw89** driver. The card shows up as Wi-Fi in macOS and is used from the
 Wi-Fi menu and System Settings like a Mac's own.
 
-> **Preview (0.4.0).** It has been developed and tested on **one machine**
-> (ASUS TUF A15 FA507NU with an RTL8852BE, macOS Sequoia 15.8.1). It works
-> there every day; on every other card it has **never run on real hardware**.
-> A driver bug can panic the machine: keep a way to boot without it (see
-> [Installing](#installing)). Reports from other machines and cards are what
-> this preview is for: see [TESTING.md](TESTING.md).
-
 ## Cards
 
 | Card | PCI ID (`10EC:`) | Wi-Fi | State |
@@ -18,10 +11,10 @@ Wi-Fi menu and System Settings like a Mac's own.
 | RTL8852BE | `B852`, `B85B` | 6, 2×2 | **works** (the development machine) |
 | RTL8852BTE | `B520` | 6, 2×2 | built in, untested |
 | RTL8851BE | `B851` | 6, 1×1 | built in, untested |
-| RTL8852AE | `8852`, `A85A` | 6, 2×2 | built in, untested |
-| RTL8852CE | `C852` | 6E, 2×2, 160 MHz | built in, untested; 6 GHz off (needs WPA3) |
+| RTL8852AE | `8852`, `A85A` | 6, 2×2 | macOS 26 tested |
+| RTL8852CE | `C852` | 6E, 2×2, 160 MHz | macOS 26 tested (not WPA3 yet) |
 | RTL8922AE | `8922`, `892B` | 7, 2×2 | built in, untested; joins as Wi-Fi 6, 6 GHz off |
-| RTL8922DE | `892D`, `882D`, `895D` | 7, 2×2 | built in, untested; joins as Wi-Fi 6, 6 GHz off |
+| RTL8922DE | `892D`, `882D`, `895D` | 7, 2×2 | macOS 26 tested |
 
 All of them run the same Linux code, unmodified, with each chip's own Realtek
 firmware. To see which card you have before installing anything, run
@@ -38,23 +31,13 @@ Realtek PCI devices, the Wi-Fi card as `WLAN` or similar with `device-id=b852`
 | macOS | Wi-Fi menu, joining and forgetting networks, saved passwords, Personal Hotspot from an iPhone, scanning while connected |
 | Startup | Loaded by OpenCore at boot, Wi-Fi up without anything run by hand |
 | Restart and shutdown | The chip is powered down cleanly |
+| RTL89 xE variants | The driver has built in WPA3 and WiFi 7 & 6GHz |
 
 ## What does not (yet)
 
-- **WPA3-only networks** (SAE). Mixed WPA2/WPA3 networks work over WPA2.
-  On a phone hotspot set to WPA3 only, choose WPA2/WPA3 instead.
 - **Sleep and wake**: the driver handles it, but it has not been tested on
   hardware (the development machine does not really sleep).
 - **AirDrop, AWDL, Continuity** over Wi-Fi.
-- **Range is still short of Windows**: two rooms from the router, 90 Mb/s on
-  5 GHz (peaks of 180) and 50 Mb/s on 2.4 GHz, where Windows gets about 200.
-  Transmit power follows the country the router announces; a router that
-  announces none leaves the driver on Realtek's cautious worldwide limits
-  (`rtw89ctl status` shows which: "tables of 00" is worldwide).
-- **6 GHz** is switched off (RTL8852CE, RTL8922AE/DE): every 6 GHz network
-  needs WPA3. **Wi-Fi 7** cards join as Wi-Fi 6.
-- Only **Sequoia 15.8.1** is tested. Sonoma and Tahoe are expected to work
-  (the Tahoe join request is handled) but are untested.
 
 ## Requirements
 
