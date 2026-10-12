@@ -13,7 +13,7 @@ Wi-Fi menu and System Settings like a Mac's own.
 | RTL8851BE | `B851` | 6, 1×1 | built in, untested |
 | RTL8852AE | `8852`, `A85A` | 6, 2×2 | macOS 26 tested |
 | RTL8852CE | `C852` | 6E, 2×2, 160 MHz | macOS 26 tested (not WPA3 yet) |
-| RTL8922AE | `8922`, `892B` | 7, 2×2 | built in, untested; joins as Wi-Fi 6, 6 GHz off |
+| RTL8922AE | `8922`, `892B` | 7, 2×2 | built in, untested; |
 | RTL8922DE | `892D`, `882D`, `895D` | 7, 2×2 | macOS 26 tested |
 
 All of them run the same Linux code, unmodified, with each chip's own Realtek
