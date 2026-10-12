@@ -14,7 +14,7 @@ Mac's own.
 | Card | PCI ID (`10EC:`) | Wi-Fi | Status |
 |---|---|---|---|
 | RTL8852BE | `B852`, `B85B` | 6 | works |
-| RTL8852AE | `8852`, `A85A` | 6 | works (tester) |
+| RTL8852AE | `8852`, `A85A` | 6 | works (testers) |
 | RTL8922DE | `892D`, `882D`, `895D` | 7 | works (tester); 6 GHz and Wi-Fi 7 untested |
 | RTL8852BTE | `B520` | 6 | untested |
 | RTL8851BE | `B851` | 6 | untested |
