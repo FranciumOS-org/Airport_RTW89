@@ -217,6 +217,7 @@ define hostrun
 endef
 
 SAETEST  := $(BUILD_DIR)/out/sae_test
+ASSOCTEST := $(BUILD_DIR)/out/assoc_test
 
 vpath %.c third_party/hostap/src/common third_party/mbedtls/library $(COMPAT89_DIR)
 
@@ -263,6 +264,9 @@ hosttest: link
 	@cc $(ARCH) -o $(SAETEST)_kernel $(BUILD_DIR)/out/sae_test_main.o $(SAE_KOBJS) \
 	    $(BUILD_DIR)/fw/rtw89_crypto.o $(BUILD_DIR)/out/host_kernel.o
 	$(call hostrun,$(SAETEST)_kernel,,sae_test_kernel)
+	@# the join request decoding the kext uses (src/kext/rtw89_host_assoc.h)
+	@cc -O1 -g -Wall -Isrc/kext -o $(ASSOCTEST) tools/hosttest/assoc_test.c
+	$(call hostrun,$(ASSOCTEST),,assoc_test)
 
 # ------------------------------------------------------------------ #
 # Kext bundle                                                          #
