@@ -266,7 +266,9 @@ exists up to Ventura and that OpenCore can put back on Sonoma to Tahoe:
 `IO80211FamilyLegacy` on Ventura's `IOSkywalkFamily`, see `efi/README.md`. The
 reference driver shows that Sequoia's and Tahoe's own Wi-Fi software can talk
 to it unpatched (it translates their 900- and 908-byte association requests),
-so no OCLP root patch is planned; to be confirmed at the first scan here.
+so no OCLP root patch is planned; to be confirmed at the first scan here. The
+family does not take Sonoma's 856-byte request, so the kext reads it itself
+(`src/kext/rtw89_host_assoc.h`).
 Writing against Sequoia's own IO80211Family instead was looked at and dropped:
 no EFI change and no reboot per test, but tied to one macOS version, and
 nobody has done it (`tools/kcvtab.py` reads the class layouts it would need

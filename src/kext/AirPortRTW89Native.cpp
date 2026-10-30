@@ -11,6 +11,7 @@
  */
 #include "AirPortRTW89.hpp"
 #include "rtw89_chips.h"
+#include "rtw89_host_assoc.h"
 
 #include <IOKit/80211/apple80211_ioctl.h>
 #include <IOKit/80211/apple80211_var.h>
@@ -186,62 +187,26 @@ static void fillScanResult(const struct rtw89_glue_bss &bss, const uint8_t *ies,
 }
 
 /*
- * The join request as Sequoia (900 bytes) and Tahoe (908 bytes) send it. The
- * old family would cut it down to Ventura's structure, where mode and both
- * authentication fields are narrower. Only the shared first 108 bytes are
- * read (RTW88AssocWire in the reference).
+ * The join request's layout is in rtw89_host_assoc.h, which the kext decodes
+ * with. Its apple80211 values must be the SDK's.
  */
-struct HostAssoc {
-    uint32_t upper, ssidLen, keyLen, cipher;
-    uint8_t ssid[32], bssid[6], key[64];
-};
-
-/* The newer request's key type when the key is the passphrase itself: what
- * macOS sends once the card says it does SAE (it then leaves deriving the
- * pairwise master key to the driver). Seen with WPA2-PSK. */
-enum { kHostCipherPassphrase = 10 };
-/* Bytes of the request read: up to the end of a 64-byte key at 76. */
-enum { kHostAssocPrefix = 140 };
-
-static uint32_t le32(const uint8_t *p)
-{
-    return (uint32_t)p[0] | (uint32_t)p[1] << 8 | (uint32_t)p[2] << 16 | (uint32_t)p[3] << 24;
-}
-
-static bool decodeHostAssoc(const uint8_t *p, struct HostAssoc *out)
-{
-    uint32_t upper = le32(p + 12), ssidLen = le32(p + 16), keyLen = le32(p + 64);
-
-    if (le32(p) != 1 || le32(p + 4) != 2 || le32(p + 8) != 1 || le32(p + 60) != 1)
-        return false;
-    const uint32_t cipher = le32(p + 68);
-    const bool passphrase = upper == 8 && cipher == kHostCipherPassphrase;
-
-    if ((upper != 0 && upper != 8 && !isEnterprise(upper)) || !ssidLen || ssidLen > 32)
-        return false;
-    if (passphrase ? keyLen < 8 || keyLen > 64 : upper == 8 ? keyLen != 32 : keyLen != 0)
-        return false;
-    for (uint32_t i = 0; i < ssidLen; i++)
-        if (!p[20 + i])
-            return false;
-    if (p[52] & 1)
-        return false;
-    bzero(out, sizeof(*out));
-    out->upper = upper;
-    out->ssidLen = ssidLen;
-    out->keyLen = keyLen;
-    out->cipher = cipher;
-    memcpy(out->ssid, p + 20, ssidLen);
-    memcpy(out->bssid, p + 52, 6);
-    memcpy(out->key, p + 76, keyLen);
-    return true;
-}
+static_assert(RTW89_HOST_AP_MODE_INFRA == APPLE80211_AP_MODE_INFRA, "AP mode is not the SDK's");
+static_assert(RTW89_HOST_AUTH_NONE == APPLE80211_AUTHTYPE_NONE, "auth none is not the SDK's");
+static_assert(RTW89_HOST_AUTH_OPEN == APPLE80211_AUTHTYPE_OPEN, "auth open is not the SDK's");
+static_assert(RTW89_HOST_AUTH_WPA == APPLE80211_AUTHTYPE_WPA, "auth WPA is not the SDK's");
+static_assert(RTW89_HOST_AUTH_WPA_PSK == APPLE80211_AUTHTYPE_WPA_PSK, "auth WPA-PSK is not the SDK's");
+static_assert(RTW89_HOST_AUTH_WPA2 == APPLE80211_AUTHTYPE_WPA2, "auth WPA2 is not the SDK's");
+static_assert(RTW89_HOST_AUTH_WPA2_PSK == APPLE80211_AUTHTYPE_WPA2_PSK, "auth WPA2-PSK is not the SDK's");
+static_assert(RTW89_HOST_AUTH_8021X == APPLE80211_AUTHTYPE_8021X, "auth 802.1X is not the SDK's");
+static_assert(RTW89_HOST_AUTH_SHA256_PSK == APPLE80211_AUTHTYPE_SHA256_PSK, "auth SHA256-PSK is not the SDK's");
+static_assert(RTW89_HOST_AUTH_SHA256_8021X == APPLE80211_AUTHTYPE_SHA256_8021X,
+              "auth SHA256-802.1X is not the SDK's");
 
 /*
- * A join request in the newer form that decodeHostAssoc() does not take (WPA3
- * for one, whose layout is not known yet): log its shape so it can be worked
- * out, never its contents. Per 4-byte word, '.' is zero and '#' is not; the
- * fields that are not secret are printed as numbers.
+ * A join request in the envelope form that rtw89_host_assoc_decode() does not
+ * take (WPA3 for one, whose layout is not known yet): log its shape so it can
+ * be worked out, never its contents. Per 4-byte word, '.' is zero and '#' is
+ * not; the fields that are not secret are printed as numbers.
  */
 static void logHostAssocShape(const uint8_t *p, uint32_t len)
 {
@@ -252,8 +217,9 @@ static void logHostAssocShape(const uint8_t *p, uint32_t len)
         map[i] = (p[4 * i] | p[4 * i + 1] | p[4 * i + 2] | p[4 * i + 3]) ? '#' : '.';
     map[i] = 0;
     LOG("join request not understood (%u bytes): head %u %u %u, upper auth 0x%x, name length %u, "
-        "key length %u, key type %u", len, le32(p), le32(p + 4), le32(p + 8), le32(p + 12),
-        le32(p + 16), le32(p + 64), le32(p + 68));
+        "key length %u, key type %u", len, rtw89_host_le32(p), rtw89_host_le32(p + 4),
+        rtw89_host_le32(p + 8), rtw89_host_le32(p + 12), rtw89_host_le32(p + 16),
+        rtw89_host_le32(p + 64), rtw89_host_le32(p + 68));
     for (i = 0; i < words; i += 64) {
         char part[65];
         uint32_t n = words - i < 64 ? words - i : 64;
@@ -289,6 +255,62 @@ static bool assocLooksValid(const struct apple80211_assoc_data *d)
     if (d->ad_auth_upper != APPLE80211_AUTHTYPE_NONE && !secure)
         return false;
     return secure ? d->ad_key.key_len == 32 : d->ad_key.key_len == 0;
+}
+
+/*
+ * A join in the envelope form (rtw89_host_assoc.h) that the family may not take.
+ * One that decodes is made here, and *result is its errno. False when the
+ * request is not one, or does not decode (its shape is logged): the caller
+ * hands it on as before.
+ */
+bool AirPort_RTW89::nativeJoinEnvelope(struct apple80211req *req, int *result)
+{
+    const uint32_t len = req->req_len;
+    uint8_t prefix[RTW89_HOST_ASSOC_PREFIX];
+    struct rtw89_host_assoc host;
+
+    if (!req->req_data || !rtw89_host_assoc_size_ok(len))
+        return false;
+    if (copyin((user_addr_t)req->req_data, prefix, sizeof(prefix)) == 0 &&
+        rtw89_host_assoc_decode(prefix, &host)) {
+        Scratch assocBuf(sizeof(struct apple80211_assoc_data));
+        struct apple80211_assoc_data &assoc = *static_cast<struct apple80211_assoc_data *>(assocBuf.p);
+        SInt32 r;
+
+        assoc.version = APPLE80211_VERSION;
+        assoc.ad_mode = APPLE80211_AP_MODE_INFRA;
+        assoc.ad_auth_lower = APPLE80211_AUTHTYPE_OPEN;
+        assoc.ad_auth_upper = host.upper;
+        assoc.ad_ssid_len = host.ssid_len;
+        memcpy(assoc.ad_ssid, host.ssid, host.ssid_len);
+        memcpy(assoc.ad_bssid.octet, host.bssid, 6);
+        assoc.ad_key.version = APPLE80211_VERSION;
+        assoc.ad_key.key_cipher_type = host.cipher;
+        if (host.cipher == RTW89_HOST_CIPHER_PASSPHRASE) {
+            /* longer than apple80211_key's buffer: carried beside it */
+            memcpy(_ns->joinPass, host.key, host.key_len);
+            _ns->joinPassLen = (uint8_t)host.key_len;
+        } else {
+            assoc.ad_key.key_len = host.key_len;
+            memcpy(assoc.ad_key.key, host.key, host.key_len);
+        }
+        r = nativeRequest(true, APPLE80211_IOC_ASSOCIATE, &assoc);
+        bzero(_ns->joinPass, sizeof(_ns->joinPass));
+        _ns->joinPassLen = 0;
+        bzero(&assoc, sizeof(assoc));
+        bzero(&host, sizeof(host));
+        bzero(prefix, sizeof(prefix));
+        *result = errnoOf(r);
+        return true;
+    }
+    bzero(prefix, sizeof(prefix));
+    {
+        Scratch whole(len);
+
+        if (whole.p && copyin((user_addr_t)req->req_data, whole.p, len) == 0)
+            logHostAssocShape(whole.bytes(), len);
+    }
+    return false;
 }
 
 /* ------------------------------------------------------------------ */
@@ -646,47 +668,11 @@ int AirPort_RTW89::backIoctl(void *ctx, void *interface, void *vif, void *ifnet,
     const uint32_t len = req->req_len;
     const user_addr_t reqData = (user_addr_t)req->req_data;
 
-    if (isSet && reqType == APPLE80211_IOC_ASSOCIATE && (len == 900 || len == 908) && reqData) {
-        uint8_t prefix[kHostAssocPrefix];
-        struct HostAssoc host;
+    if (isSet && reqType == APPLE80211_IOC_ASSOCIATE) {
+        int e;
 
-        if (copyin(reqData, prefix, sizeof(prefix)) == 0 && decodeHostAssoc(prefix, &host)) {
-            Scratch assocBuf(sizeof(struct apple80211_assoc_data));
-            struct apple80211_assoc_data &assoc = *static_cast<struct apple80211_assoc_data *>(assocBuf.p);
-            SInt32 r;
-
-            assoc.version = APPLE80211_VERSION;
-            assoc.ad_mode = APPLE80211_AP_MODE_INFRA;
-            assoc.ad_auth_lower = APPLE80211_AUTHTYPE_OPEN;
-            assoc.ad_auth_upper = host.upper;
-            assoc.ad_ssid_len = host.ssidLen;
-            memcpy(assoc.ad_ssid, host.ssid, host.ssidLen);
-            memcpy(assoc.ad_bssid.octet, host.bssid, 6);
-            assoc.ad_key.version = APPLE80211_VERSION;
-            assoc.ad_key.key_cipher_type = host.cipher;
-            if (host.cipher == kHostCipherPassphrase) {
-                /* longer than apple80211_key's buffer: carried beside it */
-                memcpy(me->_ns->joinPass, host.key, host.keyLen);
-                me->_ns->joinPassLen = (uint8_t)host.keyLen;
-            } else {
-                assoc.ad_key.key_len = host.keyLen;
-                memcpy(assoc.ad_key.key, host.key, host.keyLen);
-            }
-            r = me->nativeRequest(true, APPLE80211_IOC_ASSOCIATE, &assoc);
-            bzero(me->_ns->joinPass, sizeof(me->_ns->joinPass));
-            me->_ns->joinPassLen = 0;
-            bzero(&assoc, sizeof(assoc));
-            bzero(&host, sizeof(host));
-            bzero(prefix, sizeof(prefix));
-            return errnoOf(r);
-        }
-        bzero(prefix, sizeof(prefix));
-        {
-            Scratch whole(len);
-
-            if (whole.p && copyin(reqData, whole.p, len) == 0)
-                logHostAssocShape(whole.bytes(), len);
-        }
+        if (me->nativeJoinEnvelope(req, &e))
+            return e;
     }
 
     const bool scanBridge = (isGet && reqType == APPLE80211_IOC_SCAN_RESULT) ||
@@ -806,6 +792,13 @@ int AirPort_RTW89::backIoctlSet(void *ctx, void *interface, void *vif, void *sky
         return me->nativeRequest(true, APPLE80211_IOC_ASSOCIATE, data);
 
     struct apple80211req *req = static_cast<struct apple80211req *>(data);
+    /* the family refused the join: in the envelope form, if it is one (Sonoma's 856 bytes) */
+    if (req->req_type == APPLE80211_IOC_ASSOCIATE) {
+        int e;
+
+        if (me->nativeJoinEnvelope(req, &e))
+            return e;
+    }
     if (req->req_type == APPLE80211_IOC_ASSOCIATE &&
         req->req_len >= sizeof(struct apple80211_assoc_data) && req->req_len <= 64U * 1024U &&
         req->req_data) {
@@ -1541,7 +1534,7 @@ int AirPort_RTW89::nativeRequest(bool isSet, int number, void *data)
         bzero(d, sizeof(*d));
         d->version = APPLE80211_VERSION;
         if (number == APPLE80211_IOC_DRIVER_VERSION)
-            snprintf(d->string, sizeof(d->string), "%s (AirPort_RTW89 0.2.0)",
+            snprintf(d->string, sizeof(d->string), "%s (AirPort_RTW89 0.5.0)",
                      rtw89_chip_name(_deviceID));
         else
             strlcpy(d->string, rtw89_chip_name(_deviceID), sizeof(d->string));

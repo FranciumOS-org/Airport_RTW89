@@ -31,6 +31,8 @@
 #include "rtw89_glue.h"
 #include "../front/rtw89_front_api.h"
 
+struct apple80211req;
+
 class AirPort_RTW89 : public IOEthernetController {
     OSDeclareDefaultStructors(AirPort_RTW89)
 
@@ -101,6 +103,7 @@ private:
     static bool frontExpected();
     int nativeRequest(bool isSet, int number, void *data);
     int nativeAssociate(void *data);
+    bool nativeJoinEnvelope(struct apple80211req *req, int *result);
     static void scanDone(void *ctx, bool aborted);
     static void backGetMac(void *ctx, uint8_t mac[6]);
     static int backSetMac(void *ctx, const uint8_t mac[6]);
