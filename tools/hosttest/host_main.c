@@ -37,6 +37,7 @@ void rtw89_glue_test_rx(const uint8_t *frame, size_t len, uint16_t freq, int8_t 
                         bool decrypted);
 /* ... left waiting for the chip's status report, as the driver leaves data frames */
 void rtw89_glue_test_scan_done(void);
+size_t rtw89_glue_test_scan_target(uint8_t *out, size_t size, uint16_t *freq);
 void rtw89_glue_test_emulate_chanctx(void);
 void rtw89_glue_test_fake_eht(void);
 void rtw89_glue_test_beacon_loss(void);
@@ -1172,6 +1173,29 @@ static int test_keep(void)
         /* the network we are on is still listed */
         EXPECT(rtw89_glue_find_bss(ap_mac, &found, NULL, 0, NULL, NULL));
         EXPECT(link.state == RTW89_GLUE_LINK_CONNECTED);
+    }
+
+    /* An explicit hotspot scan retains the requested SSID (including
+     * embedded NUL bytes) and channel while associated with another AP. */
+    {
+        const uint8_t target[] = {'H', 'o', 't', 0, 's', 'p', 'o', 't'};
+        uint8_t got[32] = {0};
+        uint16_t freq = 0;
+        int sret = rtw89_glue_scan_target(target, sizeof(target), 5180);
+        EXPECT(sret == 0 || sret == -11);
+        EXPECT(rtw89_glue_test_scan_target(got, sizeof(got), &freq) == sizeof(target));
+        EXPECT(memcmp(got, target, sizeof(target)) == 0);
+        EXPECT(freq == 5180);
+        rtw89_glue_link(&link);
+        EXPECT(link.last_scan_channels == 1);
+        if (!sret)
+            rtw89_glue_test_scan_done();
+        EXPECT(rtw89_glue_scan_target(NULL, 1, 5180) == -22);
+        EXPECT(rtw89_glue_scan_target(target, 33, 5180) == -22);
+        EXPECT(rtw89_glue_scan_target(target, sizeof(target), 65535) == -22);
+        rtw89_glue_link(&link);
+        EXPECT(link.state == RTW89_GLUE_LINK_CONNECTED);
+        printf("== directed hotspot scan: SSID bytes and requested channel preserved\n");
     }
 
     /* ---- beacons ---- */

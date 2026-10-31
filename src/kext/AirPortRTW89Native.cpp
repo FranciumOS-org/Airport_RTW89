@@ -14,6 +14,8 @@
 
 #include <IOKit/80211/apple80211_ioctl.h>
 #include <IOKit/80211/apple80211_var.h>
+#include "rtw89_scan_target.hpp"
+#include "rtw89_scan_ioctl.hpp"
 #include <IOKit/IOCatalogue.h>
 #include <IOKit/IOLib.h>
 #include <libkern/version.h>
@@ -25,12 +27,15 @@
 #define LOG(fmt, ...) IOLog("AirPort_RTW89: " fmt "\n", ##__VA_ARGS__)
 
 static_assert(sizeof(struct apple80211_scan_result) == 1164, "scan result layout is not Ventura's");
+static_assert(sizeof(struct apple80211req) == 40 && offsetof(apple80211req, req_data) == 32,
+              "native scan ioctl envelope layout changed");
 
 struct AirPort_RTW89::NativeState {
     struct rtw89_front_ops front = {};
     struct apple80211_scan_result scanResult = {};
     unsigned int scanCursor = 0;
     bool scanInProgress = false;
+    Rtw89ScanCompletion directedScan;
     bool scanBootstrapTried = false;
     uint64_t lastConnectedScan = 0;     /* uptime (ns) of the last scan while connected */
     uint32_t authLower = APPLE80211_AUTHTYPE_OPEN;
@@ -359,6 +364,7 @@ void AirPort_RTW89::nativeEvents()
         UInt32 result = events & kNativeEventScanAborted ? 1 : 0;
 
         _ns->scanInProgress = false;
+        _ns->directedScan.finish(result != 0);
         _ns->scanCursor = 0;
         nativePost(APPLE80211_M_SCAN_DONE, &result, sizeof(result));
     }
@@ -657,7 +663,8 @@ int AirPort_RTW89::backIoctl(void *ctx, void *interface, void *vif, void *ifnet,
     AirPort_RTW89 *me = static_cast<AirPort_RTW89 *>(ctx);
     struct rtw89_front_ops *front = &me->_ns->front;
     struct apple80211req *req = static_cast<struct apple80211req *>(data);
-    bool isGet = cmd == SIOCGA80211, isSet = cmd == SIOCSA80211;
+    bool isGet = cmd == SIOCGA80211 || (req && rtw89ScanGet40(cmd, (unsigned int)req->req_type));
+    bool isSet = cmd == SIOCSA80211 || (req && rtw89ScanSet40(cmd, (unsigned int)req->req_type));
 
     /* requests can arrive while the front is still attaching the interface,
      * before it has handed over its functions: those are the family's */
@@ -795,7 +802,18 @@ int AirPort_RTW89::backIoctl(void *ctx, void *interface, void *vif, void *ifnet,
     if (!payload)
         return ENOMEM;
     int e = copyin(reqData, payload, len);
-    if (!e)
+    if (!e && rtw89ScanSet40(cmd, reqType)) {
+        Scratch decoded(sizeof(apple80211_scan_data));
+        if (!decoded.p) e = ENOMEM;
+        else {
+            auto &scan = *static_cast<apple80211_scan_data *>(decoded.p);
+            if (!rtw89DecodeHostScan(reqType, payload, len, scan)) e = EINVAL;
+            else {
+                LOG("native scan bridge: command 0x%lx, type %u, wire size %u", cmd, reqType, len);
+                e = errnoOf(me->nativeRequest(true, APPLE80211_IOC_SCAN_REQ, &scan));
+            }
+        }
+    } else if (!e)
         e = errnoOf(me->nativeRequest(true, reqType, payload));
     IOFree(payload, len);
     return e;
@@ -1116,14 +1134,32 @@ int AirPort_RTW89::nativeRequest(bool isSet, int number, void *data)
     case APPLE80211_IOC_SCAN_REQ:
     case APPLE80211_IOC_SCAN_REQ_MULTIPLE: {
         int ret;
+        const uint8_t *target = nullptr;
+        uint32_t targetLen = 0;
+        uint16_t targetFreq = 0;
 
         if (!isSet)
             return kIOReturnUnsupported;
-        /* a second request while one runs is answered by the same scan */
-        if (_ns->scanInProgress)
+        if (!rtw89ScanTarget(number, data, target, targetLen, targetFreq))
+            return kIOReturnBadArgument;
+        if (targetLen)
+            LOG("directed scan requested: %u-byte SSID, frequency %u MHz, scan busy %u",
+                targetLen, targetFreq, _ns->scanInProgress ? 1U : 0U);
+        if (_ns->directedScan.reuse(target, targetLen, targetFreq)) {
+            if (targetLen)
+                LOG("directed scan reused: ready %u", _ns->directedScan.ready ? 1U : 0U);
+            _ns->scanCursor = 0;
+            if (_ns->directedScan.ready) {
+                UInt32 result = 0;
+                nativePost(APPLE80211_M_SCAN_DONE, &result, sizeof(result));
+            }
             return kIOReturnSuccess;
+        }
+        /* A background scan cannot satisfy a different directed probe. */
+        if (_ns->scanInProgress)
+            return targetLen ? kIOReturnBusy : kIOReturnSuccess;
         _ns->scanCursor = 0;
-        if (link.state != RTW89_GLUE_LINK_DOWN) {
+        if (!targetLen && link.state != RTW89_GLUE_LINK_DOWN) {
             /*
              * Connected: a real scan at most every kConnectedScanGap, the
              * firmware going back to the access point's channel in between
@@ -1145,12 +1181,15 @@ int AirPort_RTW89::nativeRequest(bool isSet, int number, void *data)
             }
             _ns->lastConnectedScan = now;
         }
+        _ns->directedScan.begin(target, targetLen, targetFreq);
         _ns->scanInProgress = true;
         IOLockLock(_commandLock);
-        ret = rtw89_glue_scan();
+        ret = targetLen ? rtw89_glue_scan_target(target, targetLen, targetFreq) :
+                          rtw89_glue_scan();
         IOLockUnlock(_commandLock);
         if (ret) {
             _ns->scanInProgress = false;
+            _ns->directedScan.consume();
             return ret == -16 ? kIOReturnBusy : kIOReturnError;
         }
         return kIOReturnSuccess;
@@ -1173,6 +1212,9 @@ int AirPort_RTW89::nativeRequest(bool isSet, int number, void *data)
         if (isSet)
             return kIOReturnUnsupported;
         *out = nullptr;
+        /* Do not satisfy a directed probe with the previous scan cache. */
+        if (_ns->directedScan.busy())
+            return kIOReturnBusy;
         /* hidden networks have no name to show */
         while (rtw89_glue_scan_entry(_ns->scanCursor, &bss, ies, 1024, &len, &beaconInt)) {
             _ns->scanCursor++;
@@ -1204,6 +1246,7 @@ int AirPort_RTW89::nativeRequest(bool isSet, int number, void *data)
             return kIOReturnBusy;
         }
         _ns->scanCursor = 0;
+        _ns->directedScan.consume();
         return 5;       /* the end of the list */
     }
     case APPLE80211_IOC_CURRENT_NETWORK: {

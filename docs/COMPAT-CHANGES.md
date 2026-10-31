@@ -26,3 +26,41 @@
 | `linux/skbuff.h`, `rtw88_compat.c` | `skb_put` / `skb_push` check the room and stop (`rtw88_skb_panic`) instead of silently corrupting the heap, as Linux's `skb_over_panic` does. | ⬆ |
 | `linux/skbuff.h` | `dev_alloc_skb` / `netdev_alloc_skb` reserve `NET_SKB_PAD` (64) bytes of headroom like Linux. | — |
 | `rtw88_compat.c` | New hook `rtw88_napi_post_poll` (called on the datapath thread after every NAPI poll) and `rtw88_queue_datapath_delayed_work()` (queue work on that thread). rtw89 uses them to pass on received frames the driver is holding for a PPDU status report that does not come; see `src/compat_rtw89/rtw89_core_wrap.c`. | — |
+
+## Single-target Instant Hotspot scans
+
+Preserve a nonempty SSID from either native scan request format and translate
+a single requested 2.4/5/6 GHz channel into the actual firmware scan. Directed
+scans bypass the connected background throttle and channel slicing, keeping
+regulatory channel checks. While a directed scan runs, report Busy rather than
+returning the old scan cache. A different concurrent directed request returns Busy. Identical retries share
+the in-flight scan and retain its completed results until the list is consumed.
+This handles ioctl clients that resubmit SCAN_REQ after a Busy SCAN_RESULT,
+which otherwise start an endless sequence of new scans.
+
+Ordinary wildcard scans retain their throttle and channel slicing; directed
+scans do not advance the background scan cursor. Multi-name background requests
+retain their existing wildcard behavior. An unspecified or multi-channel target
+request scans all eligible channels. SAE/H2E/PMF and association policy are unchanged.
+
+Regression coverage checks native request decoding (including embedded NUL SSID
+bytes and overlapping 2.4/6 GHz channel numbers) and reads back the actual
+cfg80211 scan request in the connected fake-chip harness, checking the target,
+frequency, one-channel scan, invalid inputs, and preserved connection.
+
+## Sequoia scan ioctl wire ABI
+
+Actual IO80211.framework requests on macOS 15.8.1 use 0x802869c8/0xc02869c9
+(40-byte envelopes), while the imported header constants encode 48 bytes.
+Recognize the 40-byte commands only for SCAN_REQ, SCAN_REQ_MULTIPLE and
+SCAN_RESULT so these operations reach the BSD bridge. Association and other
+requests keep their existing family path.
+
+The observed 5528-byte single scan has its channel count/list at 68/72. The
+5352-byte multiple scan has ten SSID slots and channel count/list at 528/532,
+not the SDK's sixteen slots and 768/772. Normalize these explicitly recognized
+wire layouts to the legacy single-target representation before decoding.
+Validate buffer size, version, SSID lengths and channel bounds. Multi-name
+and multi-channel requests retain the previously documented wildcard/full
+scan behavior. Tests cover raw wire fixtures independently of SDK layout,
+plus optional replay of a locally captured hotspot payload (not committed).
