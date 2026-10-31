@@ -14,6 +14,7 @@
 
 #include <IOKit/80211/apple80211_ioctl.h>
 #include <IOKit/80211/apple80211_var.h>
+#include "rtw89_scan_target.hpp"
 #include <IOKit/IOCatalogue.h>
 #include <IOKit/IOLib.h>
 #include <libkern/version.h>
@@ -31,6 +32,7 @@ struct AirPort_RTW89::NativeState {
     struct apple80211_scan_result scanResult = {};
     unsigned int scanCursor = 0;
     bool scanInProgress = false;
+    bool scanDirected = false;
     bool scanBootstrapTried = false;
     uint64_t lastConnectedScan = 0;     /* uptime (ns) of the last scan while connected */
     uint32_t authLower = APPLE80211_AUTHTYPE_OPEN;
@@ -359,6 +361,7 @@ void AirPort_RTW89::nativeEvents()
         UInt32 result = events & kNativeEventScanAborted ? 1 : 0;
 
         _ns->scanInProgress = false;
+        _ns->scanDirected = false;
         _ns->scanCursor = 0;
         nativePost(APPLE80211_M_SCAN_DONE, &result, sizeof(result));
     }
@@ -1116,14 +1119,22 @@ int AirPort_RTW89::nativeRequest(bool isSet, int number, void *data)
     case APPLE80211_IOC_SCAN_REQ:
     case APPLE80211_IOC_SCAN_REQ_MULTIPLE: {
         int ret;
+        const uint8_t *target = nullptr;
+        uint32_t targetLen = 0;
+        uint16_t targetFreq = 0;
 
         if (!isSet)
             return kIOReturnUnsupported;
-        /* a second request while one runs is answered by the same scan */
+        if (!rtw89ScanTarget(number, data, target, targetLen, targetFreq))
+            return kIOReturnBadArgument;
+        if (targetLen)
+            LOG("directed scan requested: %u-byte SSID, frequency %u MHz, scan busy %u",
+                targetLen, targetFreq, _ns->scanInProgress ? 1U : 0U);
+        /* A background scan cannot satisfy a different directed probe. */
         if (_ns->scanInProgress)
-            return kIOReturnSuccess;
+            return targetLen ? kIOReturnBusy : kIOReturnSuccess;
         _ns->scanCursor = 0;
-        if (link.state != RTW89_GLUE_LINK_DOWN) {
+        if (!targetLen && link.state != RTW89_GLUE_LINK_DOWN) {
             /*
              * Connected: a real scan at most every kConnectedScanGap, the
              * firmware going back to the access point's channel in between
@@ -1145,12 +1156,15 @@ int AirPort_RTW89::nativeRequest(bool isSet, int number, void *data)
             }
             _ns->lastConnectedScan = now;
         }
+        _ns->scanDirected = targetLen != 0;
         _ns->scanInProgress = true;
         IOLockLock(_commandLock);
-        ret = rtw89_glue_scan();
+        ret = targetLen ? rtw89_glue_scan_target(target, targetLen, targetFreq) :
+                          rtw89_glue_scan();
         IOLockUnlock(_commandLock);
         if (ret) {
             _ns->scanInProgress = false;
+            _ns->scanDirected = false;
             return ret == -16 ? kIOReturnBusy : kIOReturnError;
         }
         return kIOReturnSuccess;
@@ -1173,6 +1187,9 @@ int AirPort_RTW89::nativeRequest(bool isSet, int number, void *data)
         if (isSet)
             return kIOReturnUnsupported;
         *out = nullptr;
+        /* Do not satisfy a directed probe with the previous scan cache. */
+        if (_ns->scanInProgress && _ns->scanDirected)
+            return kIOReturnBusy;
         /* hidden networks have no name to show */
         while (rtw89_glue_scan_entry(_ns->scanCursor, &bss, ies, 1024, &len, &beaconInt)) {
             _ns->scanCursor++;

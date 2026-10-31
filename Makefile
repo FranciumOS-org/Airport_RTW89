@@ -232,7 +232,14 @@ saetest:
 	    || { grep -E 'error' $(BUILD_DIR)/log/sae_test_build.log >&2; exit 1; }
 	$(call hostrun,$(SAETEST),,sae_test)
 
-hosttest: link
+.PHONY: scanrequesttest
+scanrequesttest:
+	@mkdir -p $(BUILD_DIR)/out
+	@$(CXX) -std=c++11 -D__IO80211_TARGET=__MAC_13_0 -idirafter $(MKSDK)/Headers \
+	    tools/hosttest/scan_request_test.cpp -o $(BUILD_DIR)/out/scan_request_test
+	@$(BUILD_DIR)/out/scan_request_test
+
+hosttest: link scanrequesttest
 	@cc -c -O1 -g -Wall -o $(BUILD_DIR)/out/host_kernel.o tools/hosttest/host_kernel.c
 	@cc -c -O1 -g -Wall -I$(COMPAT89_DIR) -o $(BUILD_DIR)/out/host_main.o tools/hosttest/host_main.c
 	@$(CC) $(DRIVER_CFLAGS) -MF /dev/null -c tools/hosttest/selftest.c -o $(BUILD_DIR)/out/selftest.o 2> $(BUILD_DIR)/log/hosttest_selftest.log \
