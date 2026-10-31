@@ -121,6 +121,10 @@ bool rtw89_glue_is_up(void);
  * already running, -ENETDOWN if the radio is down.
  */
 int rtw89_glue_scan(void);
+/* Directed scan: a nonempty SSID is probed, freq=0 scans enabled channels.
+ * The target is copied before this call returns. Connected background scan
+ * slicing does not apply to this explicit target. */
+int rtw89_glue_scan_target(const uint8_t *ssid, size_t ssid_len, uint16_t freq);
 bool rtw89_glue_scanning(void);
 
 struct rtw89_glue_bss {

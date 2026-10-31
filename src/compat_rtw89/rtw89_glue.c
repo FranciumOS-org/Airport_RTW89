@@ -1190,6 +1190,21 @@ void rtw89_glue_test_scan_done(void)
     glue_scan_done(NULL, false);
 }
 
+/* Read back the actual request handed to mac80211 in the host harness. */
+size_t rtw89_glue_test_scan_target(uint8_t *out, size_t size, uint16_t *freq)
+{
+    const struct cfg80211_scan_request *req = glue.scan_req ? &glue.scan_req->req : NULL;
+    size_t len;
+    if (!req || req->n_ssids != 1 || !req->n_channels)
+        return 0;
+    len = req->ssids[0].ssid_len;
+    if (out && size >= len)
+        memcpy(out, req->ssids[0].ssid, len);
+    if (freq)
+        *freq = req->channels[0]->center_freq;
+    return len;
+}
+
 /* ... and never misses a beacon. */
 void rtw89_glue_test_beacon_loss(void);
 void rtw89_glue_test_beacon_loss(void)
@@ -1443,7 +1458,7 @@ bool rtw89_glue_scanning(void)
     return glue.scanning;
 }
 
-static int glue_scan_locked(void);
+static int glue_scan_locked(const uint8_t *target, size_t target_len, uint16_t freq);
 
 int rtw89_glue_scan(void)
 {
@@ -1452,12 +1467,26 @@ int rtw89_glue_scan(void)
     if (!glue.active)
         return -ENETDOWN;
     mutex_lock(&glue.cmd_lock);
-    ret = glue_scan_locked();
+    ret = glue_scan_locked(NULL, 0, 0);
     mutex_unlock(&glue.cmd_lock);
     return ret;
 }
 
-static int glue_scan_locked(void)
+int rtw89_glue_scan_target(const uint8_t *ssid, size_t ssid_len, uint16_t freq)
+{
+    int ret;
+
+    if (!ssid || !ssid_len || ssid_len > IEEE80211_MAX_SSID_LEN)
+        return -EINVAL;
+    if (!glue.active)
+        return -ENETDOWN;
+    mutex_lock(&glue.cmd_lock);
+    ret = glue_scan_locked(ssid, ssid_len, freq);
+    mutex_unlock(&glue.cmd_lock);
+    return ret;
+}
+
+static int glue_scan_locked(const uint8_t *target, size_t target_len, uint16_t freq)
 {
     struct rtw89_m80211_local *local;
     struct ieee80211_scan_request *sreq;
@@ -1491,6 +1520,10 @@ static int glue_scan_locked(void)
     req = &sreq->req;
     ssid = (void *)&req->channels[n_channels];
     ies = (u8 *)(ssid + 1);
+    if (target_len) {
+        memcpy(ssid->ssid, target, target_len);
+        ssid->ssid_len = target_len;
+    }
 
     /*
      * Connected, a scan covers the next GLUE_SCAN_SLICE channels only: all of
@@ -1500,13 +1533,15 @@ static int glue_scan_locked(void)
      * as a Mac's own background scans do. Not connected, all of them.
      */
     {
-        bool slice = glue.vif->cfg.assoc;
+        bool slice = glue.vif->cfg.assoc && !target_len;
         unsigned int k = 0, taken = 0, from = slice ? glue.scan_slice_pos : 0;
 
         for (band = 0; band < NUM_NL80211_BANDS; band++) {
             sband = hw->wiphy->bands[band];
             for (i = 0; sband && i < sband->n_channels; i++) {
                 if (!glue_scan_channel(&sband->channels[i]))
+                    continue;
+                if (freq && sband->channels[i].center_freq != freq)
                     continue;
                 if (k++ < from)
                     continue;
@@ -1525,7 +1560,7 @@ static int glue_scan_locked(void)
         }
     }
 
-    req->ssids = ssid;          /* zero length: the wildcard SSID */
+    req->ssids = ssid;          /* wildcard only when no explicit target */
     req->n_ssids = 1;
     req->wiphy = hw->wiphy;
     req->scan_start = jiffies;
@@ -1553,7 +1588,8 @@ static int glue_scan_locked(void)
     if (ret) {
         glue.scanning = false;
     } else {
-        glue.scan_slice_pos = next_slice;
+        if (!target_len)
+            glue.scan_slice_pos = next_slice;
         if (glue.scan_connected)
             glue.scans_connected++;
         /*
@@ -2040,7 +2076,7 @@ static void glue_rejoin_work(struct work_struct *work)
         }
     } else if (!glue.rejoin_scanned) {
         glue.rejoin_scanned = true;
-        if (!glue_scan_locked())
+        if (!glue_scan_locked(NULL, 0, 0))
             goto out;
         /* no scan to be had: try with what was heard before */
     }
