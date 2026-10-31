@@ -32,7 +32,7 @@ struct AirPort_RTW89::NativeState {
     struct apple80211_scan_result scanResult = {};
     unsigned int scanCursor = 0;
     bool scanInProgress = false;
-    bool scanDirected = false;
+    Rtw89ScanCompletion directedScan;
     bool scanBootstrapTried = false;
     uint64_t lastConnectedScan = 0;     /* uptime (ns) of the last scan while connected */
     uint32_t authLower = APPLE80211_AUTHTYPE_OPEN;
@@ -361,7 +361,7 @@ void AirPort_RTW89::nativeEvents()
         UInt32 result = events & kNativeEventScanAborted ? 1 : 0;
 
         _ns->scanInProgress = false;
-        _ns->scanDirected = false;
+        _ns->directedScan.finish(result != 0);
         _ns->scanCursor = 0;
         nativePost(APPLE80211_M_SCAN_DONE, &result, sizeof(result));
     }
@@ -1130,6 +1130,16 @@ int AirPort_RTW89::nativeRequest(bool isSet, int number, void *data)
         if (targetLen)
             LOG("directed scan requested: %u-byte SSID, frequency %u MHz, scan busy %u",
                 targetLen, targetFreq, _ns->scanInProgress ? 1U : 0U);
+        if (_ns->directedScan.reuse(target, targetLen, targetFreq)) {
+            if (targetLen)
+                LOG("directed scan reused: ready %u", _ns->directedScan.ready ? 1U : 0U);
+            _ns->scanCursor = 0;
+            if (_ns->directedScan.ready) {
+                UInt32 result = 0;
+                nativePost(APPLE80211_M_SCAN_DONE, &result, sizeof(result));
+            }
+            return kIOReturnSuccess;
+        }
         /* A background scan cannot satisfy a different directed probe. */
         if (_ns->scanInProgress)
             return targetLen ? kIOReturnBusy : kIOReturnSuccess;
@@ -1156,7 +1166,7 @@ int AirPort_RTW89::nativeRequest(bool isSet, int number, void *data)
             }
             _ns->lastConnectedScan = now;
         }
-        _ns->scanDirected = targetLen != 0;
+        _ns->directedScan.begin(target, targetLen, targetFreq);
         _ns->scanInProgress = true;
         IOLockLock(_commandLock);
         ret = targetLen ? rtw89_glue_scan_target(target, targetLen, targetFreq) :
@@ -1164,7 +1174,7 @@ int AirPort_RTW89::nativeRequest(bool isSet, int number, void *data)
         IOLockUnlock(_commandLock);
         if (ret) {
             _ns->scanInProgress = false;
-            _ns->scanDirected = false;
+            _ns->directedScan.consume();
             return ret == -16 ? kIOReturnBusy : kIOReturnError;
         }
         return kIOReturnSuccess;
@@ -1188,7 +1198,7 @@ int AirPort_RTW89::nativeRequest(bool isSet, int number, void *data)
             return kIOReturnUnsupported;
         *out = nullptr;
         /* Do not satisfy a directed probe with the previous scan cache. */
-        if (_ns->scanInProgress && _ns->scanDirected)
+        if (_ns->directedScan.busy())
             return kIOReturnBusy;
         /* hidden networks have no name to show */
         while (rtw89_glue_scan_entry(_ns->scanCursor, &bss, ies, 1024, &len, &beaconInt)) {
@@ -1221,6 +1231,7 @@ int AirPort_RTW89::nativeRequest(bool isSet, int number, void *data)
             return kIOReturnBusy;
         }
         _ns->scanCursor = 0;
+        _ns->directedScan.consume();
         return 5;       /* the end of the list */
     }
     case APPLE80211_IOC_CURRENT_NETWORK: {

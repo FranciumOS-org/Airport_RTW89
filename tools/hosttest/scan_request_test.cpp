@@ -49,5 +49,23 @@ int main()
     single = {};
     assert(rtw89ScanTarget(APPLE80211_IOC_SCAN_REQ, &single, target, len, freq));
     assert(len == 0 && freq == 0); // ordinary wildcard scan
+    // Reproduce ioctl retry semantics: a Busy result causes another request,
+    // not merely another result read. Neither running nor completed retries
+    // may start a fresh scan before the completed list has been consumed.
+    Rtw89ScanCompletion completion;
+    assert(!completion.reuse(name, sizeof(name), 5745));
+    completion.begin(name, sizeof(name), 5745);
+    assert(completion.busy());
+    assert(completion.reuse(name, sizeof(name), 5745));
+    assert(!completion.reuse(name, sizeof(name), 5180));
+    completion.finish(false);
+    assert(completion.ready && !completion.busy());
+    assert(completion.reuse(name, sizeof(name), 5745));
+    completion.consume();
+    assert(!completion.reuse(name, sizeof(name), 5745));
+    completion.begin(name, sizeof(name), 5745);
+    completion.finish(true);
+    assert(!completion.reuse(name, sizeof(name), 5745) && !completion.busy());
     puts("== native hotspot scan request: SSID bytes and band-specific channel preserved");
+    puts("== directed scan ioctl retry: completed results consumed without rescan loop");
 }

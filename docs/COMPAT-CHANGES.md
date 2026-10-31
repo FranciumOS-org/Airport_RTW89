@@ -33,8 +33,10 @@ Preserve a nonempty SSID from either native scan request format and translate
 a single requested 2.4/5/6 GHz channel into the actual firmware scan. Directed
 scans bypass the connected background throttle and channel slicing, keeping
 regulatory channel checks. While a directed scan runs, report Busy rather than
-returning the old scan cache. A concurrent directed request also returns Busy
-instead of being acknowledged as part of an unrelated scan.
+returning the old scan cache. A different concurrent directed request returns Busy. Identical retries share
+the in-flight scan and retain its completed results until the list is consumed.
+This handles ioctl clients that resubmit SCAN_REQ after a Busy SCAN_RESULT,
+which otherwise start an endless sequence of new scans.
 
 Ordinary wildcard scans retain their throttle and channel slicing; directed
 scans do not advance the background scan cursor. Multi-name background requests

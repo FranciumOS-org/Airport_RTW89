@@ -3,6 +3,33 @@
 #define RTW89_SCAN_TARGET_HPP
 #include <IOKit/80211/apple80211_ioctl.h>
 
+/* Some native ioctl clients retry the scan REQUEST after SCAN_RESULT returns
+ * Busy. Keep a completed directed request until its result list is consumed,
+ * otherwise each retry starts another scan and can never read its results. */
+struct Rtw89ScanCompletion {
+    uint8_t ssid[APPLE80211_MAX_SSID_LEN] = {};
+    uint32_t length = 0;
+    uint16_t frequency = 0;
+    bool pending = false;
+    bool ready = false;
+    bool reuse(const uint8_t *name, uint32_t len, uint16_t freq) const {
+        if (!pending) return false;
+        if (!len) return true; // background readers share the same result list
+        if (!name || len != length || freq != frequency) return false;
+        for (uint32_t i = 0; i < len; i++) if (name[i] != ssid[i]) return false;
+        return true;
+    }
+    void begin(const uint8_t *name, uint32_t len, uint16_t freq) {
+        pending = ready = false;
+        if (!name || !len || len > sizeof(ssid)) return;
+        for (uint32_t i = 0; i < len; i++) ssid[i] = name[i];
+        length = len; frequency = freq; pending = true;
+    }
+    void finish(bool aborted) { if (aborted) consume(); else ready = pending; }
+    void consume() { pending = ready = false; }
+    bool busy() const { return pending && !ready; }
+};
+
 /* Pointers remain valid only while the caller owns the full native payload.
  * The glue copies the target before the request returns. Zero frequency
  * requests a full scan, preserving multi-channel and unspecified requests. */
