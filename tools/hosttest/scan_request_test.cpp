@@ -4,9 +4,42 @@
 #include <cstdio>
 #include <cstring>
 #include "../../src/kext/rtw89_scan_target.hpp"
+#include "../../src/kext/rtw89_scan_ioctl.hpp"
 
-int main()
+int main(int argc, char **argv)
 {
+    // Actual Sequoia ioctl command words captured at the userspace boundary.
+    // The old header constants encode 48 bytes and silently bypassed the
+    // driver's BSD scan bridge, even though the request structure is 40.
+    static_assert(sizeof(apple80211req) == 40, "scan envelope size");
+    assert(SIOCSA80211 == 0x803069c8UL);
+    assert(SIOCGA80211 == 0xc03069c9UL);
+    assert(rtw89ScanSet40(0x802869c8UL, 10));
+    assert(rtw89ScanSet40(0x802869c8UL, 86));
+    assert(rtw89ScanGet40(0xc02869c9UL, 11));
+    assert(!rtw89ScanSet40(0x802869c8UL, APPLE80211_IOC_ASSOCIATE));
+    assert(!rtw89ScanGet40(0xc02869c9UL, APPLE80211_IOC_CIPHER_KEY));
+    assert(!rtw89ScanSet40(0xc02869c9UL, 10));
+    assert(!rtw89ScanGet40(0x802869c8UL, 11));
+    // Wire fixtures use captured offsets, not sizeof/offsetof from the SDK.
+    uint8_t wire[5352] = {};
+    auto word = [](uint8_t *b, size_t offset, uint32_t value) {
+        for (unsigned i = 0; i < 4; i++) b[offset+i] = (uint8_t)(value >> (8*i));
+    };
+    word(wire, 0, 1); word(wire, 4, 3); word(wire, 8, 1);
+    word(wire, 12, 1); word(wire, 16, 8);
+    memcpy(wire+20, "hot\0spot", 8);
+    word(wire, 528, 1); word(wire, 532, 1);
+    word(wire, 536, 149); word(wire, 540, APPLE80211_C_FLAG_5GHZ);
+    apple80211_scan_data normalized = {};
+    assert(rtw89DecodeHostScan(86, wire, sizeof(wire), normalized));
+    assert(normalized.ssid_len == 8 && !memcmp(normalized.ssid, "hot\0spot", 8));
+    assert(normalized.num_channels == 1 && normalized.channels[0].channel == 149);
+    word(wire, 8, 11);
+    assert(!rtw89DecodeHostScan(86, wire, sizeof(wire), normalized));
+    word(wire, 8, 1); word(wire, 528, 1000);
+    assert(!rtw89DecodeHostScan(86, wire, sizeof(wire), normalized));
+    assert(!rtw89DecodeHostScan(86, wire, sizeof(wire)-1, normalized));
     const uint8_t name[] = {'h', 'o', 't', 0, 's', 'p', 'o', 't'};
     const uint8_t *target = nullptr;
     uint32_t len = 0;
@@ -66,6 +99,17 @@ int main()
     completion.begin(name, sizeof(name), 5745);
     completion.finish(true);
     assert(!completion.reuse(name, sizeof(name), 5745) && !completion.busy());
+    if (argc == 2) {
+        uint8_t captured[8192] = {};
+        FILE *f = fopen(argv[1], "rb"); assert(f);
+        size_t n = fread(captured, 1, sizeof(captured), f); fclose(f);
+        assert(n == 5528 && rtw89DecodeHostScan(10, captured, n, normalized));
+        assert(rtw89ScanTarget(10, &normalized, target, len, freq));
+        assert(len == 14 && freq == 5745 && !memcmp(target, captured+20, len));
+        puts("== captured Sequoia hotspot payload replay: target bytes and channel preserved");
+    }
     puts("== native hotspot scan request: SSID bytes and band-specific channel preserved");
     puts("== directed scan ioctl retry: completed results consumed without rescan loop");
+    puts("== Sequoia 40-byte scan ioctl: real command words reach scan bridge only");
+    puts("== Sequoia multiple scan payload: 10 SSID slots and channel offsets validated");
 }

@@ -15,6 +15,7 @@
 #include <IOKit/80211/apple80211_ioctl.h>
 #include <IOKit/80211/apple80211_var.h>
 #include "rtw89_scan_target.hpp"
+#include "rtw89_scan_ioctl.hpp"
 #include <IOKit/IOCatalogue.h>
 #include <IOKit/IOLib.h>
 #include <libkern/version.h>
@@ -26,6 +27,8 @@
 #define LOG(fmt, ...) IOLog("AirPort_RTW89: " fmt "\n", ##__VA_ARGS__)
 
 static_assert(sizeof(struct apple80211_scan_result) == 1164, "scan result layout is not Ventura's");
+static_assert(sizeof(struct apple80211req) == 40 && offsetof(apple80211req, req_data) == 32,
+              "native scan ioctl envelope layout changed");
 
 struct AirPort_RTW89::NativeState {
     struct rtw89_front_ops front = {};
@@ -660,7 +663,8 @@ int AirPort_RTW89::backIoctl(void *ctx, void *interface, void *vif, void *ifnet,
     AirPort_RTW89 *me = static_cast<AirPort_RTW89 *>(ctx);
     struct rtw89_front_ops *front = &me->_ns->front;
     struct apple80211req *req = static_cast<struct apple80211req *>(data);
-    bool isGet = cmd == SIOCGA80211, isSet = cmd == SIOCSA80211;
+    bool isGet = cmd == SIOCGA80211 || (req && rtw89ScanGet40(cmd, (unsigned int)req->req_type));
+    bool isSet = cmd == SIOCSA80211 || (req && rtw89ScanSet40(cmd, (unsigned int)req->req_type));
 
     /* requests can arrive while the front is still attaching the interface,
      * before it has handed over its functions: those are the family's */
@@ -798,7 +802,18 @@ int AirPort_RTW89::backIoctl(void *ctx, void *interface, void *vif, void *ifnet,
     if (!payload)
         return ENOMEM;
     int e = copyin(reqData, payload, len);
-    if (!e)
+    if (!e && rtw89ScanSet40(cmd, reqType)) {
+        Scratch decoded(sizeof(apple80211_scan_data));
+        if (!decoded.p) e = ENOMEM;
+        else {
+            auto &scan = *static_cast<apple80211_scan_data *>(decoded.p);
+            if (!rtw89DecodeHostScan(reqType, payload, len, scan)) e = EINVAL;
+            else {
+                LOG("native scan bridge: command 0x%lx, type %u, wire size %u", cmd, reqType, len);
+                e = errnoOf(me->nativeRequest(true, APPLE80211_IOC_SCAN_REQ, &scan));
+            }
+        }
+    } else if (!e)
         e = errnoOf(me->nativeRequest(true, reqType, payload));
     IOFree(payload, len);
     return e;

@@ -47,3 +47,20 @@ Regression coverage checks native request decoding (including embedded NUL SSID
 bytes and overlapping 2.4/6 GHz channel numbers) and reads back the actual
 cfg80211 scan request in the connected fake-chip harness, checking the target,
 frequency, one-channel scan, invalid inputs, and preserved connection.
+
+## Sequoia scan ioctl wire ABI
+
+Actual IO80211.framework requests on macOS 15.8.1 use 0x802869c8/0xc02869c9
+(40-byte envelopes), while the imported header constants encode 48 bytes.
+Recognize the 40-byte commands only for SCAN_REQ, SCAN_REQ_MULTIPLE and
+SCAN_RESULT so these operations reach the BSD bridge. Association and other
+requests keep their existing family path.
+
+The observed 5528-byte single scan has its channel count/list at 68/72. The
+5352-byte multiple scan has ten SSID slots and channel count/list at 528/532,
+not the SDK's sixteen slots and 768/772. Normalize these explicitly recognized
+wire layouts to the legacy single-target representation before decoding.
+Validate buffer size, version, SSID lengths and channel bounds. Multi-name
+and multi-channel requests retain the previously documented wildcard/full
+scan behavior. Tests cover raw wire fixtures independently of SDK layout,
+plus optional replay of a locally captured hotspot payload (not committed).
